@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/*",
+]
+
+# Vendored `[patch.crates-io]` crates live under patches/ but must not be treated
+# as workspace members (otherwise fmt/clippy/-D warnings would apply to upstream
+# code). Excluding them keeps cargo treating them as plain (cap-lint'd) deps.
+exclude = [
+    "patches/datagram-socket",
+    "patches/tokio-quiche",
+    # Submodule fork of rustls-acme (forks/). Used via a git dependency pinned to
+    # the `ihsin` branch, not as a workspace member; the local checkout is for
+    # reference/editing only. Excluded so cargo doesn't treat it as a member.
+    "forks/rustls-acme",
+]
+
+[workspace.package]
+version = "0.1.1"
+authors = ["proxy-rs"]
+repository = "https://github.com/proxy-rs/wind"
+edition = "2024"
+rust-version = "1.85"
+readme = "README.md"
+description = "Placeholder"
+license = "MIT OR Apache-2.0"
+
+
+[workspace.dependencies]
+# NOTE: the `bbrv3` branch is intentionally pinned in Cargo.lock to the rev
+# ce60e5b5 (the tip *before* the branch was rebased onto a newer upstream quinn).
+# That newer upstream's `quinn-udp` receive-timestamps code (RECVERR cmsg
+# handling) fails to compile on musl targets (a `u32`/`usize` mismatch on
+# `cmsg_len`). Keeping the `branch` spec (rather than a `rev`) lets cargo unify
+# this with `quinn-congestions`, which also depends on the fork via `bbrv3`;
+# `cargo update` on quinn must re-pin with `--precise ce60e5b5...` until the
+# fork's musl build is fixed upstream.
+quinn = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", default-features = false }
+quinn-proto = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", default-features = false }
+quinn-congestions = { git = "https://github.com/proxy-rs/quinn-congestions.git", default-features = false }
+
+# Patch datagram-socket to fix build failure on musl targets with libc >= 0.2.169.
+# libc::msghdr gained private padding fields (__pad1, __pad2) that prevent
+# struct literal construction. Fix from: https://github.com/cloudflare/quiche/pull/2224
+#
+# Pulled into the tree by tokio-quiche (wind-tuiche backend); enabled so musl
+# cross-compilation keeps building.
+[patch.crates-io]
+datagram-socket = { path = "patches/datagram-socket" }
+
+# Patch tokio-quiche so the QUIC backend builds on 32-bit targets. Upstream's
+# GSO path (src/quic/io/gso.rs) transmutes `u128` -> `std::time::Instant` to get
+# the monotonic-clock epoch for SO_TXTIME, which only compiles where `Instant`
+# is 16 bytes (64-bit). The patch replaces it with a portable
+# `clock_gettime(CLOCK_MONOTONIC)`-correlated conversion. Vendored copy of
+# tokio-quiche 0.19.0 with only gso.rs changed.
+tokio-quiche = { path = "patches/tokio-quiche" }
+
+[profile.release]
+opt-level = 3
+debug = 1
+lto = "fat"
+strip = true
+incremental = false
+codegen-units = 1
+
+[profile.fast-release]
+inherits = "release"
+opt-level = 1
+debug = 1
+lto = "thin"
+strip = false
+incremental = true
+codegen-units = 16
