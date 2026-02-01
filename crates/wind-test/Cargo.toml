@@ -19,11 +19,11 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 
 # TLS
 rustls = "0.23"
-rcgen = "0.13"
+rcgen = "0.14"
 
 # Testing
-criterion = "0.4"
-fast-socks5 = "1.0.0-rc.0"
+criterion = "0.8"
+fast-socks5 = "1.0.0"
 eyre = "0.6"
 
 [dev-dependencies]

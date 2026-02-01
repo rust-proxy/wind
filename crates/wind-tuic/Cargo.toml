@@ -29,7 +29,7 @@ wind-core = { version = "0.1.1", path = "../wind-core", features = ["quic"]}
 tokio = { version = "1", default-features = false, features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio"]}
-crossfire = { version = "2", features = ["tokio"] }
+crossfire = { version = "3", features = ["tokio"] }
 
 tokio-stream = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
@@ -62,5 +62,5 @@ tracing = "0.1"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "io-util"] }
 eyre = "0.6"
 color-eyre = { version = "0.6", default-features = false }
-rcgen = "0.13"
+rcgen = "0.14"
 test-log = { version = "0.2", features = ["trace"] }
