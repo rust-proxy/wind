@@ -1,0 +1,13 @@
+# Wind CI Build Target Configuration
+
+[[target]]
+os = "ubuntu-latest"
+target = "x86_64-unknown-linux-gnu"
+release-name = "x86_64-linux"
+skip-test = false
+
+[[target]]
+os = "macos-latest"
+target = "aarch64-apple-darwin"
+release-name = "aarch64-darwin"
+skip-test = false

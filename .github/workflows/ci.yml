@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    uses: rust-proxy/workflows/.github/workflows/rust-build.yml@main
+    with:
+      packages: "wind"
+      run-tests: true
+      only-clippy-tests-on-pr: true
