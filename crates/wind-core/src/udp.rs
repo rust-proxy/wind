@@ -10,8 +10,6 @@ use std::{
 
 use bytes::Bytes;
 use futures::future::poll_fn;
-#[cfg(feature = "quic")]
-pub use quinn::UdpPoller;
 pub use quinn_udp::{EcnCodepoint, RecvMeta as QuinnRecvMeta, Transmit, UdpSocketState};
 // Re-export quinn-udp's RecvMeta directly
 // pub use quinn_udp::RecvMeta;
@@ -19,7 +17,6 @@ use tokio::io::Interest;
 
 use crate::types::TargetAddr;
 
-#[cfg(not(feature = "quic"))]
 pub trait UdpPoller: Send + Sync + Debug + 'static {
 	fn poll_writable(self: Pin<&mut Self>, cx: &mut Context) -> Poll<std::io::Result<()>>;
 }
@@ -31,9 +28,9 @@ pub trait UdpPoller: Send + Sync + Debug + 'static {
 #[derive(Debug, Clone)]
 pub struct RecvMeta {
 	/// The source address of the datagram(s) contained in the buffer
-	pub addr:        SocketAddr,
+	pub addr: SocketAddr,
 	/// The number of bytes the associated buffer has
-	pub len:         usize,
+	pub len: usize,
 	/// The size of a single datagram in the associated buffer
 	///
 	/// When GRO (Generic Receive Offload) is used this indicates the size of a
@@ -41,15 +38,15 @@ pub struct RecvMeta {
 	/// [`len`] is greater then this value, then the individual datagrams
 	/// contained have their boundaries at `stride` increments from the start.
 	/// The last datagram could be smaller than `stride`.
-	pub stride:      usize,
+	pub stride: usize,
 	/// The Explicit Congestion Notification bits for the datagram(s) in the
 	/// buffer
-	pub ecn:         Option<EcnCodepoint>,
+	pub ecn: Option<EcnCodepoint>,
 	/// The destination IP address which was encoded in this datagram
 	///
 	/// Populated on platforms: Windows, Linux, Android (API level > 25),
 	/// FreeBSD, OpenBSD, NetBSD, macOS, and iOS.
-	pub dst_ip:      Option<IpAddr>,
+	pub dst_ip: Option<IpAddr>,
 	/// The destination address that this packet is intended for
 	/// This is our custom field for better packet routing
 	pub destination: Option<TargetAddr>,
@@ -59,11 +56,11 @@ impl Default for RecvMeta {
 	/// Constructs a value with arbitrary fields, intended to be overwritten
 	fn default() -> Self {
 		Self {
-			addr:        SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
-			len:         0,
-			stride:      0,
-			ecn:         None,
-			dst_ip:      None,
+			addr: SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
+			len: 0,
+			stride: 0,
+			ecn: None,
+			dst_ip: None,
 			destination: None,
 		}
 	}
@@ -72,11 +69,11 @@ impl Default for RecvMeta {
 impl From<QuinnRecvMeta> for RecvMeta {
 	fn from(meta: QuinnRecvMeta) -> Self {
 		Self {
-			addr:        meta.addr,
-			len:         meta.len,
-			stride:      meta.stride,
-			ecn:         meta.ecn,
-			dst_ip:      meta.dst_ip,
+			addr: meta.addr,
+			len: meta.len,
+			stride: meta.stride,
+			ecn: meta.ecn,
+			dst_ip: meta.dst_ip,
 			destination: None,
 		}
 	}
@@ -84,8 +81,8 @@ impl From<QuinnRecvMeta> for RecvMeta {
 
 #[derive(Debug, Clone)]
 pub struct UdpPacket {
-	pub source:  Option<TargetAddr>,
-	pub target:  TargetAddr,
+	pub source: Option<TargetAddr>,
+	pub target: TargetAddr,
 	pub payload: Bytes,
 }
 
@@ -130,11 +127,11 @@ pub trait AbstractUdpSocket: Send + Sync {
 	/// Sends data on the socket to the given address.
 	fn poll_send(&self, _cx: &mut Context<'_>, buf: &[u8], target: SocketAddr) -> Poll<IoResult<usize>> {
 		let transmit = Transmit {
-			destination:  target,
-			contents:     buf,
-			ecn:          None,
+			destination: target,
+			contents: buf,
+			ecn: None,
 			segment_size: None,
-			src_ip:       None,
+			src_ip: None,
 		};
 		match self.try_send(&transmit) {
 			Ok(_) => Poll::Ready(Ok(buf.len())),
@@ -150,14 +147,14 @@ pub trait AbstractUdpSocket: Send + Sync {
 
 #[derive(Debug)]
 pub struct TokioUdpSocket {
-	io:    tokio::net::UdpSocket,
+	io: tokio::net::UdpSocket,
 	inner: UdpSocketState,
 }
 impl TokioUdpSocket {
 	pub fn new(sock: std::net::UdpSocket) -> std::io::Result<Self> {
 		Ok(Self {
 			inner: UdpSocketState::new((&sock).into())?,
-			io:    tokio::net::UdpSocket::from_std(sock)?,
+			io: tokio::net::UdpSocket::from_std(sock)?,
 		})
 	}
 }

@@ -22,7 +22,7 @@ mod test {
 	#[test_log::test(tokio::test)]
 	async fn hex_check_auth_encode() -> eyre::Result<()> {
 		let auth_cmd = Command::Auth {
-			uuid:  Uuid::from_u128(0),
+			uuid: Uuid::from_u128(0),
 			token: [1u8; 32],
 		};
 		let mut buf = BytesMut::with_capacity(50);

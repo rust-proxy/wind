@@ -1,9 +1,9 @@
 [package]
 name = "wind-core"
-version.workspace = true
-repository.workspace = true
-edition.workspace = true
-description.workspace = true
+version = "0.1.1"
+repository = "https://github.com/proxy-rs/wind"
+edition = "2024"
+description = "Wind core networking abstractions"
 license = "MIT OR Apache-2.0"
 
 [features]
@@ -15,7 +15,7 @@ pin-project = "1"
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "time", "net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
-quinn = { version = "0.11", default-features = false, optional = true }
+quinn = { workspace = true, default-features = false, optional = true }
 quinn-udp = "0.5"
 
 socket2 = "0.6"

@@ -11,16 +11,16 @@ pub struct CmdCodec(pub CmdType);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
 	Auth {
-		uuid:  uuid::Uuid,
+		uuid: uuid::Uuid,
 		token: [u8; 32],
 	},
 	Connect,
 	Packet {
-		assoc_id:   u16,
-		pkt_id:     u16,
+		assoc_id: u16,
+		pkt_id: u16,
 		frag_total: u8,
-		frag_id:    u8,
-		size:       u16,
+		frag_id: u8,
+		size: u16,
 	},
 	Dissociate {
 		assoc_id: u16,
@@ -54,11 +54,11 @@ impl Decoder for CmdCodec {
 				}
 
 				Ok(Some(Command::Packet {
-					assoc_id:   src.get_u16(),
-					pkt_id:     src.get_u16(),
+					assoc_id: src.get_u16(),
+					pkt_id: src.get_u16(),
 					frag_total: src.get_u8(),
-					frag_id:    src.get_u8(),
-					size:       src.get_u16(),
+					frag_id: src.get_u8(),
+					size: src.get_u16(),
 				}))
 			}
 			CmdType::Dissociate => {
@@ -132,16 +132,16 @@ mod test {
 	async fn test_cmd_1() -> eyre::Result<()> {
 		let vars = vec![
 			Command::Auth {
-				uuid:  Uuid::parse_str("02f09a3f-1624-3b1d-8409-44eff7708208")?,
+				uuid: Uuid::parse_str("02f09a3f-1624-3b1d-8409-44eff7708208")?,
 				token: [1; 32],
 			},
 			Command::Connect,
 			Command::Packet {
-				assoc_id:   123,
-				pkt_id:     123,
+				assoc_id: 123,
+				pkt_id: 123,
 				frag_total: 5,
-				frag_id:    1,
-				size:       8,
+				frag_id: 1,
+				size: 8,
 			},
 			Command::Dissociate { assoc_id: 23 },
 			Command::Heartbeat,
@@ -173,15 +173,15 @@ mod test {
 	async fn test_cmd_2() -> eyre::Result<()> {
 		let vars = vec![
 			Command::Auth {
-				uuid:  Uuid::parse_str("02f09a3f-1624-3b1d-8409-44eff7708208")?,
+				uuid: Uuid::parse_str("02f09a3f-1624-3b1d-8409-44eff7708208")?,
 				token: [1; 32],
 			},
 			Command::Packet {
-				assoc_id:   123,
-				pkt_id:     123,
+				assoc_id: 123,
+				pkt_id: 123,
 				frag_total: 5,
-				frag_id:    1,
-				size:       8,
+				frag_id: 1,
+				size: 8,
 			},
 			Command::Dissociate { assoc_id: 23 },
 		];

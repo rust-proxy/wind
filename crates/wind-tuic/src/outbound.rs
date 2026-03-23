@@ -26,27 +26,27 @@ use crate::{
 };
 
 pub struct TuicOutboundOpts {
-	pub peer_addr:          SocketAddr,
-	pub sni:                String,
-	pub auth:               (Uuid, Arc<[u8]>),
+	pub peer_addr: SocketAddr,
+	pub sni: String,
+	pub auth: (Uuid, Arc<[u8]>),
 	pub zero_rtt_handshake: bool,
-	pub heartbeat:          Duration,
-	pub gc_interval:        Duration,
-	pub gc_lifetime:        Duration,
-	pub skip_cert_verify:   bool,
-	pub alpn:               Vec<String>,
+	pub heartbeat: Duration,
+	pub gc_interval: Duration,
+	pub gc_lifetime: Duration,
+	pub skip_cert_verify: bool,
+	pub alpn: Vec<String>,
 }
 
 pub struct TuicOutbound {
-	pub ctx:               Arc<AppContext>,
-	pub endpoint:          quinn::Endpoint,
-	pub peer_addr:         SocketAddr,
-	pub sni:               String,
-	pub opts:              TuicOutboundOpts,
-	pub connection:        quinn::Connection,
+	pub ctx: Arc<AppContext>,
+	pub endpoint: quinn::Endpoint,
+	pub peer_addr: SocketAddr,
+	pub sni: String,
+	pub opts: TuicOutboundOpts,
+	pub connection: quinn::Connection,
 	pub udp_assoc_counter: AtomicU16,
-	pub token:             CancellationToken,
-	pub udp_session:       Cache<u16, Arc<UdpStream>>,
+	pub token: CancellationToken,
+	pub udp_session: Cache<u16, Arc<UdpStream>>,
 }
 
 impl TuicOutbound {
@@ -70,7 +70,7 @@ impl TuicOutbound {
 			));
 			let mut transport_config = quinn::TransportConfig::default();
 			transport_config
-				.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()))
+				.congestion_controller_factory(Arc::new(quinn::congestion::Bbr3Config::default()))
 				.keep_alive_interval(None);
 
 			client_config.transport_config(Arc::new(transport_config));
@@ -82,7 +82,7 @@ impl TuicOutbound {
 			.map_err(|e| eyre::eyre!("Failed to bind socket to {}: {}", socket_addr, e))?
 			.into_std()?;
 
-		let mut endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(TokioRuntime))?;
+		let endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(TokioRuntime))?;
 		endpoint.set_default_client_config(client_config);
 		let connection = endpoint
 			.connect(peer_addr, &server_name)
@@ -301,7 +301,7 @@ impl AbstractOutbound for TuicOutbound {
 							}
 							Ok(packet) => packet,
 						};
-						
+
 						// Received packet from remote, send to local socket
 						// overrided in socks inbound
 						const UNSPECIFIED_V4: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
@@ -320,7 +320,7 @@ impl AbstractOutbound for TuicOutbound {
 							}
 							Ok(packet) => packet,
 						};
-						
+
 						// Send packet to remote via UDP stream
 						let payload_len = packet.payload.len();
 						if let Err(e) = udp_stream.send_packet(packet).await {
@@ -368,7 +368,7 @@ impl AbstractOutbound for TuicOutbound {
 						}
 						Ok(meta) => meta,
 					};
-					
+
 					// In outbound context, get target address from meta.destination or use meta.addr
 					let target_addr = meta.destination
 						.as_ref()
@@ -450,12 +450,62 @@ impl AbstractOutbound for TuicOutbound {
 			}
 		}
 
-
 		// Clean up the UDP association before exiting
 		if let Err(err) = self.connection.drop_udp(assoc_id).await {
 			info!(target: "[OUT]", "Error dropping UDP association {:#06x}: {}", assoc_id, err);
 		}
 
 		Ok(())
+	}
+}
+
+impl TuicOutbound {
+	pub async fn handle_udp_simple(
+		&self,
+		assoc_id: u16,
+	) -> Result<(crate::simple_udp::SimpleUdpChannel, crate::simple_udp::SimpleUdpChannelTx), Error> {
+		use crate::simple_udp::{SimpleUdpChannel, SimpleUdpPacket};
+		use std::sync::Arc;
+
+		info!(target: "[OUT]", "Creating new UDP association with simple channel: {:#06x}", assoc_id);
+
+		let connection = self.connection.clone();
+		let (channel, channel_tx) = SimpleUdpChannel::new(128);
+
+		// Use crossfire channel compatible with UdpStream
+		let (wind_tx, wind_rx) = crossfire::mpmc::bounded_async::<wind_core::udp::UdpPacket>(128);
+		let udp_stream = Arc::new(UdpStream::new(connection.clone(), assoc_id, wind_tx));
+		self.udp_session.insert(assoc_id, udp_stream.clone()).await;
+
+		let cancel = self.token.child_token();
+		let channel_tx_clone = channel_tx.clone();
+
+		self.ctx.tasks.spawn(async move {
+			loop {
+				tokio::select! {
+					_ = cancel.cancelled() => {
+						break;
+					}
+
+					result = wind_rx.recv() => {
+						let Ok(packet) = result else { break; };
+
+						let target = match &packet.target {
+							wind_core::types::TargetAddr::IPv4(ip, port) => SocketAddr::from((*ip, *port)),
+							wind_core::types::TargetAddr::IPv6(ip, port) => SocketAddr::from((*ip, *port)),
+							_ => continue,
+						};
+
+						let simple_packet = SimpleUdpPacket::new(None, target, packet.payload);
+
+						if let Err(_) = channel_tx_clone.send_from_remote(simple_packet).await {
+							break;
+						}
+					}
+				}
+			}
+		});
+
+		Ok((channel, channel_tx))
 	}
 }

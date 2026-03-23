@@ -1,6 +1,7 @@
 #![feature(error_generic_member_access)]
 
 pub mod proto;
+pub mod simple_udp;
 mod task;
 pub mod tls;
 

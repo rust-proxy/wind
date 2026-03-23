@@ -1,13 +1,13 @@
 [package]
 name = "wind-socks"
-version.workspace = true
-repository.workspace = true
-edition.workspace = true
-description.workspace = true
+version = "0.1.1"
+repository = "https://github.com/proxy-rs/wind"
+edition = "2024"
+description = "Wind SOCKS5 implementation"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-wind-core = { version = "0.1.1", path = "../wind-core"}
+wind-core = { path = "../wind-core"}
 # Async
 tokio = { version = "1", default-features = false, features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec"] }

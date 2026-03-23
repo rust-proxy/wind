@@ -1,9 +1,9 @@
 [package]
 name = "wind-tuic"
-version.workspace = true
-repository.workspace = true
-edition.workspace = true
-description.workspace = true
+version = "0.1.1"
+repository = "https://github.com/proxy-rs/wind"
+edition = "2024"
+description = "Wind TUIC protocol implementation"
 license = "MIT OR Apache-2.0"
 
 [features]
@@ -22,13 +22,13 @@ ring = [
 ]
 
 [dependencies]
-wind-core = { version = "0.1.1", path = "../wind-core", features = ["quic"]}
+wind-core = { path = "../wind-core", features = ["quic"]}
 
 
 # Async
 tokio = { version = "1", default-features = false, features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio"]}
+quinn = { workspace = true, default-features = false, features = ["runtime-tokio", "qlog"] }
 crossfire = { version = "2", features = ["tokio"] }
 
 tokio-stream = "0.1"

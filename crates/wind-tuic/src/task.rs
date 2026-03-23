@@ -39,7 +39,7 @@ where
 						Err(e) => unimplemented!("unhandled error {e:?}"),
 						Ok(item) => item,
 					};
-					
+
 					info!("Accepted new {}", name);
 					if let Err(e) = tx.send_timeout(item, Duration::from_secs(1)).await {
 						unimplemented!("unhandled error {e:?}");

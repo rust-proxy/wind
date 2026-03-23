@@ -7,44 +7,44 @@ use snafu::prelude::*;
 #[snafu(visibility(pub))]
 pub enum ProtoError {
 	VersionDismatch {
-		expect:    u8,
-		current:   u8,
+		expect: u8,
+		current: u8,
 		backtrace: Backtrace,
 	},
 	#[snafu(display("Unknown command type {value}"))]
 	UnknownCommandType {
-		value:     u8,
+		value: u8,
 		backtrace: Backtrace,
 	},
 	#[snafu(display("Unable to decode address due to type {value}"))]
 	UnknownAddressType {
-		value:     u8,
+		value: u8,
 		backtrace: Backtrace,
 	},
 	FailParseDomain {
 		// HEX
-		raw:       String,
-		source:    Utf8Error,
+		raw: String,
+		source: Utf8Error,
 		backtrace: Backtrace,
 	},
 	DomainTooLong {
-		domain:    String,
+		domain: String,
 		backtrace: Backtrace,
 	},
 	// Caller should yield
 	BytesRemaining,
 	Io {
 		// #[snafu(backtrace)]
-		source:    std::io::Error,
+		source: std::io::Error,
 		backtrace: Backtrace,
 	},
 	NumericOverflow {
-		field:     String,
-		num:       String,
+		field: String,
+		num: String,
 		backtrace: Backtrace,
 	},
 	ReadToEnd {
-		source:    ReadToEndError,
+		source: ReadToEndError,
 		backtrace: Backtrace,
 	},
 }
