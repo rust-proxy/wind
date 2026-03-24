@@ -569,7 +569,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 										let reply_packet = wind_core::udp::UdpPacket {
 											source: None,
 											target: source_addr.clone(),
-											payload: bytes::Bytes::copy_from_slice(&buf[..len]),
+											payload: tokio_util::bytes::Bytes::copy_from_slice(&buf[..len]),
 										};
 										let _ = tx_for_recv.send(reply_packet).await;
 									}

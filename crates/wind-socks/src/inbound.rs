@@ -120,7 +120,7 @@ impl SocksInbound {
 						}
 					});
 
-					crate::udp::serve_udp(inbound, serve_stream).await.context(IoSnafu)
+					crate::udp::serve_udp(inbound.into(), serve_stream).await.context(IoSnafu)
 				})
 				.await?;
 			}

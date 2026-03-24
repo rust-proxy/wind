@@ -4,9 +4,9 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use bytes::Bytes;
 use fast_socks5::{new_udp_header, util::target_addr::TargetAddr as SocksTargetAddr};
 use tokio::net::UdpSocket;
+use tokio_util::bytes::Bytes;
 use wind_core::{
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
@@ -24,7 +24,7 @@ fn convert_target_addr(socks_addr: &SocksTargetAddr) -> TargetAddr {
 }
 
 /// Synchronously parse SOCKS5 UDP request header
-fn parse_udp_request_sync(data: &[u8]) -> Result<(u8, SocksTargetAddr, &[u8]), Box<dyn std::error::Error>> {
+fn parse_udp_request_sync(data: &[u8]) -> Result<(u8, SocksTargetAddr, &[u8]), String> {
 	if data.len() < 4 {
 		return Err("Packet too short for SOCKS5 UDP header".into());
 	}

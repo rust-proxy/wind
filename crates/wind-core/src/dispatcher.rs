@@ -6,8 +6,8 @@
 //!
 //! # Design
 //!
-//! * [`Router`] – an **async** trait that inspects the destination and returns a
-//!   [`RouteAction`].  Implementations live in the application crate (e.g.
+//! * [`Router`] – an **async** trait that inspects the destination and returns
+//!   a [`RouteAction`].  Implementations live in the application crate (e.g.
 //!   `tuic-server`) where ACL rules and outbound configs are known.
 //! * [`OutboundAction`] – an **object-safe** trait representing a concrete
 //!   outbound handler (direct, socks5, …).  Handlers are keyed by name string.
