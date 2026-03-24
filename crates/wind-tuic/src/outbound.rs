@@ -479,16 +479,25 @@ impl TuicOutbound {
 
 		let cancel = self.token.child_token();
 		let channel_tx_clone = channel_tx.clone();
+		let udp_session = self.udp_session.clone();
+
+		let mut gc_interval = tokio::time::interval(self.opts.gc_interval);
+		gc_interval.tick().await; // consume the immediate first tick
 
 		self.ctx.tasks.spawn(async move {
 			loop {
 				tokio::select! {
 					_ = cancel.cancelled() => {
+						info!(target: "[OUT]", "UDP simple stream for association {:#06x} cancelled", assoc_id);
 						break;
 					}
 
+					// Remote → caller: forward reassembled packets into the SimpleUdpChannel
 					result = wind_rx.recv() => {
-						let Ok(packet) = result else { break; };
+						let Ok(packet) = result else {
+							warn!(target: "[OUT]", "UDP simple rx channel closed for association {:#06x}", assoc_id);
+							break;
+						};
 
 						let target = match &packet.target {
 							wind_core::types::TargetAddr::IPv4(ip, port) => SocketAddr::from((*ip, *port)),
@@ -498,11 +507,45 @@ impl TuicOutbound {
 
 						let simple_packet = SimpleUdpPacket::new(None, target, packet.payload);
 
-						if let Err(_) = channel_tx_clone.send_from_remote(simple_packet).await {
+						if channel_tx_clone.send_from_remote(simple_packet).await.is_err() {
+							warn!(target: "[OUT]", "SimpleUdpChannel receiver dropped for association {:#06x}, closing", assoc_id);
 							break;
 						}
 					}
+
+					// Caller → remote: forward packets from the SimpleUdpChannelTx into the TUIC connection
+					result = channel_tx_clone.to_remote_rx.recv() => {
+						let Ok(simple_packet) = result else {
+							warn!(target: "[OUT]", "SimpleUdpChannel to_remote channel closed for association {:#06x}", assoc_id);
+							break;
+						};
+
+						let target = wind_core::types::TargetAddr::from(simple_packet.target);
+						let wind_packet = wind_core::udp::UdpPacket {
+							source: None,
+							target,
+							payload: simple_packet.payload,
+						};
+
+						let payload_len = wind_packet.payload.len();
+						if let Err(e) = udp_stream.send_packet(wind_packet).await {
+							warn!(target: "[OUT]", "Failed to send UDP packet to remote (assoc {:#06x}): {}", assoc_id, e);
+						} else {
+							info!(target: "[OUT]", "Sent UDP packet to remote ({} bytes, assoc {:#06x})", payload_len, assoc_id);
+						}
+					}
+
+					// Periodic GC: evict stale fragment reassembly state
+					_ = gc_interval.tick() => {
+						udp_stream.collect_garbage().await;
+					}
 				}
+			}
+
+			// Cleanup: remove from session table and send Dissociate to peer
+			udp_session.remove(&assoc_id).await;
+			if let Err(e) = connection.drop_udp(assoc_id).await {
+				info!(target: "[OUT]", "Error dropping UDP association {:#06x}: {}", assoc_id, e);
 			}
 		});
 
