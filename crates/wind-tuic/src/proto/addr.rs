@@ -38,10 +38,10 @@ pub enum Address {
 #[derive(IntoPrimitive, FromPrimitive, Copy, Clone, Debug, PartialEq)]
 #[repr(u8)]
 pub enum AddressType {
-	None   = u8::MAX,
+	None = u8::MAX,
 	Domain = 0,
-	IPv4   = 1,
-	IPv6   = 2,
+	IPv4 = 1,
+	IPv6 = 2,
 	#[num_enum(catch_all)]
 	Other(u8),
 }
@@ -80,7 +80,12 @@ impl Decoder for AddressCodec {
 		// Parse address type from first byte
 		let addr_type = AddressType::from(src[0]);
 
-		ensure!(!matches!(addr_type, AddressType::Other(_)), UnknownAddressTypeSnafu { value: u8::from(addr_type) });
+		ensure!(
+			!matches!(addr_type, AddressType::Other(_)),
+			UnknownAddressTypeSnafu {
+				value: u8::from(addr_type)
+			}
+		);
 
 		match addr_type {
 			AddressType::None => {

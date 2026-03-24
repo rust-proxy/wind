@@ -15,27 +15,27 @@ pub mod udp;
 pub enum Error {
 	BindSocket {
 		socket_addr: SocketAddr,
-		source:      std::io::Error,
-		backtrace:   Backtrace,
+		source: std::io::Error,
+		backtrace: Backtrace,
 	},
 	Io {
 		// action: String
-		source:    std::io::Error,
+		source: std::io::Error,
 		backtrace: Backtrace,
 	},
 	Socks {
 		#[snafu(provide)]
-		source:    SocksServerError,
+		source: SocksServerError,
 		backtrace: Backtrace,
 	},
 	SocksReply {
 		#[snafu(provide)]
-		source:    ReplyError,
+		source: ReplyError,
 		backtrace: Backtrace,
 	},
 	Callback {
 		#[snafu(provide)]
-		source:    eyre::Report,
+		source: eyre::Report,
 		backtrace: Backtrace,
 	},
 }

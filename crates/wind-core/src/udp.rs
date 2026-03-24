@@ -1,6 +1,7 @@
-use crate::types::TargetAddr;
 use bytes::Bytes;
 use tokio::sync::mpsc;
+
+use crate::types::TargetAddr;
 
 #[derive(Debug, Clone)]
 pub struct UdpPacket {

@@ -542,7 +542,8 @@ async fn handle_udp_packet<C: InboundCallback>(
 ) -> eyre::Result<()> {
 	// TODO: Complete UDP packet handling
 	// Full implementation requires:
-	// 1. Creating a channel-based UDP stream that maps TUIC packets to UDP datagrams
+	// 1. Creating a channel-based UDP stream that maps TUIC packets to UDP
+	//    datagrams
 	// 2. Handling bidirectional packet flow (inbound packets from client, outbound
 	//    packets to client)
 	// 3. Managing UDP sessions per assoc_id

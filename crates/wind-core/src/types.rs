@@ -101,7 +101,6 @@ impl<'de> Deserialize<'de> for TargetAddr {
 	}
 }
 
-
 #[cfg(test)]
 mod tests {
 	use super::*;

@@ -44,7 +44,7 @@ fn udp_bind_random_port(addr: Option<IpAddr>) -> io::Result<Socket> {
 		socket.bind(&sock_addr.into())?;
 		return socket.set_nonblocking(true).map(|_| socket);
 	}
-	
+
 	// Handle None case (trying IPv6 first, then IPv4)
 	const V4_UNSPEC: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 	const V6_UNSPEC: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);

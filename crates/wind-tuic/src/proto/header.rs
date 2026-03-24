@@ -18,11 +18,11 @@ pub struct Header {
 #[derive(IntoPrimitive, FromPrimitive, Copy, Clone, Debug, PartialEq)]
 #[repr(u8)]
 pub enum CmdType {
-	Auth       = 0,
-	Connect    = 1,
-	Packet     = 2,
+	Auth = 0,
+	Connect = 1,
+	Packet = 2,
 	Dissociate = 3,
-	Heartbeat  = 4,
+	Heartbeat = 4,
 	#[num_enum(catch_all)]
 	Other(u8),
 }
@@ -43,11 +43,20 @@ impl Decoder for HeaderCodec {
 			return Ok(None);
 		}
 		let ver = src.get_u8();
-		ensure!(ver == VER, VersionDismatchSnafu { expect: VER, current: ver });
+		ensure!(
+			ver == VER,
+			VersionDismatchSnafu {
+				expect: VER,
+				current: ver
+			}
+		);
 
 		let cmd = CmdType::from(src.get_u8());
 
-		ensure!(!matches!(cmd, CmdType::Other(..)), UnknownCommandTypeSnafu { value: u8::from(cmd) });
+		ensure!(
+			!matches!(cmd, CmdType::Other(..)),
+			UnknownCommandTypeSnafu { value: u8::from(cmd) }
+		);
 
 		Ok(Some(Header::new(cmd)))
 	}

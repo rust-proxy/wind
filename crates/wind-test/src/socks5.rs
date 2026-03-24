@@ -459,9 +459,7 @@ struct TestConfig {
 async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> eyre::Result<()> {
 	use std::collections::HashMap;
 
-	use wind_core::{
-		InboundCallback, inbound::AbstractInbound, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream,
-	};
+	use wind_core::{InboundCallback, inbound::AbstractInbound, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
 
 	// Generate self-signed certificate for testing
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
@@ -539,6 +537,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 	// Helper function to handle UDP direct relay
 	async fn handle_udp_direct(stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
 		use std::{collections::HashMap, sync::Arc};
+
 		use tokio::sync::Mutex;
 
 		let wind_core::udp::UdpStream { tx, mut rx } = stream;
@@ -587,27 +586,6 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 				let _ = target_socket.send_to(&packet.payload, target_key).await;
 			}
 			eyre::Ok::<()>(())
-		});
-
-		Ok(())
-	}
-												Err(_) => break,
-											}
-										}
-									});
-
-									new_sock
-								}
-							};
-
-							// Send to target
-							let _ = target_socket.send_to(data, target_key).await;
-						}
-					}
-					_ => break,
-				}
-			}
-			eyre::Ok(())
 		});
 
 		Ok(())

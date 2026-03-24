@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Iface {
-	pub name:  String,
-	pub ipv4:  Option<Ipv4Addr>,
-	pub ipv6:  Option<Ipv6Addr>,
+	pub name: String,
+	pub ipv4: Option<Ipv4Addr>,
+	pub ipv6: Option<Ipv6Addr>,
 	pub index: u32,
 }
 

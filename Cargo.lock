@@ -2623,6 +2623,7 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "secrecy",
+ "serde",
  "snafu",
  "test-log",
  "tokio",

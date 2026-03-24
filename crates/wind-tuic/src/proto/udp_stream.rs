@@ -27,30 +27,30 @@ fn init_time() -> &'static Instant {
 
 /// Fragment information for reassembly
 struct FragmentInfo {
-	assoc_id:   u16,
-	pkt_id:     u16,
+	assoc_id: u16,
+	pkt_id: u16,
 	frag_total: u8,
-	frag_id:    u8,
-	source:     Option<TargetAddr>,
-	target:     TargetAddr,
+	frag_id: u8,
+	source: Option<TargetAddr>,
+	target: TargetAddr,
 }
 
 pub struct UdpStream {
-	connection:      quinn::Connection,
-	assoc_id:        u16,
-	receive_tx:      MAsyncTx<UdpPacket>,
-	next_pkt_id:     AtomicU16, // Track packet IDs for fragmentation
+	connection: quinn::Connection,
+	assoc_id: u16,
+	receive_tx: MAsyncTx<UdpPacket>,
+	next_pkt_id: AtomicU16, // Track packet IDs for fragmentation
 	// Fragment reassembly state (wrapped in Mutex for interior mutability)
 	fragment_buffer: FragmentReassemblyBuffer,
 }
 
 /// Structure to track fragments of a packet for reassembly
 struct FragmentMetadata {
-	frag_total:   u8,
-	fragments:    Cache<u8, Bytes>,
+	frag_total: u8,
+	fragments: Cache<u8, Bytes>,
 	last_updated: AtomicU64,
-	source:       ArcSwapOption<TargetAddr>,
-	target:       ArcSwap<TargetAddr>,
+	source: ArcSwapOption<TargetAddr>,
+	target: ArcSwap<TargetAddr>,
 }
 
 /// Buffer for reassembling fragmented packets
@@ -218,7 +218,6 @@ impl UdpStream {
 			self.next_pkt_id.fetch_add(1, Ordering::Relaxed);
 			return Ok(());
 		}
-
 
 		self.send_fragmented_packet(packet).await
 	}
@@ -395,7 +394,6 @@ mod tests {
 		}
 	}
 
-
 	/// SPEC.md Section 8.6: Fragmentation Size Calculations
 	#[test]
 	fn test_fragment_count_calculation() {
@@ -489,12 +487,12 @@ mod tests {
 		let result = buffer
 			.add_fragment(
 				FragmentInfo {
-					assoc_id:   1,
-					pkt_id:     100,
+					assoc_id: 1,
+					pkt_id: 100,
 					frag_total: 1,
-					frag_id:    0,
-					source:     None,
-					target:     target.clone(),
+					frag_id: 0,
+					source: None,
+					target: target.clone(),
 				},
 				payload.clone(),
 			)
@@ -518,12 +516,12 @@ mod tests {
 		let result1 = buffer
 			.add_fragment(
 				FragmentInfo {
-					assoc_id:   1,
-					pkt_id:     200,
+					assoc_id: 1,
+					pkt_id: 200,
 					frag_total: 2,
-					frag_id:    0,
-					source:     None,
-					target:     target.clone(),
+					frag_id: 0,
+					source: None,
+					target: target.clone(),
 				},
 				frag1.clone(),
 			)
@@ -534,12 +532,12 @@ mod tests {
 		let result2 = buffer
 			.add_fragment(
 				FragmentInfo {
-					assoc_id:   1,
-					pkt_id:     200,
+					assoc_id: 1,
+					pkt_id: 200,
 					frag_total: 2,
-					frag_id:    1,
-					source:     None,
-					target:     target.clone(),
+					frag_id: 1,
+					source: None,
+					target: target.clone(),
 				},
 				frag2.clone(),
 			)
@@ -565,12 +563,12 @@ mod tests {
 			buffer
 				.add_fragment(
 					FragmentInfo {
-						assoc_id:   1,
-						pkt_id:     300,
+						assoc_id: 1,
+						pkt_id: 300,
 						frag_total: 3,
-						frag_id:    2,
-						source:     None,
-						target:     target.clone(),
+						frag_id: 2,
+						source: None,
+						target: target.clone(),
 					},
 					frag2.clone(),
 				)
@@ -581,12 +579,12 @@ mod tests {
 			buffer
 				.add_fragment(
 					FragmentInfo {
-						assoc_id:   1,
-						pkt_id:     300,
+						assoc_id: 1,
+						pkt_id: 300,
 						frag_total: 3,
-						frag_id:    0,
-						source:     None,
-						target:     target.clone(),
+						frag_id: 0,
+						source: None,
+						target: target.clone(),
 					},
 					frag0.clone(),
 				)
@@ -597,12 +595,12 @@ mod tests {
 		let result = buffer
 			.add_fragment(
 				FragmentInfo {
-					assoc_id:   1,
-					pkt_id:     300,
+					assoc_id: 1,
+					pkt_id: 300,
 					frag_total: 3,
-					frag_id:    1,
-					source:     None,
-					target:     target.clone(),
+					frag_id: 1,
+					source: None,
+					target: target.clone(),
 				},
 				frag1.clone(),
 			)
@@ -623,12 +621,12 @@ mod tests {
 		buffer
 			.add_fragment(
 				FragmentInfo {
-					assoc_id:   1,
-					pkt_id:     100,
+					assoc_id: 1,
+					pkt_id: 100,
 					frag_total: 2,
-					frag_id:    0,
-					source:     None,
-					target:     target.clone(),
+					frag_id: 0,
+					source: None,
+					target: target.clone(),
 				},
 				Bytes::from("A1"),
 			)
@@ -636,12 +634,12 @@ mod tests {
 		buffer
 			.add_fragment(
 				FragmentInfo {
-					assoc_id:   1,
-					pkt_id:     101,
+					assoc_id: 1,
+					pkt_id: 101,
 					frag_total: 2,
-					frag_id:    0,
-					source:     None,
-					target:     target.clone(),
+					frag_id: 0,
+					source: None,
+					target: target.clone(),
 				},
 				Bytes::from("B1"),
 			)
@@ -651,12 +649,12 @@ mod tests {
 		let result1 = buffer
 			.add_fragment(
 				FragmentInfo {
-					assoc_id:   1,
-					pkt_id:     100,
+					assoc_id: 1,
+					pkt_id: 100,
 					frag_total: 2,
-					frag_id:    1,
-					source:     None,
-					target:     target.clone(),
+					frag_id: 1,
+					source: None,
+					target: target.clone(),
 				},
 				Bytes::from("A2"),
 			)
@@ -668,12 +666,12 @@ mod tests {
 		let result2 = buffer
 			.add_fragment(
 				FragmentInfo {
-					assoc_id:   1,
-					pkt_id:     101,
+					assoc_id: 1,
+					pkt_id: 101,
 					frag_total: 2,
-					frag_id:    1,
-					source:     None,
-					target:     target.clone(),
+					frag_id: 1,
+					source: None,
+					target: target.clone(),
 				},
 				Bytes::from("B2"),
 			)
@@ -692,12 +690,12 @@ mod tests {
 		buffer
 			.add_fragment(
 				FragmentInfo {
-					assoc_id:   1,
-					pkt_id:     400,
+					assoc_id: 1,
+					pkt_id: 400,
 					frag_total: 2,
-					frag_id:    0,
-					source:     None,
-					target:     target.clone(),
+					frag_id: 0,
+					source: None,
+					target: target.clone(),
 				},
 				Bytes::from("test"),
 			)

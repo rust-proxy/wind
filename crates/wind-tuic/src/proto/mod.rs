@@ -26,19 +26,22 @@ pub const VER: u8 = 5;
 
 /// Helper function to decode header with better error reporting
 pub fn decode_header(buf: &mut BytesMut, context: &str) -> Result<Header, Error> {
-	HeaderCodec.decode(buf)?
+	HeaderCodec
+		.decode(buf)?
 		.ok_or_else(|| eyre!("Incomplete header in {}", context).into())
 }
 
 /// Helper function to decode command with better error reporting
 pub fn decode_command(cmd_type: CmdType, buf: &mut BytesMut, context: &str) -> Result<Command, Error> {
-	CmdCodec(cmd_type).decode(buf)?
+	CmdCodec(cmd_type)
+		.decode(buf)?
 		.ok_or_else(|| eyre!("Incomplete command in {}", context).into())
 }
 
 /// Helper function to decode address with better error reporting
 pub fn decode_address(buf: &mut BytesMut, context: &str) -> Result<Address, Error> {
-	AddressCodec.decode(buf)?
+	AddressCodec
+		.decode(buf)?
 		.ok_or_else(|| eyre!("Incomplete address in {}", context).into())
 }
 

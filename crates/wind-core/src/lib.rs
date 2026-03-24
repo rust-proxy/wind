@@ -2,12 +2,14 @@
 #![feature(type_alias_impl_trait)]
 #![feature(trait_alias)]
 
+pub mod dispatcher;
 pub mod inbound;
 mod interface;
 pub mod io;
 mod outbound;
 pub mod types;
 
+pub use dispatcher::{Dispatcher, OutboundAction, RouteAction, Router};
 pub use inbound::*;
 pub use interface::*;
 pub use outbound::*;
@@ -17,6 +19,9 @@ pub mod log;
 
 pub mod tcp;
 pub mod udp;
+pub mod utils;
+
+pub use utils::{StackPrefer, is_private_ip};
 
 #[cfg(test)]
 mod udp_tests;

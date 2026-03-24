@@ -2,8 +2,10 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use fast_socks5::{ReplyError, Socks5Command, server::Socks5ServerProtocol, util::target_addr::TargetAddr as SocksTargetAddr};
 use snafu::ResultExt;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::{
+	net::{TcpListener, TcpStream},
+	sync::mpsc,
+};
 use tokio_util::sync::CancellationToken;
 use wind_core::{AbstractInbound, InboundCallback, error, info, types::TargetAddr, udp::UdpStream};
 

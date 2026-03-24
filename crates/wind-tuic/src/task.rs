@@ -15,8 +15,8 @@ const SPSC_BUFFER_SIZE: usize = 16;
 
 type IncomingRx = (AsyncRx<Bytes>, AsyncRx<(SendStream, RecvStream)>, AsyncRx<RecvStream>);
 
-/// Generic helper to spawn a task that handles incoming items from a QUIC connection
-/// and forwards them to a channel
+/// Generic helper to spawn a task that handles incoming items from a QUIC
+/// connection and forwards them to a channel
 async fn spawn_handler<T, F, Fut>(
 	ctx: Arc<AppContext>,
 	connection: quinn::Connection,
@@ -39,7 +39,7 @@ where
 						Err(e) => unimplemented!("unhandled error {e:?}"),
 						Ok(item) => item,
 					};
-					
+
 					info!("Accepted new {}", name);
 					if let Err(e) = tx.send_timeout(item, Duration::from_secs(1)).await {
 						unimplemented!("unhandled error {e:?}");

@@ -17,7 +17,6 @@ mod tests {
 		data
 	}
 
-
 	#[test]
 	fn basic() {
 		let data_len = 1024;
@@ -36,11 +35,11 @@ mod tests {
 			&send.into(),
 			&recv.into(),
 			Transmit {
-				destination:  dst_addr,
-				ecn:          None,
-				contents:     &test_data,
+				destination: dst_addr,
+				ecn: None,
+				contents: &test_data,
 				segment_size: None,
-				src_ip:       None,
+				src_ip: None,
 			},
 		);
 	}
@@ -62,11 +61,11 @@ mod tests {
 			&send.into(),
 			&recv.into(),
 			Transmit {
-				destination:  dst_addr,
-				ecn:          None,
-				contents:     &msg,
+				destination: dst_addr,
+				ecn: None,
+				contents: &msg,
 				segment_size: Some(SEGMENT_SIZE),
-				src_ip:       None,
+				src_ip: None,
 			},
 		);
 	}
@@ -122,11 +121,11 @@ mod tests {
 			&send,
 			&recv,
 			Transmit {
-				destination:  recv.local_addr().unwrap().as_socket().unwrap(),
-				ecn:          None,
-				contents:     b"hello",
+				destination: recv.local_addr().unwrap().as_socket().unwrap(),
+				ecn: None,
+				contents: b"hello",
 				segment_size: None,
-				src_ip:       None,
+				src_ip: None,
 			},
 		);
 	}
