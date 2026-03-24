@@ -3,8 +3,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use fast_socks5::{ReplyError, Socks5Command, server::Socks5ServerProtocol, util::target_addr::TargetAddr as SocksTargetAddr};
 use snafu::ResultExt;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use wind_core::{AbstractInbound, InboundCallback, error, info, types::TargetAddr};
+use wind_core::{AbstractInbound, InboundCallback, error, info, types::TargetAddr, udp::UdpStream};
 
 use crate::{CallbackSnafu, Error, IoSnafu, SocksSnafu};
 
@@ -31,7 +32,7 @@ pub enum AuthMode {
 }
 
 pub struct SocksInbound {
-	opts:   SocksInboundOpt,
+	opts: SocksInboundOpt,
 	cancel: CancellationToken,
 }
 
@@ -52,7 +53,7 @@ impl AbstractInbound for SocksInbound {
 						}
 						Ok(conn) => conn,
 					};
-					
+
 					if let Err(err) = self.handle_income(stream, client_addr, cb).await {
 						error!(target: "[IN] HANDLER" , "{:}", err);
 					}
@@ -97,9 +98,27 @@ impl SocksInbound {
 			Socks5Command::UDPAssociate if self.opts.allow_udp => {
 				let reply_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 				crate::ext::run_udp_proxy(proto, &target_addr, None, reply_ip, move |inbound| async move {
-					// Create a virtual UDP socket that handles SOCKS5 UDP headers
-					let virtual_socket = crate::udp::Socks5UdpSocket::new(inbound.into()).context(IoSnafu)?;
-					cb.handle_udpsocket(virtual_socket).await.context(CallbackSnafu)
+					let (tx_to_out, rx_from_in) = mpsc::channel(100);
+					let (tx_to_in, rx_from_out) = mpsc::channel(100);
+
+					let udp_stream = UdpStream {
+						tx: tx_to_out,
+						rx: rx_from_out,
+					};
+
+					let serve_stream = UdpStream {
+						tx: tx_to_in,
+						rx: rx_from_in,
+					};
+
+					let cb = cb.clone();
+					tokio::spawn(async move {
+						if let Err(e) = cb.handle_udpstream(udp_stream).await {
+							error!(target: "[IN] HANDLER", "UDP association error: {}", e);
+						}
+					});
+
+					crate::udp::serve_udp(inbound, serve_stream).await.context(IoSnafu)
 				})
 				.await?;
 			}

@@ -1,5 +1,4 @@
 use std::{
-	io::IoSliceMut,
 	net::{IpAddr, Ipv4Addr, SocketAddr},
 	sync::{Arc, atomic::AtomicU16},
 	time::Duration,
@@ -15,38 +14,38 @@ use wind_core::{
 	AbstractOutbound, AppContext, info,
 	tcp::AbstractTcpStream,
 	types::TargetAddr,
-	udp::{AbstractUdpSocket, RecvMeta, UdpPacket},
+	udp::{UdpPacket, UdpStream},
 	warn,
 };
 
 use crate::{
 	Error,
-	proto::{ClientProtoExt, UdpStream},
+	proto::{ClientProtoExt, UdpStream as TuicUdpStream},
 	task::ClientTaskExt,
 };
 
 pub struct TuicOutboundOpts {
-	pub peer_addr:          SocketAddr,
-	pub sni:                String,
-	pub auth:               (Uuid, Arc<[u8]>),
+	pub peer_addr: SocketAddr,
+	pub sni: String,
+	pub auth: (Uuid, Arc<[u8]>),
 	pub zero_rtt_handshake: bool,
-	pub heartbeat:          Duration,
-	pub gc_interval:        Duration,
-	pub gc_lifetime:        Duration,
-	pub skip_cert_verify:   bool,
-	pub alpn:               Vec<String>,
+	pub heartbeat: Duration,
+	pub gc_interval: Duration,
+	pub gc_lifetime: Duration,
+	pub skip_cert_verify: bool,
+	pub alpn: Vec<String>,
 }
 
 pub struct TuicOutbound {
-	pub ctx:               Arc<AppContext>,
-	pub endpoint:          quinn::Endpoint,
-	pub peer_addr:         SocketAddr,
-	pub sni:               String,
-	pub opts:              TuicOutboundOpts,
-	pub connection:        quinn::Connection,
+	pub ctx: Arc<AppContext>,
+	pub endpoint: quinn::Endpoint,
+	pub peer_addr: SocketAddr,
+	pub sni: String,
+	pub opts: TuicOutboundOpts,
+	pub connection: quinn::Connection,
 	pub udp_assoc_counter: AtomicU16,
-	pub token:             CancellationToken,
-	pub udp_session:       Cache<u16, Arc<UdpStream>>,
+	pub token: CancellationToken,
+	pub udp_session: Cache<u16, Arc<TuicUdpStream>>,
 }
 
 impl TuicOutbound {
@@ -189,18 +188,13 @@ impl TuicOutbound {
 							let payload = buf.copy_to_bytes(size as usize);
 
 							// Convert address to TargetAddr and handle logging
-							// Note: For fragmented packets, only the first fragment contains the address
-							// Subsequent fragments will have Address::None, which is handled in process_fragment
 							let (target, has_address) = match crate::proto::address_to_target(addr) {
 								Ok(t) => (t, true),
 								Err(_) => {
-									// For non-first fragments (Address::None), use a placeholder address
-									// The actual address will be retrieved from the first fragment during reassembly
 									(TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0), false)
 								}
 							};
 
-							// Log differently for fragments with and without address
 							if has_address {
 								info!(target: "[OUT]", "Received UDP packet: assoc={:#06x}, pkt={}, frag={}/{}, size={}, target={}",
 									assoc_id, pkt_id, frag_id + 1, frag_total, size, target);
@@ -210,26 +204,22 @@ impl TuicOutbound {
 							}
 
 							// Find the corresponding UDP session
-							if let Some(udp_stream) = udp_session.get(&assoc_id).await {
-								// Use process_fragment to handle fragmented packets
-								// This will return Some(packet) when all fragments are received and reassembled
+							if let Some(tuic_udp_stream) = udp_session.get(&assoc_id).await {
 								let complete_packet = if frag_total > 1 {
-									// Fragmented packet - use process_fragment for reassembly
-									udp_stream.process_fragment(assoc_id, pkt_id, frag_total, frag_id, payload, None, target).await
+									tuic_udp_stream.process_fragment(assoc_id, pkt_id, frag_total, frag_id, payload, None, target).await
 								} else {
-									// Single packet (no fragmentation)
 									Some(wind_core::udp::UdpPacket {
-										source: None, // TODO: Add source address tracking
+										source: None,
 										target,
 										payload,
 									})
 								};
 
-							// If we have a complete packet, send it to the receive channel
-							if let Some(packet) = complete_packet
-								&& let Err(e) = udp_stream.receive_packet(packet).await {
+							if let Some(packet) = complete_packet {
+                                if let Err(e) = tuic_udp_stream.receive_packet(packet).await {
 									warn!(target: "[OUT]", "Failed to send packet to UDP session {:#06x}: {}", assoc_id, e);
 								}
+                            }
 						} else {
 								warn!(target: "[OUT]", "Received UDP packet for unknown association {:#06x}", assoc_id);
 							}
@@ -264,7 +254,7 @@ impl AbstractOutbound for TuicOutbound {
 
 	async fn handle_udp(
 		&self,
-		socket: impl AbstractUdpSocket + 'static,
+		client_stream: wind_core::udp::UdpStream,
 		_dialer: Option<impl AbstractOutbound>,
 	) -> eyre::Result<()> {
 		use std::sync::atomic::Ordering;
@@ -274,17 +264,18 @@ impl AbstractOutbound for TuicOutbound {
 		let assoc_id = self.udp_assoc_counter.fetch_add(1, Ordering::SeqCst);
 		info!(target: "[OUT]", "Creating new UDP association: {:#06x}", assoc_id);
 
-		let socket = Arc::new(socket);
 		let connection = self.connection.clone();
-		let (send_tx, send_rx) = crossfire::mpmc::bounded_async::<UdpPacket>(128);
 		let (receive_tx, receive_rx) = crossfire::mpmc::bounded_async(128);
-		let udp_stream = Arc::new(UdpStream::new(connection.clone(), assoc_id, receive_tx));
-		self.udp_session.insert(assoc_id, udp_stream.clone()).await;
+		let tuic_stream = Arc::new(crate::proto::UdpStream::new(connection.clone(), assoc_id, receive_tx));
+		self.udp_session.insert(assoc_id, tuic_stream.clone()).await;
 		let cancel_stream = cancel.clone();
-		let socket_clone = socket.clone();
 
 		let mut gc_interval = tokio::time::interval(self.opts.gc_interval);
 		gc_interval.tick().await;
+
+		let mut client_rx = client_stream.rx;
+		let client_tx = client_stream.tx;
+
 		self.ctx.tasks.spawn(async move {
 			loop {
 				tokio::select! {
@@ -301,29 +292,27 @@ impl AbstractOutbound for TuicOutbound {
 							}
 							Ok(packet) => packet,
 						};
-						
-						// Received packet from remote, send to local socket
-						// overrided in socks inbound
-						const UNSPECIFIED_V4: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-						if let Err(e) = socket_clone.send(&packet.payload, UNSPECIFIED_V4).await {
+
+						if let Err(e) = client_tx.send(packet).await {
 							warn!(target: "[OUT]", "Failed to send UDP packet to local socket (assoc {:#06x}): {:?}", assoc_id, e);
+							break;
 						} else {
-							info!(target: "[OUT]", "Received UDP packet forward to local ({} bytes, assoc {:#06x})", packet.payload.len(), assoc_id);
+							info!(target: "[OUT]", "Received UDP packet forward to local (assoc {:#06x})", assoc_id);
 						}
 					}
 					// send queue
-					packet = send_rx.recv() => {
+					packet = client_rx.recv() => {
 						let packet = match packet {
-							Err(e) => {
-								warn!(target: "[OUT]", "Error receiving packet from channel for association {:#06x}: {}", assoc_id, e);
+							None => {
+								warn!(target: "[OUT]", "Error receiving packet from channel for association {:#06x}: channel closed", assoc_id);
 								break;
 							}
-							Ok(packet) => packet,
+							Some(packet) => packet,
 						};
-						
+
 						// Send packet to remote via UDP stream
 						let payload_len = packet.payload.len();
-						if let Err(e) = udp_stream.send_packet(packet).await {
+						if let Err(e) = tuic_stream.send_packet(packet).await {
 							warn!(target: "[OUT]", "Failed to send UDP packet to remote (assoc {:#06x}): {}", assoc_id, e);
 						} else {
 							info!(target: "[OUT]", "Sent UDP packet to remote ({} bytes, assoc {:#06x})", payload_len, assoc_id);
@@ -331,109 +320,8 @@ impl AbstractOutbound for TuicOutbound {
 					}
 					_ = gc_interval.tick() => {
 						// Perform garbage collection of expired fragments
-						udp_stream.collect_garbage().await;
+						tuic_stream.collect_garbage().await;
 					}
-				}
-			}
-			eyre::Ok(())
-		});
-
-		// Spawn task to continuously read from local socket and send to remote
-		self.ctx.tasks.spawn(async move {
-			let mut buf = vec![0u8; u16::MAX as usize];
-
-			loop {
-				tokio::select! {
-					_ = cancel.cancelled() => {
-						info!(target: "[OUT]", "UDP session {:#06x} cancelled", assoc_id);
-						break;
-					}
-
-					result = async {
-						let mut meta = RecvMeta::default();
-						let result = socket
-							.recv(
-								&mut [IoSliceMut::new(&mut buf)],
-								std::slice::from_mut(&mut meta),
-							)
-							.await?;
-						ensure!(result == 1, "Expected to receive 1 datagram, got {}", result);
-
-					eyre::Ok(meta)
-				} => {
-					let meta = match result {
-						Err(e) => {
-							warn!(target: "[OUT]", "Error receiving from UDP socket (assoc {:#06x}): {}", assoc_id, e);
-							break;
-						}
-						Ok(meta) => meta,
-					};
-					
-					// In outbound context, get target address from meta.destination or use meta.addr
-					let target_addr = meta.destination
-						.as_ref()
-						.map(|dest| match dest {
-							TargetAddr::IPv4(ip, port) => SocketAddr::from((*ip, *port)),
-							TargetAddr::IPv6(ip, port) => SocketAddr::from((*ip, *port)),
-							TargetAddr::Domain(_, _) => {
-								warn!(target: "[OUT]", "Cannot convert domain to SocketAddr, using meta.addr for association {:#06x}", assoc_id);
-								meta.addr
-							}
-						})
-						.unwrap_or(meta.addr);
-
-					let total_len = meta.len;
-
-					// Convert SocketAddr to TargetAddr using From trait
-					let target = TargetAddr::from(target_addr);
-
-					// Handle GRO (Generic Receive Offload): stride indicates segment size
-					// If stride > 0, the buffer contains multiple segments of that size
-					let stride = meta.stride;
-
-					if stride > 0 && total_len > stride {
-						// Multiple segments received via GRO, send each separately
-						let num_segments = total_len.div_ceil(stride);
-						info!(target: "[OUT]", "Received {} GRO segments ({} bytes total, stride {}) for assoc {:#06x}",
-							num_segments, total_len, stride, assoc_id);
-						for segment_idx in 0..num_segments {
-							let segment_start = segment_idx * stride;
-							let segment_end = std::cmp::min(segment_start + stride, total_len);
-
-							let payload = bytes::Bytes::copy_from_slice(&buf[segment_start..segment_end]);
-
-							// Create UdpPacket and send via channel
-							let packet = wind_core::udp::UdpPacket {
-								source: None, // TODO: Add source address tracking
-								target: target.clone(),
-								payload,
-							};
-
-							if let Err(_e) = send_tx.send(packet).await {
-								warn!(target: "[OUT]", "Failed to send UDP segment {}/{} to channel for association {:#06x}: channel closed",
-									segment_idx + 1, num_segments, assoc_id);
-								break;
-							}
-						}
-					} else {
-						// Single packet (no GRO or single segment)
-						let payload = bytes::Bytes::copy_from_slice(&buf[..total_len]);
-
-						info!(target: "[OUT]", "Sending UDP packet to {}: {} bytes (assoc {:#06x})", target, total_len, assoc_id);
-
-						// Create UdpPacket and send via channel
-						let packet = wind_core::udp::UdpPacket {
-							source: None, // TODO: Add source address tracking
-							target,
-							payload,
-						};
-
-						if let Err(_e) = send_tx.send(packet).await {
-							warn!(target: "[OUT]", "Failed to send UDP packet to channel for association {:#06x}: channel closed", assoc_id);
-							break;
-						}
-					}
-				}
 				}
 			}
 			eyre::Ok(())
@@ -449,7 +337,6 @@ impl AbstractOutbound for TuicOutbound {
 				_ = cancel_healthy.cancelled() => break,
 			}
 		}
-
 
 		// Clean up the UDP association before exiting
 		if let Err(err) = self.connection.drop_udp(assoc_id).await {

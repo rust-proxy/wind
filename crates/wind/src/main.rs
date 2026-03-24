@@ -4,7 +4,7 @@ use clap::Parser as _;
 use tracing::Level;
 use wind_core::{
 	AbstractOutbound, AppContext, InboundCallback, inbound::AbstractInbound, info, tcp::AbstractTcpStream, types::TargetAddr,
-	udp::AbstractUdpSocket,
+	udp::UdpStream,
 };
 use wind_socks::inbound::SocksInbound;
 use wind_tuic::outbound::TuicOutbound;
@@ -21,7 +21,7 @@ mod log;
 
 #[derive(Clone)]
 struct Manager {
-	inbound:  Arc<SocksInbound>,
+	inbound: Arc<SocksInbound>,
 	outbound: Arc<TuicOutbound>,
 }
 
@@ -32,9 +32,9 @@ impl InboundCallback for Manager {
 		Ok(())
 	}
 
-	async fn handle_udpsocket(&self, socket: impl AbstractUdpSocket + 'static) -> eyre::Result<()> {
+	async fn handle_udpstream(&self, stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
 		info!(target: "[UDP-IN] START","UDP association started");
-		self.outbound.handle_udp(socket, None::<Outbounds>).await?;
+		self.outbound.handle_udp(stream, None::<Outbounds>).await?;
 		Ok(())
 	}
 }
@@ -56,11 +56,11 @@ impl AbstractOutbound for Outbounds {
 
 	fn handle_udp(
 		&self,
-		socket: impl AbstractUdpSocket + 'static,
+		udp_stream: wind_core::udp::UdpStream,
 		via: Option<impl AbstractOutbound + Sized + Send>,
-	) -> impl Future<Output = eyre::Result<()>> + Send {
+	) -> impl std::future::Future<Output = eyre::Result<()>> + Send {
 		match &self {
-			Outbounds::Tuic(tuic_outbound) => tuic_outbound.handle_udp(socket, via),
+			Outbounds::Tuic(tuic_outbound) => tuic_outbound.handle_udp(udp_stream, via),
 		}
 	}
 }

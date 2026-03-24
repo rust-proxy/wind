@@ -138,8 +138,8 @@ impl Default for TuicInboundOpts {
 /// TUIC inbound server
 pub struct TuicInbound {
 	pub ctx: Arc<AppContext>,
-	opts:    TuicInboundOpts,
-	cancel:  CancellationToken,
+	opts: TuicInboundOpts,
+	cancel: CancellationToken,
 }
 
 impl TuicInbound {
@@ -243,16 +243,16 @@ impl AbstractInbound for TuicInbound {
 
 /// Represents an authenticated connection
 struct InboundCtx {
-	conn:         quinn::Connection,
-	uuid:         Arc<RwLock<Option<Uuid>>>,
-	users:        HashMap<Uuid, String>,
+	conn: quinn::Connection,
+	uuid: Arc<RwLock<Option<Uuid>>>,
+	users: HashMap<Uuid, String>,
 	udp_sessions: Arc<RwLock<HashMap<u16, UdpSession>>>,
 }
 
 /// UDP session tracking
 #[allow(dead_code)]
 struct UdpSession {
-	assoc_id:  u16,
+	assoc_id: u16,
 	// Track packet fragments if needed
 	fragments: Cache<u16, Vec<u8>>,
 }
@@ -323,7 +323,7 @@ async fn handle_connection<C: InboundCallback>(
 					}
 					Ok(recv) => recv,
 				};
-				
+
 				let conn = connection.clone();
 				if let Err(e) = handle_uni_stream(conn, recv, callback).await {
 					error!("Uni stream error: {:?}", e);
@@ -338,7 +338,7 @@ async fn handle_connection<C: InboundCallback>(
 					}
 					Ok(streams) => streams,
 				};
-				
+
 				let conn = connection.clone();
 				if let Err(e) = handle_bi_stream(conn, send, recv, callback).await {
 					error!("Bi stream error: {:?}", e);
@@ -353,7 +353,7 @@ async fn handle_connection<C: InboundCallback>(
 					}
 					Ok(datagram) => datagram,
 				};
-				
+
 				let conn = connection.clone();
 				if let Err(e) = handle_datagram(conn, datagram, callback).await {
 					error!("Datagram error: {:?}", e);
@@ -390,7 +390,7 @@ async fn handle_uni_stream<C: InboundCallback>(
 			// Decode address
 			let addr = crate::proto::decode_address(&mut buf, "uni stream packet")?;
 			let payload = buf.split_to(size as usize).freeze();
-			
+
 			// Convert address to TargetAddr using helper function
 			let target_addr = crate::proto::address_to_target(addr)?;
 			handle_udp_packet(&ctx, assoc_id, target_addr, payload, callback).await?;
@@ -491,7 +491,7 @@ async fn handle_datagram<C: InboundCallback>(
 			if let Command::Packet { assoc_id, size, .. } = cmd {
 				let addr = crate::proto::decode_address(&mut buf, "datagram packet")?;
 				let payload = buf.split_to(size as usize).freeze();
-				
+
 				// Convert address to TargetAddr using helper function
 				let target_addr = crate::proto::address_to_target(addr)?;
 				handle_udp_packet(&connection, assoc_id, target_addr, payload, callback).await?;
@@ -542,7 +542,7 @@ async fn handle_udp_packet<C: InboundCallback>(
 ) -> eyre::Result<()> {
 	// TODO: Complete UDP packet handling
 	// Full implementation requires:
-	// 1. Creating a virtual UDP socket that maps TUIC packets to UDP datagrams
+	// 1. Creating a channel-based UDP stream that maps TUIC packets to UDP datagrams
 	// 2. Handling bidirectional packet flow (inbound packets from client, outbound
 	//    packets to client)
 	// 3. Managing UDP sessions per assoc_id
@@ -555,10 +555,9 @@ async fn handle_udp_packet<C: InboundCallback>(
 		target_addr,
 		payload.len()
 	);
-	// callback.handle_udpsocket(socket)
-	// The proper implementation would involve creating a TuicUdpSocket similar to
-	// Socks5UdpSocket that implements AbstractUdpSocket and handles the packet
-	// translation
+	// callback.handle_udpstream(stream)
+	// The proper implementation would involve creating a TuicUdpStream that
+	// uses channel-based UdpPacket for communication
 	warn!("UDP relay not yet fully implemented - packet received but not forwarded");
 	Ok(())
 }

@@ -11,9 +11,7 @@ use tokio::{
 	time::timeout,
 };
 use uuid::Uuid;
-use wind_core::{
-	AbstractInbound, AppContext, InboundCallback, tcp::AbstractTcpStream, types::TargetAddr, udp::AbstractUdpSocket,
-};
+use wind_core::{AbstractInbound, AppContext, InboundCallback, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
 use wind_tuic::{
 	inbound::{TuicInbound, TuicInboundOpts},
 	outbound::{TuicOutbound, TuicOutboundOpts},
@@ -48,7 +46,7 @@ impl InboundCallback for DirectCallback {
 		Ok(())
 	}
 
-	async fn handle_udpsocket(&self, _socket: impl AbstractUdpSocket + 'static) -> eyre::Result<()> {
+	async fn handle_udpstream(&self, _stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
 		// UDP handling - forward packets to actual targets
 		// TODO: Implement UDP relay
 		Ok(())
@@ -115,7 +113,6 @@ async fn test_tuic_tcp_proxy() -> eyre::Result<()> {
 	};
 	let ctx = Arc::new(AppContext::default());
 
-
 	let server = TuicInbound::new(ctx.clone(), server_opts);
 
 	tracing::info!("✓ TUIC server will listen on {}", actual_server_addr);
@@ -131,15 +128,15 @@ async fn test_tuic_tcp_proxy() -> eyre::Result<()> {
 
 	// Setup TUIC client (outbound)
 	let client_opts = TuicOutboundOpts {
-		peer_addr:          actual_server_addr,
-		sni:                "localhost".to_string(),
-		auth:               (user_uuid, Arc::from(password.as_bytes())),
+		peer_addr: actual_server_addr,
+		sni: "localhost".to_string(),
+		auth: (user_uuid, Arc::from(password.as_bytes())),
 		zero_rtt_handshake: false,
-		heartbeat:          Duration::from_secs(3),
-		gc_interval:        Duration::from_secs(3),
-		gc_lifetime:        Duration::from_secs(15),
-		skip_cert_verify:   true,
-		alpn:               vec!["h3".to_string()],
+		heartbeat: Duration::from_secs(3),
+		gc_interval: Duration::from_secs(3),
+		gc_lifetime: Duration::from_secs(15),
+		skip_cert_verify: true,
+		alpn: vec!["h3".to_string()],
 	};
 
 	tracing::info!("✓ Connecting TUIC client to server...");
@@ -251,15 +248,15 @@ async fn test_tuic_udp_proxy() -> eyre::Result<()> {
 	// Setup TUIC client (outbound)
 	let ctx = Arc::new(AppContext::default());
 	let client_opts = TuicOutboundOpts {
-		peer_addr:          actual_server_addr,
-		sni:                "localhost".to_string(),
-		auth:               (user_uuid, Arc::from(password.as_bytes())),
+		peer_addr: actual_server_addr,
+		sni: "localhost".to_string(),
+		auth: (user_uuid, Arc::from(password.as_bytes())),
 		zero_rtt_handshake: false,
-		heartbeat:          Duration::from_secs(3),
-		gc_interval:        Duration::from_secs(3),
-		gc_lifetime:        Duration::from_secs(15),
-		skip_cert_verify:   true,
-		alpn:               vec!["h3".to_string()],
+		heartbeat: Duration::from_secs(3),
+		gc_interval: Duration::from_secs(3),
+		gc_lifetime: Duration::from_secs(15),
+		skip_cert_verify: true,
+		alpn: vec!["h3".to_string()],
 	};
 
 	tracing::info!("✓ Connecting TUIC client to server...");
@@ -354,15 +351,15 @@ async fn test_tuic_connection_and_auth() -> eyre::Result<()> {
 	tracing::info!("\n--- Testing Successful Authentication ---");
 	let ctx = Arc::new(AppContext::default());
 	let client_opts = TuicOutboundOpts {
-		peer_addr:          server_addr,
-		sni:                "localhost".to_string(),
-		auth:               (user_uuid, Arc::from(password.as_bytes())),
+		peer_addr: server_addr,
+		sni: "localhost".to_string(),
+		auth: (user_uuid, Arc::from(password.as_bytes())),
 		zero_rtt_handshake: false,
-		heartbeat:          Duration::from_secs(3),
-		gc_interval:        Duration::from_secs(3),
-		gc_lifetime:        Duration::from_secs(15),
-		skip_cert_verify:   true,
-		alpn:               vec!["h3".to_string()],
+		heartbeat: Duration::from_secs(3),
+		gc_interval: Duration::from_secs(3),
+		gc_lifetime: Duration::from_secs(15),
+		skip_cert_verify: true,
+		alpn: vec!["h3".to_string()],
 	};
 
 	let client = TuicOutbound::new(ctx.clone(), client_opts).await;
@@ -373,15 +370,15 @@ async fn test_tuic_connection_and_auth() -> eyre::Result<()> {
 	tracing::info!("\n--- Testing Failed Authentication (Wrong Password) ---");
 	let ctx2 = Arc::new(AppContext::default());
 	let bad_client_opts = TuicOutboundOpts {
-		peer_addr:          server_addr,
-		sni:                "localhost".to_string(),
-		auth:               (user_uuid, Arc::from(b"wrong_password".to_vec())),
+		peer_addr: server_addr,
+		sni: "localhost".to_string(),
+		auth: (user_uuid, Arc::from(b"wrong_password".to_vec())),
 		zero_rtt_handshake: false,
-		heartbeat:          Duration::from_secs(3),
-		gc_interval:        Duration::from_secs(3),
-		gc_lifetime:        Duration::from_secs(15),
-		skip_cert_verify:   true,
-		alpn:               vec!["h3".to_string()],
+		heartbeat: Duration::from_secs(3),
+		gc_interval: Duration::from_secs(3),
+		gc_lifetime: Duration::from_secs(15),
+		skip_cert_verify: true,
+		alpn: vec!["h3".to_string()],
 	};
 
 	// Create client but don't verify connection yet

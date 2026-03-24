@@ -1,4 +1,4 @@
-use crate::{tcp::AbstractTcpStream, types::TargetAddr, udp::AbstractUdpSocket};
+use crate::{tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
 
 pub trait FutResult<T> = Future<Output = eyre::Result<T>> + Send + Sync;
 
@@ -9,5 +9,5 @@ pub trait AbstractInbound {
 
 pub trait InboundCallback: Send + Sync + Clone + 'static {
 	fn handle_tcpstream(&self, target_addr: TargetAddr, stream: impl AbstractTcpStream) -> impl FutResult<()>;
-	fn handle_udpsocket(&self, socket: impl AbstractUdpSocket + 'static) -> impl FutResult<()>;
+	fn handle_udpstream(&self, udp_stream: UdpStream) -> impl FutResult<()>;
 }

@@ -17,7 +17,7 @@ use wind_socks::inbound::AuthMode;
 #[educe(Default)]
 pub struct PersistentConfig {
 	pub socks_opt: SocksOpt,
-	pub tuic_opt:  TuicOpt,
+	pub tuic_opt: TuicOpt,
 }
 
 #[derive(Debug, Deserialize, Serialize, Educe)]

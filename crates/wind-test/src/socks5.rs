@@ -430,9 +430,9 @@ async fn start_test_proxy(socks_port: u16) -> eyre::Result<(Arc<wind_core::AppCo
 		socks_opt: SocksInboundOpt {
 			listen_addr: format!("127.0.0.1:{}", socks_port).parse()?,
 			public_addr: None,
-			auth:        wind_socks::inbound::AuthMode::NoAuth,
-			skip_auth:   false,
-			allow_udp:   true,
+			auth: wind_socks::inbound::AuthMode::NoAuth,
+			skip_auth: false,
+			allow_udp: true,
 		},
 		tuic_port: 0, // Let OS assign a port
 	};
@@ -460,7 +460,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 	use std::collections::HashMap;
 
 	use wind_core::{
-		InboundCallback, inbound::AbstractInbound, tcp::AbstractTcpStream, types::TargetAddr, udp::AbstractUdpSocket,
+		InboundCallback, inbound::AbstractInbound, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream,
 	};
 
 	// Generate self-signed certificate for testing
@@ -491,7 +491,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 	#[derive(Clone)]
 	struct TestManager {
 		socks_inbound: Arc<wind_socks::inbound::SocksInbound>,
-		tuic_inbound:  Arc<wind_tuic::inbound::TuicInbound>,
+		tuic_inbound: Arc<wind_tuic::inbound::TuicInbound>,
 	}
 
 	impl InboundCallback for TestManager {
@@ -501,9 +501,9 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 			Ok(())
 		}
 
-		async fn handle_udpsocket(&self, socket: impl AbstractUdpSocket + 'static) -> eyre::Result<()> {
+		async fn handle_udpstream(&self, stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
 			// Direct UDP relay
-			handle_udp_direct(socket).await?;
+			handle_udp_direct(stream).await?;
 			Ok(())
 		}
 	}
@@ -537,70 +537,60 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 	}
 
 	// Helper function to handle UDP direct relay
-	async fn handle_udp_direct(socket: impl AbstractUdpSocket + 'static) -> eyre::Result<()> {
-		use std::{collections::HashMap, io::IoSliceMut, sync::Arc};
-
+	async fn handle_udp_direct(stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
+		use std::{collections::HashMap, sync::Arc};
 		use tokio::sync::Mutex;
-		use wind_core::udp::RecvMeta;
 
-		// Use Arc<Mutex> to share the socket across tasks
-		let socket = Arc::new(socket);
+		let wind_core::udp::UdpStream { tx, mut rx } = stream;
 		let target_sockets: Arc<Mutex<HashMap<String, Arc<tokio::net::UdpSocket>>>> = Arc::new(Mutex::new(HashMap::new()));
-
-		// Spawn task to relay packets from inbound to targets
-		let socket_clone = socket.clone();
 		let target_sockets_clone = target_sockets.clone();
+
 		tokio::spawn(async move {
-			let mut bufs = vec![vec![0u8; 65536]];
-			let mut meta = vec![RecvMeta::default()];
+			while let Some(packet) = rx.recv().await {
+				let target_key = packet.target.to_string();
 
-			loop {
-				let mut io_slices: Vec<IoSliceMut> = bufs.iter_mut().map(|b| IoSliceMut::new(b)).collect();
+				// Get or create target socket
+				let target_socket = {
+					let mut sockets = target_sockets_clone.lock().await;
+					if let Some(sock) = sockets.get(&target_key) {
+						sock.clone()
+					} else {
+						let new_sock = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap());
+						sockets.insert(target_key.clone(), new_sock.clone());
 
-				match socket_clone.recv(&mut io_slices, &mut meta).await {
-					Ok(count) if count > 0 => {
-						for i in 0..count {
-							let recv_meta = &meta[i];
-							let data = &bufs[i][..recv_meta.len];
+						// Spawn receive task for this target
+						let tx_for_recv = tx.clone();
+						let target_sock_for_recv = new_sock.clone();
+						let source_addr = packet.target.clone();
+						tokio::spawn(async move {
+							let mut buf = vec![0u8; 65536];
+							loop {
+								match target_sock_for_recv.recv_from(&mut buf).await {
+									Ok((len, _from)) => {
+										let reply_packet = wind_core::udp::UdpPacket {
+											source: None,
+											target: source_addr.clone(),
+											payload: bytes::Bytes::copy_from_slice(&buf[..len]),
+										};
+										let _ = tx_for_recv.send(reply_packet).await;
+									}
+									Err(_) => break,
+								}
+							}
+						});
 
-							// Determine target address
-							let target_addr = if let Some(dest) = &recv_meta.destination {
-								dest.clone()
-							} else {
-								// If no destination, skip this packet
-								continue;
-							};
+						new_sock
+					}
+				};
 
-							let target_key = target_addr.to_string();
+				// Send to target
+				let _ = target_socket.send_to(&packet.payload, target_key).await;
+			}
+			eyre::Ok::<()>(())
+		});
 
-							// Get or create target socket
-							let target_socket = {
-								let mut sockets = target_sockets_clone.lock().await;
-								if let Some(sock) = sockets.get(&target_key) {
-									sock.clone()
-								} else {
-									let new_sock = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap());
-									sockets.insert(target_key.clone(), new_sock.clone());
-
-									// Spawn receive task for this target
-									let socket_for_recv = socket_clone.clone();
-									let target_sock_for_recv = new_sock.clone();
-									let source_addr = recv_meta.addr;
-									tokio::spawn(async move {
-										let mut buf = vec![0u8; 65536];
-										loop {
-											match target_sock_for_recv.recv_from(&mut buf).await {
-												Ok((len, _from)) => {
-													use wind_core::udp::Transmit;
-													let transmit = Transmit {
-														destination:  source_addr,
-														contents:     &buf[..len],
-														ecn:          None,
-														segment_size: None,
-														src_ip:       None,
-													};
-													let _ = socket_for_recv.try_send(&transmit);
-												}
+		Ok(())
+	}
 												Err(_) => break,
 											}
 										}
@@ -629,7 +619,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 
 	let manager = Arc::new(TestManager {
 		socks_inbound: socks_inbound.clone(),
-		tuic_inbound:  tuic_inbound.clone(),
+		tuic_inbound: tuic_inbound.clone(),
 	});
 
 	// Start TUIC inbound listening task
