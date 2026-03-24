@@ -6,7 +6,29 @@ edition.workspace = true
 description.workspace = true
 license = "MIT OR Apache-2.0"
 
-[dependencies]
-tokio = { version = "*", default-features = false }
+[features]
+default = ["quic"]
+quic = ["quinn"]
 
-serde = { version = "*", features = ["derive"] }
+[dependencies]
+pin-project = "1"
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "time", "net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+quinn = { version = "0.11", default-features = false, optional = true }
+
+socket2 = "0.6"
+
+serde = { version = "1", features = ["derive"] }
+
+futures = "0.3"
+bytes = "1"
+eyre = "0.6"
+pin-project-lite = "0.2"
+
+tracing = "0.1"
+const-str = "0.7"
+rand = "0.9"
+
+[dev-dependencies]
+serde_json = "1"
