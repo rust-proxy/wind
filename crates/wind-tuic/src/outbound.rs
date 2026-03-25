@@ -3,10 +3,11 @@ use std::{
 	sync::{Arc, atomic::AtomicU16},
 	time::Duration,
 };
-use quinn_congestions::bbr::BbrConfig;
+
 use eyre::ensure;
 use moka::future::Cache;
 use quinn::TokioRuntime;
+use quinn_congestions::bbr::BbrConfig;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
