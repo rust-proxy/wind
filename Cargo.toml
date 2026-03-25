@@ -11,3 +11,9 @@ repository = "https://github.com/proxy-rs/wind"
 edition = "2024"
 description = "Placeholder"
 license = "MIT OR Apache-2.0"
+
+
+[workspace.dependencies]
+quinn = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", default-features = false }
+quinn-proto = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", default-features = false }
+quinn-congestions = { git = "https://github.com/proxy-rs/quinn-congestions.git", default-features = false }

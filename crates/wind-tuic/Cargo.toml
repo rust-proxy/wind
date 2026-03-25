@@ -14,7 +14,8 @@ server = ["decode"]
 client = ["encode"]
 aws-lc-rs = [
     "rustls/aws-lc-rs",
-    "quinn/rustls-aws-lc-rs"
+    "quinn/rustls-aws-lc-rs",
+    "aws-lc-rs/prebuilt-nasm"
 ]
 ring = [
     "rustls/ring",
@@ -24,11 +25,14 @@ ring = [
 [dependencies]
 wind-core = { version = "0.1.1", path = "../wind-core", features = ["quic"]}
 
-
 # Async
 tokio = { version = "1", default-features = false, features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio"]}
+
+quinn = { workspace = true, default-features = false, features = ["runtime-tokio"]}
+quinn-congestions = { workspace = true }
+
+aws-lc-rs = { version = "*", optional = true, default-features = false }
 crossfire = { version = "2", features = ["tokio"] }
 
 tokio-stream = "0.1"

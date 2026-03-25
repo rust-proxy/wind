@@ -116,7 +116,7 @@ impl FragmentReassemblyBuffer {
 		meta.value().fragments.run_pending_tasks().await;
 
 		// Check if all fragments have been received
-		if meta.value().fragments.entry_count() == meta.value().frag_total.into() {
+		if meta.value().fragments.entry_count() == meta.value().frag_total as u64 {
 			// All fragments received, reassemble the packet
 			return self.reassemble_packet(key).await;
 		}

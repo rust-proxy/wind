@@ -3,7 +3,7 @@ use std::{
 	sync::{Arc, atomic::AtomicU16},
 	time::Duration,
 };
-
+use quinn_congestions::bbr::BbrConfig;
 use eyre::ensure;
 use moka::future::Cache;
 use quinn::TokioRuntime;
@@ -69,7 +69,7 @@ impl TuicOutbound {
 			));
 			let mut transport_config = quinn::TransportConfig::default();
 			transport_config
-				.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()))
+				.congestion_controller_factory(Arc::new(BbrConfig::default()))
 				.keep_alive_interval(None);
 
 			client_config.transport_config(Arc::new(transport_config));
