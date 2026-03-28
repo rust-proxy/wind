@@ -6,6 +6,17 @@ use tokio::{
 	net::{TcpStream, UdpSocket},
 };
 
+#[ctor::ctor]
+fn setup_crypto() {
+	#[cfg(feature = "aws-lc-rs")]
+	{
+		_ = rustls::crypto::aws_lc_rs::default_provider().install_default()
+	}
+	#[cfg(feature = "ring")]
+	{
+		_ = rustls::crypto::ring::default_provider().install_default()
+	}
+}
 // =============================================================================
 // Public API - Direct Connection Tests (no proxy)
 // =============================================================================
@@ -94,16 +105,18 @@ pub async fn test_socks5_tcp(proxy_addr: &str, target_host: &str, target_port: u
 	println!("✓ Response received: {} bytes", bytes_read);
 
 	// Parse and print response headers
-	if bytes_read > 0 {
-		let preview_len = std::cmp::min(500, bytes_read);
-		if let Ok(text) = String::from_utf8(response[..preview_len].to_vec()) {
-			println!("\n--- Response Preview (first {} bytes) ---", preview_len);
-			for line in text.lines().take(15) {
-				println!("{}", line);
-			}
-			if bytes_read > preview_len {
-				println!("... ({} bytes truncated)", bytes_read - preview_len);
-			}
+	if bytes_read == 0 {
+		return Err(eyre::eyre!("TCP proxy test failed: received zero bytes from target"));
+	}
+
+	let preview_len = std::cmp::min(500, bytes_read);
+	if let Ok(text) = String::from_utf8(response[..preview_len].to_vec()) {
+		println!("\n--- Response Preview (first {} bytes) ---", preview_len);
+		for line in text.lines().take(15) {
+			println!("{}", line);
+		}
+		if bytes_read > preview_len {
+			println!("... ({} bytes truncated)", bytes_read - preview_len);
 		}
 	}
 
@@ -162,27 +175,20 @@ pub async fn test_socks5_udp(proxy_addr: &str, target_host: &str, target_port: u
 		Ok(Ok((len, _from_addr))) => {
 			println!("✓ Response received: {} bytes", len);
 
-			let dns_response = &buffer[..len];
+			let response = &buffer[..len];
 
-			// Parse DNS response
-			if dns_response.len() >= 12 {
-				let flags = u16::from_be_bytes([dns_response[2], dns_response[3]]);
-				let questions = u16::from_be_bytes([dns_response[4], dns_response[5]]);
-				let answers = u16::from_be_bytes([dns_response[6], dns_response[7]]);
-				let authorities = u16::from_be_bytes([dns_response[8], dns_response[9]]);
-				let additional = u16::from_be_bytes([dns_response[10], dns_response[11]]);
-
-				println!("\n--- DNS Response Details ---");
-				println!("  Response code: {}", flags & 0x0F);
-				println!("  Questions: {}", questions);
-				println!("  Answers: {}", answers);
-				println!("  Authorities: {}", authorities);
-				println!("  Additional: {}", additional);
-
-				if (flags & 0x0F) == 0 && answers > 0 {
-					println!("  ✓ DNS query successful!");
-				}
+			// Verify the response is an echo of what we sent
+			if response.len() != dns_query.len() {
+				return Err(eyre::eyre!(
+					"UDP echo failed: sent {} bytes but received {} bytes",
+					dns_query.len(),
+					response.len()
+				));
 			}
+			if response != dns_query.as_slice() {
+				return Err(eyre::eyre!("UDP echo failed: received bytes do not match sent bytes"));
+			}
+			println!("  ✓ UDP round-trip verified (echo matched)");
 		}
 		Ok(Err(e)) => {
 			return Err(eyre::eyre!("UDP receive error: {}", e));
@@ -193,6 +199,7 @@ pub async fn test_socks5_udp(proxy_addr: &str, target_host: &str, target_port: u
 			println!("  - The SOCKS5 server doesn't support UDP ASSOCIATE");
 			println!("  - The target server is not responding");
 			println!("  - Firewall blocking UDP packets");
+			return Err(eyre::eyre!("UDP response timeout (5 seconds)"));
 		}
 	}
 
@@ -419,7 +426,8 @@ pub async fn test_socks5_udp_large_packet(
 /// TUIC server needed).
 ///
 /// Returns the AppContext and server task handle
-#[allow(dead_code)]
+
+#[cfg(test)]
 async fn start_test_proxy(socks_port: u16) -> eyre::Result<(Arc<wind_core::AppContext>, tokio::task::JoinHandle<()>)> {
 	use wind_socks::inbound::SocksInboundOpt;
 
@@ -440,7 +448,7 @@ async fn start_test_proxy(socks_port: u16) -> eyre::Result<(Arc<wind_core::AppCo
 	let ctx_clone = ctx.clone();
 	let server_handle = tokio::spawn(async move {
 		if let Err(e) = run_test_proxy(ctx_clone.clone(), config).await {
-			eprintln!("Server error: {}", e);
+			panic!("Server error: {}", e);
 		}
 	});
 
@@ -449,13 +457,12 @@ async fn start_test_proxy(socks_port: u16) -> eyre::Result<(Arc<wind_core::AppCo
 
 	Ok((ctx, server_handle))
 }
-
-#[allow(dead_code)]
+#[cfg(test)]
 struct TestConfig {
 	socks_opt: wind_socks::inbound::SocksInboundOpt,
 	tuic_port: u16,
 }
-
+#[cfg(test)]
 async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> eyre::Result<()> {
 	use std::collections::HashMap;
 
@@ -571,7 +578,9 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 											target: source_addr.clone(),
 											payload: tokio_util::bytes::Bytes::copy_from_slice(&buf[..len]),
 										};
-										let _ = tx_for_recv.send(reply_packet).await;
+										if let Err(e) = tx_for_recv.send(reply_packet).await {
+											eprintln!("UDP relay: failed to send reply packet: {}", e);
+										}
 									}
 									Err(_) => break,
 								}
@@ -583,7 +592,9 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 				};
 
 				// Send to target
-				let _ = target_socket.send_to(&packet.payload, target_key).await;
+				if let Err(e) = target_socket.send_to(&packet.payload, target_key).await {
+					eprintln!("UDP relay: failed to send to target: {}", e);
+				}
 			}
 			eyre::Ok::<()>(())
 		});
@@ -1126,7 +1137,7 @@ mod tests {
 						// Cleanup proxy server
 						ctx.token.cancel();
 						let _ = tokio::time::timeout(Duration::from_secs(5), ctx.tasks.wait()).await;
-						return;
+						panic!("UDP ASSOCIATE command not supported by SOCKS5 server");
 					}
 					println!("⚠ Packet size {} bytes: FAILED - {}", size, e);
 					panic!("Test failed for packet size {} bytes: {}", size, e);

@@ -439,13 +439,11 @@ async fn handle_bi_stream<C: InboundCallback>(
 			// Decode command (Connect has no additional fields)
 			let _cmd = crate::proto::decode_command(CmdType::Connect, &mut BytesMut::new(), "bi stream")?;
 
-			// Read address
-			let addr_data = recv
-				.read_to_end(512)
+			// Read exactly the address bytes, leaving the relay payload in `recv`
+			// so that the same stream can be used for bidirectional data relay.
+			let addr = read_address_exact(&mut recv)
 				.await
-				.map_err(|e| eyre::eyre!("Failed to read address: {}", e))?;
-			let mut addr_buf = BytesMut::from(&addr_data[..]);
-			let addr = crate::proto::decode_address(&mut addr_buf, "bi stream")?;
+				.wrap_err("Failed to read connect address")?;
 
 			// Convert address to TargetAddr using helper function
 			let target_addr = crate::proto::address_to_target(addr)?;
@@ -561,6 +559,63 @@ async fn handle_udp_packet<C: InboundCallback>(
 	// uses channel-based UdpPacket for communication
 	warn!("UDP relay not yet fully implemented - packet received but not forwarded");
 	Ok(())
+}
+
+/// Read exactly the bytes for one TUIC address from a Quinn receive stream.
+///
+/// Unlike `read_to_end`, this function reads only as many bytes as the address
+/// encoding requires, so the remaining bytes in `recv` are available as relay
+/// payload after the address has been decoded.
+async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate::proto::Address> {
+	// Read address type byte first to determine how many more bytes are needed.
+	let mut type_byte = [0u8; 1];
+	recv.read_exact(&mut type_byte)
+		.await
+		.map_err(|e| eyre::eyre!("Failed to read address type: {}", e))?;
+
+	let mut buf = BytesMut::with_capacity(20);
+	buf.extend_from_slice(&type_byte);
+
+	match type_byte[0] {
+		0xFF => {
+			// AddressType::None — just the single type byte
+		}
+		0x01 => {
+			// AddressType::IPv4 — 4-byte address + 2-byte port
+			let mut rest = [0u8; 6];
+			recv.read_exact(&mut rest)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read IPv4 address: {}", e))?;
+			buf.extend_from_slice(&rest);
+		}
+		0x02 => {
+			// AddressType::IPv6 — 16-byte address + 2-byte port
+			let mut rest = [0u8; 18];
+			recv.read_exact(&mut rest)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read IPv6 address: {}", e))?;
+			buf.extend_from_slice(&rest);
+		}
+		0x00 => {
+			// AddressType::Domain — 1-byte length + <length> bytes + 2-byte port
+			let mut len_byte = [0u8; 1];
+			recv.read_exact(&mut len_byte)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read domain length: {}", e))?;
+			buf.extend_from_slice(&len_byte);
+			let domain_len = len_byte[0] as usize;
+			let mut rest = vec![0u8; domain_len + 2];
+			recv.read_exact(&mut rest)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read domain address: {}", e))?;
+			buf.extend_from_slice(&rest);
+		}
+		t => {
+			return Err(eyre::eyre!("Unknown address type byte 0x{:02x}", t));
+		}
+	}
+
+	crate::proto::decode_address(&mut buf, "bi stream connect")
 }
 
 /// Handle UDP dissociate

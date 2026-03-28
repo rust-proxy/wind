@@ -6,10 +6,22 @@ edition.workspace = true
 description.workspace = true
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["aws-lc-rs"]
+aws-lc-rs = [
+    "rustls/aws-lc-rs",
+    "aws-lc-rs/prebuilt-nasm"
+]
+ring = [
+    "rustls/ring",
+]
+
 [dependencies]
 wind-core = { version = "0.1.1", path = "../wind-core"}
 wind-socks = { version = "0.1.1", path = "../wind-socks"}
 wind-tuic = { version = "0.1.1", path = "../wind-tuic"}
+
+ctor = "0.6"
 
 # Async
 tokio = { version = "1", default-features = false, features = ["net"] }
@@ -17,9 +29,11 @@ tokio-util = { version = "0.7", features = ["codec"] }
 tokio-stream = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
+
 # TLS
 rustls = "0.23"
 rcgen = "0.13"
+aws-lc-rs = { version = "*", optional = true, default-features = false }
 
 # Testing
 criterion = "0.4"
@@ -27,7 +41,8 @@ fast-socks5 = "1.0.0-rc.0"
 eyre = "0.6"
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "io-util", "net"] }
+uuid = { version = "1", features = ["v4"] }
 
 
 [[bench]]

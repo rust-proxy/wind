@@ -1,4 +1,5 @@
 pub mod socks5;
+pub mod tuic;
 
 pub mod benches {
 	use std::sync::Arc;
