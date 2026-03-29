@@ -13,9 +13,10 @@ use figment::{
 };
 use figment_json5::Json5;
 use rand::{RngExt, distr::Alphanumeric, rng};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::{level_filters::LevelFilter, warn};
 use uuid::Uuid;
+use wind_core::rule::Rule;
 
 #[cfg(test)]
 use crate::acl::{AclAddress, AclPorts};
@@ -124,10 +125,18 @@ pub struct Config {
 	#[serde(default)]
 	pub outbound: OutboundConfig,
 
-	/// Access Control List rules
+	/// Access Control List rules (legacy format)
 	#[serde(default, deserialize_with = "crate::acl::deserialize_acl")]
 	#[educe(Default(expression = Vec::new()))]
 	pub acl: Vec<AclRule>,
+
+	/// Metacubex-style routing rules (evaluated after ACL rules).
+	///
+	/// Each entry is a string such as `"DOMAIN-SUFFIX,google.com,proxy"`.
+	/// See [`wind_core::rule::Rule`] for the full list of supported types.
+	#[serde(default, deserialize_with = "deserialize_rules", serialize_with = "serialize_rules")]
+	#[educe(Default(expression = Vec::new()))]
+	pub rules: Vec<wind_core::rule::Rule>,
 
 	pub experimental: ExperimentalConfig,
 
@@ -313,6 +322,85 @@ pub struct ExperimentalConfig {
 	pub drop_loopback: bool,
 	#[educe(Default = true)]
 	pub drop_private: bool,
+}
+
+// ============================================================================
+// Serde helpers for wind_core::rule::Rule
+// ============================================================================
+
+/// Serialize `Vec<Rule>` as an array of strings.
+fn serialize_rules<S>(rules: &[Rule], serializer: S) -> Result<S::Ok, S::Error>
+where
+	S: Serializer,
+{
+	use serde::ser::SerializeSeq;
+	let mut seq = serializer.serialize_seq(Some(rules.len()))?;
+	for rule in rules {
+		seq.serialize_element(&rule.to_string())?;
+	}
+	seq.end()
+}
+
+/// Deserialize the `rules` field which may be either:
+///   * an array of strings (each a Metacubex-style rule line)
+///   * a single multiline string with one rule per line
+fn deserialize_rules<'de, D>(deserializer: D) -> Result<Vec<Rule>, D::Error>
+where
+	D: Deserializer<'de>,
+{
+	use serde::de::{self, Visitor};
+
+	struct RulesVisitor;
+
+	impl<'de> Visitor<'de> for RulesVisitor {
+		type Value = Vec<Rule>;
+
+		fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+			f.write_str("an array of rule strings or a multiline string")
+		}
+
+		fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+		where
+			A: de::SeqAccess<'de>,
+		{
+			let mut rules = Vec::new();
+			while let Some(line) = seq.next_element::<String>()? {
+				match Rule::parse(&line) {
+					Ok(rule) => rules.push(rule),
+					Err(wind_core::rule::RuleParseError::EmptyOrComment) => {}
+					Err(e) => return Err(de::Error::custom(format!("invalid rule '{}': {}", line, e))),
+				}
+			}
+			Ok(rules)
+		}
+
+		fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+		where
+			E: de::Error,
+		{
+			let mut rules = Vec::new();
+			for line in v.lines() {
+				let line = line.trim();
+				if line.is_empty() || line.starts_with('#') {
+					continue;
+				}
+				match Rule::parse(line) {
+					Ok(rule) => rules.push(rule),
+					Err(e) => return Err(de::Error::custom(format!("invalid rule '{}': {}", line, e))),
+				}
+			}
+			Ok(rules)
+		}
+
+		fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+		where
+			E: de::Error,
+		{
+			self.visit_str(&v)
+		}
+	}
+
+	deserializer.deserialize_any(RulesVisitor)
 }
 
 fn generate_random_alphanumeric_string(min: usize, max: usize) -> String {
@@ -1542,5 +1630,124 @@ mod tests {
 
 		// Should succeed because inference will detect TOML
 		assert!(result.is_ok());
+	}
+
+	// ====================================================================
+	// Metacubex-style rules tests
+	// ====================================================================
+
+	#[tokio::test]
+	async fn test_rules_parsing() {
+		let config = include_str!("../tests/config/rules_parsing.toml");
+
+		let result = test_parse_config(config, ".toml").await.unwrap();
+
+		assert_eq!(result.rules.len(), 8);
+
+		// DOMAIN,ad.example.com,REJECT
+		assert_eq!(result.rules[0].to_string(), "DOMAIN,ad.example.com,REJECT");
+		assert_eq!(result.rules[0].target, "REJECT");
+
+		// DOMAIN-SUFFIX,google.com,proxy
+		assert_eq!(result.rules[1].to_string(), "DOMAIN-SUFFIX,google.com,proxy");
+
+		// DOMAIN-KEYWORD,track,reject
+		assert_eq!(result.rules[2].target, "reject");
+
+		// IP-CIDR,10.0.0.0/8,direct,no-resolve
+		assert_eq!(result.rules[3].target, "direct");
+		assert!(result.rules[3].no_resolve());
+
+		// IP-CIDR6,fc00::/7,direct
+		assert_eq!(result.rules[4].to_string(), "IP-CIDR6,fc00::/7,direct");
+
+		// DST-PORT,443,proxy
+		assert_eq!(result.rules[5].to_string(), "DST-PORT,443,proxy");
+
+		// NETWORK,udp,direct
+		assert_eq!(result.rules[6].to_string(), "NETWORK,udp,direct");
+
+		// MATCH,proxy
+		assert_eq!(result.rules[7].to_string(), "MATCH,proxy");
+	}
+
+	#[tokio::test]
+	async fn test_rules_empty() {
+		let config = include_str!("../tests/config/rules_empty.toml");
+
+		let result = test_parse_config(config, ".toml").await.unwrap();
+		assert_eq!(result.rules.len(), 0);
+	}
+
+	#[tokio::test]
+	async fn test_rules_default_when_omitted() {
+		// When rules field is not specified, it should default to empty
+		let config = include_str!("../tests/config/default_values.toml");
+
+		let result = test_parse_config(config, ".toml").await.unwrap();
+		assert_eq!(result.rules.len(), 0);
+	}
+
+	#[tokio::test]
+	async fn test_rules_coexist_with_acl() {
+		let config = include_str!("../tests/config/rules_with_acl.toml");
+
+		let result = test_parse_config(config, ".toml").await.unwrap();
+
+		// Legacy ACL rules
+		assert_eq!(result.acl.len(), 2);
+		assert_eq!(result.acl[0].outbound, "reject");
+		assert_eq!(result.acl[0].addr, AclAddress::Private);
+		assert_eq!(result.acl[1].outbound, "allow");
+		assert_eq!(result.acl[1].addr, AclAddress::Localhost);
+
+		// New Metacubex rules
+		assert_eq!(result.rules.len(), 2);
+		assert_eq!(result.rules[0].to_string(), "DOMAIN-SUFFIX,ads.example.com,reject");
+		assert_eq!(result.rules[1].to_string(), "MATCH,proxy");
+	}
+
+	#[tokio::test]
+	async fn test_rules_serialize_roundtrip() {
+		let config = include_str!("../tests/config/rules_parsing.toml");
+
+		let result = test_parse_config(config, ".toml").await.unwrap();
+
+		// Serialize to TOML string and verify rules appear as strings
+		let serialized = toml::to_string_pretty(&result).unwrap();
+		assert!(serialized.contains("DOMAIN,ad.example.com,REJECT"), "serialized:\n{serialized}");
+		assert!(serialized.contains("MATCH,proxy"), "serialized:\n{serialized}");
+		assert!(serialized.contains("IP-CIDR,10.0.0.0/8,direct,no-resolve"), "serialized:\n{serialized}");
+
+		// Verify the serialized form is a string array
+		assert!(serialized.contains(r#""DOMAIN,ad.example.com,REJECT""#), "rules should be serialized as quoted strings");
+	}
+
+	#[tokio::test]
+	async fn test_rules_invalid_rule_string() {
+		let temp_dir = tempdir().unwrap();
+		let config_path = temp_dir.path().join("config.toml");
+
+		let bad_config = r#"
+[users]
+"123e4567-e89b-12d3-a456-426614174000" = "password"
+
+[tls]
+self_sign = true
+
+rules = ["INVALID_TYPE,value,target"]
+"#;
+
+		fs::write(&config_path, bad_config).unwrap();
+
+		let cli = Cli::try_parse_from(vec![
+			"test_binary",
+			"--config",
+			&config_path.to_string_lossy(),
+		])
+		.unwrap();
+
+		let result = parse_config(cli, EnvState::default()).await;
+		assert!(result.is_err());
 	}
 }

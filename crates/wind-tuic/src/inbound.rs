@@ -13,7 +13,6 @@ use std::{
 
 use bytes::BytesMut;
 use eyre::{Context, ContextCompat};
-use moka::future::Cache;
 use quinn::{Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime, TransportConfig, VarInt};
 use rustls::{
 	ServerConfig as RustlsServerConfig,
@@ -21,11 +20,14 @@ use rustls::{
 };
 use tokio::{
 	io::{AsyncRead, AsyncWrite},
-	sync::{Notify, RwLock},
+	sync::{Notify, RwLock, mpsc},
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-use wind_core::{AbstractInbound, AppContext, InboundCallback, error, info, warn};
+use wind_core::{
+	AbstractInbound, AppContext, InboundCallback, error, info, warn,
+	udp::{UdpPacket, UdpStream as CoreUdpStream},
+};
 
 use crate::proto::{CmdType, Command};
 
@@ -242,11 +244,9 @@ struct InboundCtx {
 }
 
 /// UDP session tracking
-#[allow(dead_code)]
 struct UdpSession {
-	assoc_id: u16,
-	// Track packet fragments if needed
-	fragments: Cache<u16, Vec<u8>>,
+	/// Protocol stream for fragment reassembly and sending responses back via QUIC
+	tuic_stream: Arc<crate::proto::UdpStream>,
 }
 
 async fn handle_connection<C: InboundCallback>(
@@ -388,14 +388,17 @@ async fn handle_uni_stream<C: InboundCallback>(
 		Command::Auth { uuid, token } => {
 			handle_auth(&ctx, uuid, token).await?;
 		}
-		Command::Packet { assoc_id, size, .. } => {
-			// Decode address
+		Command::Packet { assoc_id, pkt_id, frag_total, frag_id, size } => {
+			// Decode address (may be Address::None for non-first fragments)
 			let addr = crate::proto::decode_address(&mut buf, "uni stream packet")?;
 			let payload = buf.split_to(size as usize).freeze();
 
-			// Convert address to TargetAddr using helper function
-			let target_addr = crate::proto::address_to_target(addr)?;
-			handle_udp_packet(&ctx, assoc_id, target_addr, payload, &callback).await?;
+			// Convert address to TargetAddr, using placeholder for non-first fragments
+			let target_addr = match crate::proto::address_to_target(addr) {
+				Ok(t) => t,
+				Err(_) => wind_core::types::TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
+			};
+			handle_udp_packet(&ctx, assoc_id, pkt_id, frag_total, frag_id, target_addr, payload, &callback).await?;
 		}
 		Command::Dissociate { assoc_id } => {
 			handle_dissociate(&ctx, assoc_id).await?;
@@ -500,13 +503,16 @@ async fn handle_datagram<C: InboundCallback>(
 		CmdType::Packet => {
 			let cmd = crate::proto::decode_command(CmdType::Packet, &mut buf, "datagram")?;
 
-			if let Command::Packet { assoc_id, size, .. } = cmd {
+			if let Command::Packet { assoc_id, pkt_id, frag_total, frag_id, size } = cmd {
 				let addr = crate::proto::decode_address(&mut buf, "datagram packet")?;
 				let payload = buf.split_to(size as usize).freeze();
 
-				// Convert address to TargetAddr using helper function
-				let target_addr = crate::proto::address_to_target(addr)?;
-				handle_udp_packet(&connection, assoc_id, target_addr, payload, &callback).await?;
+				// Convert address to TargetAddr, using placeholder for non-first fragments
+				let target_addr = match crate::proto::address_to_target(addr) {
+					Ok(t) => t,
+					Err(_) => wind_core::types::TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
+				};
+				handle_udp_packet(&connection, assoc_id, pkt_id, frag_total, frag_id, target_addr, payload, &callback).await?;
 			}
 		}
 		CmdType::Heartbeat => {
@@ -545,35 +551,143 @@ async fn handle_auth(connection: &InboundCtx, uuid: Uuid, token: [u8; 32]) -> ey
 	Ok(())
 }
 
-/// Handle UDP packet
+/// Handle UDP packet with fragmentation support
 async fn handle_udp_packet<C: InboundCallback>(
-	_connection: &InboundCtx,
+	ctx: &Arc<InboundCtx>,
 	assoc_id: u16,
+	pkt_id: u16,
+	frag_total: u8,
+	frag_id: u8,
 	target_addr: wind_core::types::TargetAddr,
 	payload: bytes::Bytes,
-	_callback: &C,
+	callback: &C,
 ) -> eyre::Result<()> {
-	// TODO: Complete UDP packet handling
-	// Full implementation requires:
-	// 1. Creating a channel-based UDP stream that maps TUIC packets to UDP
-	//    datagrams
-	// 2. Handling bidirectional packet flow (inbound packets from client, outbound
-	//    packets to client)
-	// 3. Managing UDP sessions per assoc_id
-	// 4. Handling packet fragmentation
-	//
-	// For now, we log the received packet
-	info!(
-		"Received UDP packet for session {} to {} ({} bytes)",
-		assoc_id,
-		target_addr,
-		payload.len()
-	);
-	// callback.handle_udpstream(stream)
-	// The proper implementation would involve creating a TuicUdpStream that
-	// uses channel-based UdpPacket for communication
-	warn!("UDP relay not yet fully implemented - packet received but not forwarded");
+	let tuic_stream = get_or_create_session(ctx, assoc_id, callback).await?;
+
+	// Process the packet (with fragmentation support)
+	if frag_total <= 1 {
+		// Single-fragment packet, forward directly
+		tuic_stream
+			.receive_packet(UdpPacket {
+				source: None,
+				target: target_addr,
+				payload,
+			})
+			.await?;
+	} else {
+		// Multi-fragment packet, reassemble first
+		if let Some(complete) =
+			tuic_stream
+				.process_fragment(assoc_id, pkt_id, frag_total, frag_id, payload, None, target_addr)
+				.await
+		{
+			tuic_stream.receive_packet(complete).await?;
+		}
+	}
+
 	Ok(())
+}
+
+/// Get an existing UDP session or create a new one for the given assoc_id.
+///
+/// On first call for a given `assoc_id`, this creates the channel plumbing
+/// between the QUIC connection and the outbound handler:
+///
+/// ```text
+/// QUIC client ─► handle_udp_packet ─► proto::UdpStream (reassembly)
+///                                          │ receive_packet()
+///                                          ▼
+///                                     crossfire channel
+///                                          │ bridge task
+///                                          ▼
+///                                     mpsc channel ─► outbound handler
+///                                                          │
+///                                     mpsc channel ◄───────┘
+///                                          │ response task
+///                                          ▼
+///                                     proto::UdpStream.send_packet()
+///                                          │
+///                                          ▼
+///                                     QUIC client
+/// ```
+async fn get_or_create_session<C: InboundCallback>(
+	ctx: &Arc<InboundCtx>,
+	assoc_id: u16,
+	callback: &C,
+) -> eyre::Result<Arc<crate::proto::UdpStream>> {
+	// Fast path: check with read lock
+	{
+		let sessions = ctx.udp_sessions.read().await;
+		if let Some(session) = sessions.get(&assoc_id) {
+			return Ok(session.tuic_stream.clone());
+		}
+	}
+
+	// Slow path: take write lock and double-check
+	let mut sessions = ctx.udp_sessions.write().await;
+	if let Some(session) = sessions.get(&assoc_id) {
+		return Ok(session.tuic_stream.clone());
+	}
+
+	info!("Creating new UDP session for assoc_id {}", assoc_id);
+
+	// Channel for reassembled packets: proto::UdpStream -> bridge task -> outbound
+	let (reassembled_tx, reassembled_rx) = crossfire::mpmc::bounded_async::<UdpPacket>(128);
+
+	// Channels for the wind_core UdpStream (outbound handler <-> inbound)
+	let (to_outbound_tx, to_outbound_rx) = mpsc::channel::<UdpPacket>(100);
+	let (from_outbound_tx, mut from_outbound_rx) = mpsc::channel::<UdpPacket>(100);
+
+	// Create proto::UdpStream for fragment reassembly and response sending
+	let tuic_stream = Arc::new(crate::proto::UdpStream::new(ctx.conn.clone(), assoc_id, reassembled_tx));
+
+	// UdpStream for the outbound handler
+	let outbound_stream = CoreUdpStream {
+		tx: from_outbound_tx,
+		rx: to_outbound_rx,
+	};
+
+	// Task 1: Bridge reassembled packets (crossfire rx -> mpsc tx to outbound)
+	tokio::spawn(async move {
+		loop {
+			match reassembled_rx.recv().await {
+				Ok(packet) => {
+					if to_outbound_tx.send(packet).await.is_err() {
+						break;
+					}
+				}
+				Err(_) => break,
+			}
+		}
+	});
+
+	// Task 2: Forward outbound responses back to QUIC client
+	{
+		let response_stream = tuic_stream.clone();
+		tokio::spawn(async move {
+			while let Some(packet) = from_outbound_rx.recv().await {
+				if let Err(e) = response_stream.send_packet(packet).await {
+					warn!("Failed to send UDP response (assoc {}): {}", assoc_id, e);
+					break;
+				}
+			}
+		});
+	}
+
+	// Task 3: Hand off the UdpStream to the outbound via callback
+	{
+		let cb = callback.clone();
+		tokio::spawn(async move {
+			if let Err(e) = cb.handle_udpstream(outbound_stream).await {
+				error!("UDP stream handler error (assoc {}): {}", assoc_id, e);
+			}
+		});
+	}
+
+	let stream = tuic_stream.clone();
+	sessions.insert(assoc_id, UdpSession { tuic_stream: stream });
+
+	Ok(tuic_stream)
 }
 
 /// Read exactly the bytes for one TUIC address from a Quinn receive stream.

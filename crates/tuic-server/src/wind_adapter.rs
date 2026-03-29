@@ -29,13 +29,12 @@ use std::{
 	sync::Arc,
 };
 
-use fast_socks5::{
-	client::{Config as Socks5Config, Socks5Stream},
-};
+use fast_socks5::client::{Config as Socks5Config, Socks5Stream};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use wind_core::{
-	AppContext, Dispatcher, OutboundAction, RouteAction, Router,
+	AclRouter, AppContext, Dispatcher, OutboundAction, RouteAction, Router,
 	dispatcher::BoxFuture,
+	rule::Rule,
 	tcp::AbstractTcpStream,
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
@@ -49,10 +48,37 @@ use crate::{AppContext as TuicAppContext, config::OutboundRule};
 // TuicRouter – implements wind_core::Router
 // ============================================================================
 
-/// Routes connections according to tuic-server ACL rules.
-#[derive(Clone)]
+/// Combined router for tuic-server.
+///
+/// Evaluation order:
+/// 1. **Experimental guards** – reject loopback / private addresses.
+/// 2. **Legacy ACL rules** (`[[acl]]`) – first-match wins.
+/// 3. **Metacubex-style rules** (`rules = [...]`) – delegated to
+///    [`AclRouter`] from wind-core.
+/// 4. If nothing matched, forward to `"default"` outbound.
 pub struct TuicRouter {
 	ctx: Arc<TuicAppContext>,
+	/// Handles the new `rules` field; `None` when no rules are configured.
+	acl_router: Option<AclRouter>,
+}
+
+impl TuicRouter {
+	pub fn new(ctx: Arc<TuicAppContext>) -> Self {
+		let acl_router = if ctx.cfg.rules.is_empty() {
+			None
+		} else {
+			// Move the parsed rules into an AclRouter.
+			// We cannot move out of Arc, so we need to rebuild the Vec.
+			let rules: Vec<Rule> = ctx
+				.cfg
+				.rules
+				.iter()
+				.map(|r| Rule::parse(&r.to_string()).expect("round-trip rule parse"))
+				.collect();
+			Some(AclRouter::new(rules, "default"))
+		};
+		Self { ctx, acl_router }
+	}
 }
 
 impl Router for TuicRouter {
@@ -61,7 +87,7 @@ impl Router for TuicRouter {
 			let port = target.port();
 			let default_ip_mode = self.ctx.cfg.outbound.default.ip_mode.unwrap_or(StackPrefer::V4first);
 
-			// Resolve to SocketAddr for ACL matching.
+			// Resolve to SocketAddr for legacy ACL matching.
 			let resolved = resolve_target(target, default_ip_mode).await?;
 
 			// --- Experimental guards ---
@@ -75,18 +101,22 @@ impl Router for TuicRouter {
 				return Ok(RouteAction::Reject(format!("private address rejected: {}", resolved)));
 			}
 
-			// --- ACL evaluation ---
+			// --- Legacy ACL evaluation ---
 			for rule in &self.ctx.cfg.acl {
 				if rule.matching(resolved, port, is_tcp).await {
 					let outbound_name = rule.outbound.as_str();
 					let action = match outbound_name {
 						"reject" | "block" | "deny" => RouteAction::Reject(format!("rejected by ACL rule: {}", rule)),
-						// "allow" and "default" both mean the default outbound
 						"allow" | "default" => RouteAction::Forward("default".to_string()),
 						name => RouteAction::Forward(name.to_string()),
 					};
 					return Ok(action);
 				}
+			}
+
+			// --- Metacubex-style rules (via AclRouter) ---
+			if let Some(acl_router) = &self.acl_router {
+				return acl_router.route(target, is_tcp).await;
 			}
 
 			// No rule matched – use the default outbound.
@@ -406,7 +436,7 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(TuicInbou
 	let inbound = TuicInbound::new(wind_ctx, opts);
 
 	// Build the Dispatcher
-	let router = TuicRouter { ctx: ctx.clone() };
+	let router = TuicRouter::new(ctx.clone());
 	let mut dispatcher = Dispatcher::new(router);
 
 	// Register the default outbound handler

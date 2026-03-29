@@ -7,9 +7,10 @@ pub mod inbound;
 mod interface;
 pub mod io;
 mod outbound;
+pub mod rule;
 pub mod types;
 
-pub use dispatcher::{Dispatcher, OutboundAction, RouteAction, Router};
+pub use dispatcher::{AclRouter, Dispatcher, OutboundAction, RouteAction, Router};
 pub use inbound::*;
 pub use interface::*;
 pub use outbound::*;

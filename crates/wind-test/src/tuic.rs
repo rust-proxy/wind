@@ -5,15 +5,20 @@
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use wind_core::{AppContext, InboundCallback, tcp::AbstractTcpStream, types::TargetAddr};
+use tokio::net::UdpSocket;
+use wind_core::{
+	AppContext, InboundCallback, tcp::AbstractTcpStream, types::TargetAddr,
+	udp::{UdpPacket, UdpStream},
+};
 
 // =============================================================================
 // Public Test Helpers
 // =============================================================================
 
 /// A simple [`InboundCallback`] that relays TCP connections directly to their
-/// targets and silently drops incoming UDP streams.
+/// targets and relays UDP packets to real targets via a bound UDP socket.
 ///
 /// Suitable for use in integration tests that exercise TUIC server behaviour.
 #[derive(Clone)]
@@ -31,7 +36,46 @@ impl InboundCallback for DirectCallback {
 		Ok(())
 	}
 
-	async fn handle_udpstream(&self, _stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
+	async fn handle_udpstream(&self, stream: UdpStream) -> eyre::Result<()> {
+		let UdpStream { tx, mut rx } = stream;
+		let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+
+		let send_socket = relay_socket.clone();
+		let recv_handle = tokio::spawn(async move {
+			while let Some(packet) = rx.recv().await {
+				let target_addr = match packet.target {
+					TargetAddr::IPv4(ip, port) => SocketAddr::new(std::net::IpAddr::V4(ip), port),
+					TargetAddr::IPv6(ip, port) => SocketAddr::new(std::net::IpAddr::V6(ip), port),
+					TargetAddr::Domain(_, _) => continue,
+				};
+				let _ = send_socket.send_to(&packet.payload, target_addr).await;
+			}
+		});
+
+		tokio::spawn(async move {
+			let mut buf = vec![0u8; 65536];
+			loop {
+				match relay_socket.recv_from(&mut buf).await {
+					Ok((n, peer)) => {
+						let source = match peer {
+							SocketAddr::V4(a) => TargetAddr::IPv4(*a.ip(), a.port()),
+							SocketAddr::V6(a) => TargetAddr::IPv6(*a.ip(), a.port()),
+						};
+						let packet = UdpPacket {
+							source: Some(source.clone()),
+							target: source,
+							payload: Bytes::copy_from_slice(&buf[..n]),
+						};
+						if tx.send(packet).await.is_err() {
+							break;
+						}
+					}
+					Err(_) => break,
+				}
+			}
+		});
+
+		recv_handle.await?;
 		Ok(())
 	}
 }

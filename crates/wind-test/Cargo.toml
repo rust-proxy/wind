@@ -21,6 +21,7 @@ wind-core = { version = "0.1.1", path = "../wind-core"}
 wind-socks = { version = "0.1.1", path = "../wind-socks"}
 wind-tuic = { version = "0.1.1", path = "../wind-tuic"}
 
+bytes = "1"
 ctor = "0.6"
 
 # Async

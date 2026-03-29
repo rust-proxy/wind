@@ -24,6 +24,8 @@ serde = { version = "1", features = ["derive"] }
 futures = "0.3"
 bytes = "1"
 eyre = "0.6"
+ipnet = "2"
+regex = "1"
 pin-project-lite = "0.2"
 
 tracing = "0.1"

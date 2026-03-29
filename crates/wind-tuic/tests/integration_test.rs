@@ -4,14 +4,21 @@
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::{TcpListener, TcpStream, UdpSocket},
+	sync::mpsc,
 	time::timeout,
 };
 use uuid::Uuid;
-use wind_core::{AbstractInbound, AppContext, InboundCallback, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
+use wind_core::{
+	AbstractInbound, AbstractOutbound, AppContext, InboundCallback,
+	tcp::AbstractTcpStream,
+	types::TargetAddr,
+	udp::{UdpPacket, UdpStream},
+};
 use wind_tuic::{
 	inbound::{TuicInbound, TuicInboundOpts},
 	outbound::{TuicOutbound, TuicOutboundOpts},
@@ -27,6 +34,7 @@ fn generate_self_signed_cert() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'
 }
 
 /// Simple callback that forwards TCP connections directly to target
+/// and relays UDP packets to real targets via tokio UdpSocket.
 #[derive(Clone)]
 struct DirectCallback;
 
@@ -46,9 +54,50 @@ impl InboundCallback for DirectCallback {
 		Ok(())
 	}
 
-	async fn handle_udpstream(&self, _stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
-		// UDP handling - forward packets to actual targets
-		// TODO: Implement UDP relay
+	async fn handle_udpstream(&self, stream: UdpStream) -> eyre::Result<()> {
+		let UdpStream { tx, mut rx } = stream;
+
+		// Bind a local UDP socket for relaying packets to actual targets
+		let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+
+		// Task: forward packets from the TUIC tunnel to the real target
+		let send_socket = relay_socket.clone();
+		let recv_handle = tokio::spawn(async move {
+			while let Some(packet) = rx.recv().await {
+				let target_addr = match packet.target {
+					TargetAddr::IPv4(ip, port) => SocketAddr::new(std::net::IpAddr::V4(ip), port),
+					TargetAddr::IPv6(ip, port) => SocketAddr::new(std::net::IpAddr::V6(ip), port),
+					TargetAddr::Domain(_, _) => continue,
+				};
+				let _ = send_socket.send_to(&packet.payload, target_addr).await;
+			}
+		});
+
+		// Task: read responses from the real target and send them back through the tunnel
+		tokio::spawn(async move {
+			let mut buf = vec![0u8; 65536];
+			loop {
+				match relay_socket.recv_from(&mut buf).await {
+					Ok((n, peer)) => {
+						let source = match peer {
+							SocketAddr::V4(a) => TargetAddr::IPv4(*a.ip(), a.port()),
+							SocketAddr::V6(a) => TargetAddr::IPv6(*a.ip(), a.port()),
+						};
+						let packet = UdpPacket {
+							source: Some(source.clone()),
+							target: source,
+							payload: Bytes::copy_from_slice(&buf[..n]),
+						};
+						if tx.send(packet).await.is_err() {
+							break;
+						}
+					}
+					Err(_) => break,
+				}
+			}
+		});
+
+		recv_handle.await?;
 		Ok(())
 	}
 }
@@ -185,9 +234,8 @@ async fn test_tuic_udp_proxy() -> eyre::Result<()> {
 	// Setup test UDP echo server
 	let echo_socket = UdpSocket::bind("127.0.0.1:0").await?;
 	let echo_addr = echo_socket.local_addr()?;
-	tracing::info!("✓ UDP echo server listening on {}", echo_addr);
+	tracing::info!("UDP echo server listening on {}", echo_addr);
 
-	// Spawn UDP echo server task
 	let echo_socket = Arc::new(echo_socket);
 	let echo_socket_clone = echo_socket.clone();
 	tokio::spawn(async move {
@@ -204,14 +252,12 @@ async fn test_tuic_udp_proxy() -> eyre::Result<()> {
 
 	// Generate certificate
 	let (cert, key) = generate_self_signed_cert();
-	tracing::info!("✓ Generated self-signed certificate");
 
 	// Setup authentication
 	let user_uuid = Uuid::new_v4();
 	let password = "test_password";
 	let mut users = HashMap::new();
 	users.insert(user_uuid, password.to_string());
-	tracing::info!("✓ User UUID: {}", user_uuid);
 
 	// Setup TUIC server (inbound)
 	let server_socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
@@ -230,20 +276,17 @@ async fn test_tuic_udp_proxy() -> eyre::Result<()> {
 		..Default::default()
 	};
 
-	// Create AppContext for server
 	let server_ctx = Arc::new(AppContext::default());
 	let server_cancel = server_ctx.token.clone();
 	let server = TuicInbound::new(server_ctx, server_opts);
-	tracing::info!("✓ TUIC server will listen on {}", actual_server_addr);
+	tracing::info!("TUIC server will listen on {}", actual_server_addr);
 
-	// Start server in background
 	let callback = Arc::new(DirectCallback);
 	let server_handle = tokio::spawn(async move {
 		let _ = server.listen(callback.as_ref()).await;
 	});
 
-	// Give server time to start
-	tokio::time::sleep(Duration::from_millis(100)).await;
+	tokio::time::sleep(Duration::from_millis(300)).await;
 
 	// Setup TUIC client (outbound)
 	let ctx = Arc::new(AppContext::default());
@@ -259,38 +302,179 @@ async fn test_tuic_udp_proxy() -> eyre::Result<()> {
 		alpn: vec!["h3".to_string()],
 	};
 
-	tracing::info!("✓ Connecting TUIC client to server...");
+	tracing::info!("Connecting TUIC client to server...");
 	let client = Arc::new(TuicOutbound::new(ctx.clone(), client_opts).await?);
-	tracing::info!("✓ TUIC client connected");
+	tracing::info!("TUIC client connected");
 
-	// Start the outbound handler
 	let client_poll = client.clone();
 	tokio::spawn(async move {
 		let _ = client_poll.start_poll().await;
 	});
 
-	// Give client time to initialize
+	tokio::time::sleep(Duration::from_millis(200)).await;
+
+	// ---------- Test: send a UDP packet through the TUIC tunnel ----------
+
+	// Create the channel pair that represents the "local" side of the UDP proxy
+	let (local_tx, proxy_rx) = mpsc::channel::<UdpPacket>(100);
+	let (proxy_tx, mut local_rx) = mpsc::channel::<UdpPacket>(100);
+
+	let client_stream = UdpStream {
+		tx: proxy_tx,
+		rx: proxy_rx,
+	};
+
+	let client_for_udp = client.clone();
+	tokio::spawn(async move {
+		let _ = client_for_udp
+			.handle_udp(client_stream, None::<TuicOutbound>)
+			.await;
+	});
+
 	tokio::time::sleep(Duration::from_millis(100)).await;
 
-	// Test UDP proxy through TUIC
-	tracing::info!("\n--- Testing UDP Proxy ---");
-	tracing::info!("⚠ Note: UDP proxy test is currently TODO - needs full UDP session implementation");
+	// Send a test packet targeting the echo server
+	let test_payload = b"hello TUIC UDP";
+	let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
+	local_tx
+		.send(UdpPacket {
+			source: None,
+			target,
+			payload: Bytes::from_static(test_payload),
+		})
+		.await?;
 
-	// TODO: Implement full UDP test once UDP session management is complete
-	// For now, we'll skip the detailed UDP test
-	//
-	// The following would be needed:
-	// 1. Create a UDP socket wrapper that works with TUIC
-	// 2. Send packets through the TUIC tunnel
-	// 3. Receive and verify echoed packets
+	tracing::info!("Sent UDP packet, waiting for echo response...");
 
-	tracing::info!("✓ UDP test skipped (not yet fully implemented)");
+	// Wait for the echo response
+	let response = timeout(Duration::from_secs(5), local_rx.recv()).await;
+	assert!(response.is_ok(), "Timed out waiting for UDP echo response");
+	let response = response.unwrap();
+	assert!(response.is_some(), "Channel closed unexpectedly");
+	let pkt = response.unwrap();
+	assert_eq!(&pkt.payload[..], test_payload, "Echoed payload must match sent data");
+
+	tracing::info!("UDP echo test passed: sent {} bytes, received {} bytes", test_payload.len(), pkt.payload.len());
 
 	// Clean up
 	server_cancel.cancel();
 	let _ = timeout(Duration::from_secs(2), server_handle).await;
 
 	tracing::info!("========== UDP Proxy Test PASSED ==========\n");
+	Ok(())
+}
+
+/// End-to-end UDP relay with multiple packets to verify session reuse.
+#[test_log::test(tokio::test)]
+async fn test_tuic_udp_proxy_multiple_packets() -> eyre::Result<()> {
+	tracing::info!("\n========== TUIC UDP Multi-Packet Test ==========");
+
+	#[cfg(feature = "aws-lc-rs")]
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	#[cfg(feature = "ring")]
+	let _ = rustls::crypto::ring::default_provider().install_default();
+
+	// UDP echo server
+	let echo_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+	let echo_addr = echo_socket.local_addr()?;
+	let echo_clone = echo_socket.clone();
+	tokio::spawn(async move {
+		let mut buf = vec![0u8; 65536];
+		loop {
+			match echo_clone.recv_from(&mut buf).await {
+				Ok((n, peer)) => { let _ = echo_clone.send_to(&buf[..n], peer).await; }
+				Err(_) => break,
+			}
+		}
+	});
+
+	// Server setup
+	let (cert, key) = generate_self_signed_cert();
+	let user_uuid = Uuid::new_v4();
+	let password = "test_password";
+	let mut users = HashMap::new();
+	users.insert(user_uuid, password.to_string());
+
+	let temp = std::net::UdpSocket::bind("127.0.0.1:0")?;
+	let server_addr = temp.local_addr()?;
+	drop(temp);
+
+	let server_ctx = Arc::new(AppContext::default());
+	let server_cancel = server_ctx.token.clone();
+	let server = TuicInbound::new(
+		server_ctx,
+		TuicInboundOpts {
+			listen_addr: server_addr,
+			certificate: cert.clone(),
+			private_key: key.clone_key(),
+			alpn: vec!["h3".to_string()],
+			users: users.clone(),
+			auth_timeout: Duration::from_secs(5),
+			max_idle_time: Duration::from_secs(30),
+			zero_rtt: false,
+			..Default::default()
+		},
+	);
+	let callback = Arc::new(DirectCallback);
+	tokio::spawn(async move { let _ = server.listen(callback.as_ref()).await; });
+	tokio::time::sleep(Duration::from_millis(300)).await;
+
+	// Client setup
+	let ctx = Arc::new(AppContext::default());
+	let client = Arc::new(
+		TuicOutbound::new(
+			ctx.clone(),
+			TuicOutboundOpts {
+				peer_addr: server_addr,
+				sni: "localhost".to_string(),
+				auth: (user_uuid, Arc::from(password.as_bytes())),
+				zero_rtt_handshake: false,
+				heartbeat: Duration::from_secs(5),
+				gc_interval: Duration::from_secs(5),
+				gc_lifetime: Duration::from_secs(30),
+				skip_cert_verify: true,
+				alpn: vec!["h3".to_string()],
+			},
+		)
+		.await?,
+	);
+	let poll = client.clone();
+	tokio::spawn(async move { let _ = poll.start_poll().await; });
+	tokio::time::sleep(Duration::from_millis(200)).await;
+
+	// Open a UDP session through the tunnel
+	let (local_tx, proxy_rx) = mpsc::channel::<UdpPacket>(100);
+	let (proxy_tx, mut local_rx) = mpsc::channel::<UdpPacket>(100);
+	let client_stream = UdpStream { tx: proxy_tx, rx: proxy_rx };
+
+	let client_udp = client.clone();
+	tokio::spawn(async move {
+		let _ = client_udp.handle_udp(client_stream, None::<TuicOutbound>).await;
+	});
+	tokio::time::sleep(Duration::from_millis(100)).await;
+
+	let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
+
+	// Send 5 distinct packets and verify each echo
+	for i in 0..5u8 {
+		let msg = format!("packet-{}", i);
+		local_tx
+			.send(UdpPacket {
+				source: None,
+				target: target.clone(),
+				payload: Bytes::from(msg.clone()),
+			})
+			.await?;
+
+		let resp = timeout(Duration::from_secs(5), local_rx.recv()).await;
+		assert!(resp.is_ok(), "Timed out on packet {}", i);
+		let pkt = resp.unwrap().expect("channel closed");
+		assert_eq!(pkt.payload, Bytes::from(msg.clone()), "Mismatch on packet {}", i);
+		tracing::info!("Packet {} echoed correctly", i);
+	}
+
+	server_cancel.cancel();
+	tracing::info!("========== UDP Multi-Packet Test PASSED ==========\n");
 	Ok(())
 }
 
