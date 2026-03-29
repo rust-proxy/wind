@@ -1,6 +1,9 @@
-set shell := ["nu", "-c"]
+# set shell := ["nu", "-c"]
 
 run:
     cargo run --package wind --bin wind -- -f config.toml
 test:
     cargo test -- --ignored
+
+server:
+  cargo run --package tuic-server --bin tuic-server -- -c ./config.toml

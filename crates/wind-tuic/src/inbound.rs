@@ -21,7 +21,7 @@ use rustls::{
 };
 use tokio::{
 	io::{AsyncRead, AsyncWrite},
-	sync::RwLock,
+	sync::{Notify, RwLock},
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -205,15 +205,6 @@ impl AbstractInbound for TuicInbound {
 
 		info!("TUIC server listening on {}", endpoint.local_addr().unwrap());
 
-		// NOTE: Currently handles connections sequentially due to callback lifetime
-		// constraints. Each QUIC connection runs in a loop processing
-		// streams/datagrams until the connection closes. This means only one
-		// connection can be active at a time, which is a limitation.
-		//
-		// To support concurrent connections, the InboundCallback trait would need to be
-		// Clone + 'static, or the listen() method signature would need to change to
-		// take ownership/Arc of the callback.
-
 		// Accept connections loop
 		loop {
 			tokio::select! {
@@ -226,13 +217,13 @@ impl AbstractInbound for TuicInbound {
 					let users = opts.users.clone();
 					let auth_timeout = opts.auth_timeout;
 					let zero_rtt = opts.zero_rtt;
+					let cb = cb.clone();
 
-					// Handle connection directly (blocking until connection closes)
-					// This limits the server to one active connection at a time
-					match handle_connection(incoming, users, auth_timeout, zero_rtt, cb).await {
-						Ok(_) => {}
-						Err(err) => error!("Connection handler error: {:?}", err),
-					}
+					tokio::spawn(async move {
+						if let Err(err) = handle_connection(incoming, users, auth_timeout, zero_rtt, cb).await {
+							error!("Connection handler error: {:?}", err);
+						}
+					});
 				}
 			}
 		}
@@ -245,6 +236,7 @@ impl AbstractInbound for TuicInbound {
 struct InboundCtx {
 	conn: quinn::Connection,
 	uuid: Arc<RwLock<Option<Uuid>>>,
+	auth_notify: Arc<Notify>,
 	users: HashMap<Uuid, String>,
 	udp_sessions: Arc<RwLock<HashMap<u16, UdpSession>>>,
 }
@@ -262,7 +254,7 @@ async fn handle_connection<C: InboundCallback>(
 	users: HashMap<Uuid, String>,
 	auth_timeout: Duration,
 	zero_rtt: bool,
-	callback: &C,
+	callback: C,
 ) -> eyre::Result<()> {
 	let remote_addr = incoming.remote_address();
 
@@ -296,6 +288,7 @@ async fn handle_connection<C: InboundCallback>(
 	let connection = Arc::new(InboundCtx {
 		conn: conn.clone(),
 		uuid: Arc::new(RwLock::new(None)),
+		auth_notify: Arc::new(Notify::new()),
 		users,
 		udp_sessions: Arc::new(RwLock::new(HashMap::new())),
 	});
@@ -325,9 +318,12 @@ async fn handle_connection<C: InboundCallback>(
 				};
 
 				let conn = connection.clone();
-				if let Err(e) = handle_uni_stream(conn, recv, callback).await {
-					error!("Uni stream error: {:?}", e);
-				}
+				let cb = callback.clone();
+				tokio::spawn(async move {
+					if let Err(e) = handle_uni_stream(conn, recv, cb).await {
+						error!("Uni stream error: {:?}", e);
+					}
+				});
 			}
 			// Handle bidirectional streams
 			result = connection.conn.accept_bi() => {
@@ -340,9 +336,12 @@ async fn handle_connection<C: InboundCallback>(
 				};
 
 				let conn = connection.clone();
-				if let Err(e) = handle_bi_stream(conn, send, recv, callback).await {
-					error!("Bi stream error: {:?}", e);
-				}
+				let cb = callback.clone();
+				tokio::spawn(async move {
+					if let Err(e) = handle_bi_stream(conn, send, recv, cb).await {
+						error!("Bi stream error: {:?}", e);
+					}
+				});
 			}
 			// Handle datagrams
 			result = connection.conn.read_datagram() => {
@@ -355,9 +354,12 @@ async fn handle_connection<C: InboundCallback>(
 				};
 
 				let conn = connection.clone();
-				if let Err(e) = handle_datagram(conn, datagram, callback).await {
-					error!("Datagram error: {:?}", e);
-				}
+				let cb = callback.clone();
+				tokio::spawn(async move {
+					if let Err(e) = handle_datagram(conn, datagram, cb).await {
+						error!("Datagram error: {:?}", e);
+					}
+				});
 			}
 		}
 	}
@@ -369,7 +371,7 @@ async fn handle_connection<C: InboundCallback>(
 async fn handle_uni_stream<C: InboundCallback>(
 	ctx: Arc<InboundCtx>,
 	mut recv: quinn::RecvStream,
-	callback: &C,
+	callback: C,
 ) -> eyre::Result<()> {
 	// Read all data from stream
 	let data = recv
@@ -393,7 +395,7 @@ async fn handle_uni_stream<C: InboundCallback>(
 
 			// Convert address to TargetAddr using helper function
 			let target_addr = crate::proto::address_to_target(addr)?;
-			handle_udp_packet(&ctx, assoc_id, target_addr, payload, callback).await?;
+			handle_udp_packet(&ctx, assoc_id, target_addr, payload, &callback).await?;
 		}
 		Command::Dissociate { assoc_id } => {
 			handle_dissociate(&ctx, assoc_id).await?;
@@ -415,15 +417,21 @@ async fn handle_bi_stream<C: InboundCallback>(
 	connection: Arc<InboundCtx>,
 	send: quinn::SendStream,
 	mut recv: quinn::RecvStream,
-	callback: &C,
+	callback: C,
 ) -> eyre::Result<()> {
-	// Check if authenticated - guard clause
-	let uuid = connection.uuid.read().await;
-	if uuid.is_none() {
-		warn!("Unauthenticated bi stream attempt");
-		return Ok(());
+	// Check if authenticated - wait for auth if not yet done
+	{
+		let uuid = connection.uuid.read().await;
+		if uuid.is_none() {
+			drop(uuid);
+			connection.auth_notify.notified().await;
+			let uuid = connection.uuid.read().await;
+			if uuid.is_none() {
+				warn!("Unauthenticated bi stream attempt");
+				return Ok(());
+			}
+		}
 	}
-	drop(uuid);
 
 	// Read header and command
 	let mut header_buf = vec![0u8; 2];
@@ -468,14 +476,20 @@ async fn handle_bi_stream<C: InboundCallback>(
 async fn handle_datagram<C: InboundCallback>(
 	connection: Arc<InboundCtx>,
 	data: bytes::Bytes,
-	callback: &C,
+	callback: C,
 ) -> eyre::Result<()> {
-	// Check if authenticated - guard clause
-	let uuid = connection.uuid.read().await;
-	if uuid.is_none() {
-		return Ok(());
+	// Check if authenticated - wait for auth if not yet done
+	{
+		let uuid = connection.uuid.read().await;
+		if uuid.is_none() {
+			drop(uuid);
+			connection.auth_notify.notified().await;
+			let uuid = connection.uuid.read().await;
+			if uuid.is_none() {
+				return Ok(());
+			}
+		}
 	}
-	drop(uuid);
 
 	let mut buf = BytesMut::from(data.as_ref());
 
@@ -492,7 +506,7 @@ async fn handle_datagram<C: InboundCallback>(
 
 				// Convert address to TargetAddr using helper function
 				let target_addr = crate::proto::address_to_target(addr)?;
-				handle_udp_packet(&connection, assoc_id, target_addr, payload, callback).await?;
+				handle_udp_packet(&connection, assoc_id, target_addr, payload, &callback).await?;
 			}
 		}
 		CmdType::Heartbeat => {
@@ -525,6 +539,7 @@ async fn handle_auth(connection: &InboundCtx, uuid: Uuid, token: [u8; 32]) -> ey
 
 	// Mark as authenticated
 	*connection.uuid.write().await = Some(uuid);
+	connection.auth_notify.notify_waiters();
 	info!("Connection authenticated as {}", uuid);
 
 	Ok(())

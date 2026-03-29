@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc};
 
 use fast_socks5::{ReplyError, Socks5Command, server::Socks5ServerProtocol, util::target_addr::TargetAddr as SocksTargetAddr};
 use snafu::ResultExt;
@@ -34,7 +34,7 @@ pub enum AuthMode {
 }
 
 pub struct SocksInbound {
-	opts: SocksInboundOpt,
+	opts: Arc<SocksInboundOpt>,
 	cancel: CancellationToken,
 }
 
@@ -56,9 +56,13 @@ impl AbstractInbound for SocksInbound {
 						Ok(conn) => conn,
 					};
 
-					if let Err(err) = self.handle_income(stream, client_addr, cb).await {
-						error!(target: "[IN] HANDLER" , "{:}", err);
-					}
+					let opts = self.opts.clone();
+					let cb = cb.clone();
+					tokio::spawn(async move {
+						if let Err(err) = handle_income(opts, stream, client_addr, cb).await {
+							error!(target: "[IN] HANDLER" , "{:}", err);
+						}
+					});
 				}
 			};
 		}
@@ -68,67 +72,67 @@ impl AbstractInbound for SocksInbound {
 
 impl SocksInbound {
 	pub async fn new(opts: SocksInboundOpt, cancel: CancellationToken) -> Self {
-		Self { opts, cancel }
+		Self { opts: Arc::new(opts), cancel }
 	}
+}
 
-	async fn handle_income(&self, stream: TcpStream, _client_addr: SocketAddr, cb: &impl InboundCallback) -> Result<(), Error> {
-		let proto = match &self.opts.auth {
-			AuthMode::NoAuth => Socks5ServerProtocol::accept_no_auth(stream).await.context(SocksSnafu)?,
-			AuthMode::Password { username, password } => {
-				Socks5ServerProtocol::accept_password_auth(stream, |user, pass| user == *username && pass == *password)
-					.await
-					.context(SocksSnafu)?
-					.0
-			}
-		};
-		let (proto, cmd, target_addr) = proto.read_command().await?;
+async fn handle_income(opts: Arc<SocksInboundOpt>, stream: TcpStream, _client_addr: SocketAddr, cb: impl InboundCallback) -> Result<(), Error> {
+	let proto = match &opts.auth {
+		AuthMode::NoAuth => Socks5ServerProtocol::accept_no_auth(stream).await.context(SocksSnafu)?,
+		AuthMode::Password { username, password } => {
+			Socks5ServerProtocol::accept_password_auth(stream, |user, pass| user == *username && pass == *password)
+				.await
+				.context(SocksSnafu)?
+				.0
+		}
+	};
+	let (proto, cmd, target_addr) = proto.read_command().await?;
 
-		match cmd {
-			Socks5Command::TCPConnect => {
-				let inner = proto
-					.reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
-					.await?;
-				let target_addr = match target_addr {
-					SocksTargetAddr::Ip(socket_addr) => match socket_addr {
-						SocketAddr::V4(socket_addr) => TargetAddr::IPv4(*socket_addr.ip(), socket_addr.port()),
-						SocketAddr::V6(socket_addr) => TargetAddr::IPv6(*socket_addr.ip(), socket_addr.port()),
-					},
-					SocksTargetAddr::Domain(domain, port) => TargetAddr::Domain(domain, port),
-				};
-				cb.handle_tcpstream(target_addr, inner).await.context(CallbackSnafu)?;
-			}
-			Socks5Command::UDPAssociate if self.opts.allow_udp => {
-				let reply_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-				crate::ext::run_udp_proxy(proto, &target_addr, None, reply_ip, move |inbound| async move {
-					let (tx_to_out, rx_from_in) = mpsc::channel(100);
-					let (tx_to_in, rx_from_out) = mpsc::channel(100);
-
-					let udp_stream = UdpStream {
-						tx: tx_to_out,
-						rx: rx_from_out,
-					};
-
-					let serve_stream = UdpStream {
-						tx: tx_to_in,
-						rx: rx_from_in,
-					};
-
-					let cb = cb.clone();
-					tokio::spawn(async move {
-						if let Err(e) = cb.handle_udpstream(udp_stream).await {
-							error!(target: "[IN] HANDLER", "UDP association error: {}", e);
-						}
-					});
-
-					crate::udp::serve_udp(inbound.into(), serve_stream).await.context(IoSnafu)
-				})
+	match cmd {
+		Socks5Command::TCPConnect => {
+			let inner = proto
+				.reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
 				.await?;
-			}
-			_ => {
-				proto.reply_error(&ReplyError::CommandNotSupported).await?;
-				return Err(ReplyError::CommandNotSupported.into());
-			}
-		};
-		Ok(())
-	}
+			let target_addr = match target_addr {
+				SocksTargetAddr::Ip(socket_addr) => match socket_addr {
+					SocketAddr::V4(socket_addr) => TargetAddr::IPv4(*socket_addr.ip(), socket_addr.port()),
+					SocketAddr::V6(socket_addr) => TargetAddr::IPv6(*socket_addr.ip(), socket_addr.port()),
+				},
+				SocksTargetAddr::Domain(domain, port) => TargetAddr::Domain(domain, port),
+			};
+			cb.handle_tcpstream(target_addr, inner).await.context(CallbackSnafu)?;
+		}
+		Socks5Command::UDPAssociate if opts.allow_udp => {
+			let reply_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+			crate::ext::run_udp_proxy(proto, &target_addr, None, reply_ip, move |inbound| async move {
+				let (tx_to_out, rx_from_in) = mpsc::channel(100);
+				let (tx_to_in, rx_from_out) = mpsc::channel(100);
+
+				let udp_stream = UdpStream {
+					tx: tx_to_out,
+					rx: rx_from_out,
+				};
+
+				let serve_stream = UdpStream {
+					tx: tx_to_in,
+					rx: rx_from_in,
+				};
+
+				let cb = cb.clone();
+				tokio::spawn(async move {
+					if let Err(e) = cb.handle_udpstream(udp_stream).await {
+						error!(target: "[IN] HANDLER", "UDP association error: {}", e);
+					}
+				});
+
+				crate::udp::serve_udp(inbound.into(), serve_stream).await.context(IoSnafu)
+			})
+			.await?;
+		}
+		_ => {
+			proto.reply_error(&ReplyError::CommandNotSupported).await?;
+			return Err(ReplyError::CommandNotSupported.into());
+		}
+	};
+	Ok(())
 }
