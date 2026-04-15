@@ -1,0 +1,15 @@
+# Use clang as the C/C++ compiler to avoid the aws-lc-sys GCC memcmp bug
+# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95189
+# The custom Dockerfile installs clang/llvm and sets CC=clang, CXX=clang++, AR=llvm-ar
+
+[build.dockerfile]
+file = ".cross/Dockerfile"
+
+[build.env]
+passthrough = ["RUSTFLAGS", "RUST_LOG", "RUSTC_BOOTSTRAP"]
+
+[target.mips-unknown-linux-musl]
+image = "ghcr.io/cross-rs/mips-unknown-linux-musl:edge"
+
+[target.mipsel-unknown-linux-musl]
+image = "ghcr.io/cross-rs/mipsel-unknown-linux-musl:edge"

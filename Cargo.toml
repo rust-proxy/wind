@@ -2,14 +2,21 @@
 resolver = "2"
 
 members = [
-    "crates/*"
+    "crates/*",
 ]
 
 [workspace.package]
-version = "0.7.6"
-repository = "https://github.com/zephry-works/wind"
+version = "0.1.1"
+authors = ["proxy-rs"]
+repository = "https://github.com/proxy-rs/wind"
 edition = "2024"
+rust-version = "1.85"
+readme = "README.md"
 description = "Placeholder"
 license = "MIT OR Apache-2.0"
 
 
+[workspace.dependencies]
+quinn = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", default-features = false }
+quinn-proto = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", default-features = false }
+quinn-congestions = { git = "https://github.com/proxy-rs/quinn-congestions.git", default-features = false }

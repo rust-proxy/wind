@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUST_LOG: "wind=TRACE"
+  RUST_TOOLCHAIN: "stable"
+  RUSTC_BOOTSTRAP: "1"
+  SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
+jobs:
+  build:
+    name: Build
+    uses: rust-proxy/workflows/.github/workflows/rust-build.yml@v1.0.10
+    secrets:
+      sentry-dsn: ${{ secrets.SENTRY_DSN }}
+    with:
+      rust-toolchain: "stable"
+      packages: "wind"
+      target-config-file: ".github/target.toml"
+      rustflags: ""
+      enable-tmate: false
+      only-clippy-tests-on-pr: false
+
+  release:
+    name: Release
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+    needs: [build]
+    uses: rust-proxy/workflows/.github/workflows/release-publish.yml@v1.0.10
+    with:
+      cliff-config: '.github/cliff.toml'
+
+  docker:
+    name: Docker
+    needs: [build]
+    uses: rust-proxy/workflows/.github/workflows/docker-publish.yml@v1.0.10
+    secrets:
+      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+    with:
+      docker-file: '.github/Dockerfile'
+      image-name: 'wind'
+      platforms: 'linux/amd64,linux/arm64'
+      binary-dir: './docker-bins'
+      server-binary-amd64: 'wind-x86_64-linux-musl'
+      server-binary-arm64: 'wind-aarch64-linux-musl'
