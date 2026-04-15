@@ -1,54 +1,17 @@
+#![feature(error_generic_member_access)]
+
 pub mod proto;
+mod task;
+pub mod tls;
+pub mod utils;
 
-use std::{backtrace::Backtrace, str::Utf8Error};
+pub use utils::{CongestionControl, UdpRelayMode};
 
-use snafu::prelude::*;
+#[cfg(feature = "server")]
+pub mod inbound;
 
-#[derive(Debug, Snafu)]
-pub enum Error {
-   VersionDismatch {
-      expect:    u8,
-      current:   u8,
-      backtrace: Backtrace,
-   },
-   #[snafu(display("Unknown command type {value}"))]
-   UnknownCommandType {
-      value:     u8,
-      backtrace: Backtrace,
-   },
-   #[snafu(display("Unable to decode address due to type {value}"))]
-   UnknownAddressType {
-      value:     u8,
-      backtrace: Backtrace,
-   },
-   FailParseDomain {
-      // HEX
-      raw:       String,
-      source:    Utf8Error,
-      backtrace: Backtrace,
-   },
-   DomainTooLong {
-      domain:    String,
-      backtrace: Backtrace,
-   },
-   // Caller should yield
-   BytesRemaining,
-   Io {
-      // #[snafu(backtrace)]
-      source:    std::io::Error,
-      backtrace: Backtrace,
-   },
-}
+#[cfg(feature = "client")]
+pub mod outbound;
 
-impl From<std::io::Error> for Error {
-   #[inline(always)]
-   fn from(_source: std::io::Error) -> Self {
-      #[cfg(debug_assertions)]
-      panic!("IO error should not be created by From<io::Error>");
-      #[cfg(not(debug_assertions))]
-      {
-         use snafu::IntoError as _;
-         IoSnafu.into_error(_source)
-      }
-   }
-}
+pub type Error = eyre::Report;
+pub type Result<T> = eyre::Result<T>;
