@@ -313,7 +313,6 @@ pub struct CongestionControlConfig {
 	pub initial_window: u64,
 }
 
-
 #[derive(Deserialize, Serialize, Educe, Clone)]
 #[educe(Default)]
 #[serde(default)]

@@ -8,6 +8,7 @@ use wind_core::types::TargetAddr;
 
 pub mod ext;
 pub mod inbound;
+pub mod outbound;
 pub mod udp;
 
 #[derive(Debug, Snafu)]
@@ -61,5 +62,13 @@ pub fn convert_addr(addr: &SocksTargetAddr) -> TargetAddr {
 			std::net::IpAddr::V4(ipv4) => TargetAddr::IPv4(ipv4, socket_addr.port()),
 			std::net::IpAddr::V6(ipv6) => TargetAddr::IPv6(ipv6, socket_addr.port()),
 		},
+	}
+}
+
+pub fn convert_to_socks_addr(addr: &TargetAddr) -> SocksTargetAddr {
+	match addr {
+		TargetAddr::Domain(domain, port) => SocksTargetAddr::Domain(domain.clone(), *port),
+		TargetAddr::IPv4(ipv4, port) => SocksTargetAddr::Ip(SocketAddr::V4(std::net::SocketAddrV4::new(*ipv4, *port))),
+		TargetAddr::IPv6(ipv6, port) => SocksTargetAddr::Ip(SocketAddr::V6(std::net::SocketAddrV6::new(*ipv6, *port, 0, 0))),
 	}
 }

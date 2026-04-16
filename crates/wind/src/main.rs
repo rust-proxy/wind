@@ -38,28 +38,33 @@ impl InboundCallback for Manager {
 	}
 }
 
+use wind_socks::outbound::SocksOutbound;
+
 pub enum Outbounds {
 	Tuic(TuicOutbound),
+	Socks(SocksOutbound),
 }
 impl AbstractOutbound for Outbounds {
-	fn handle_tcp(
+	async fn handle_tcp(
 		&self,
 		target_addr: TargetAddr,
 		stream: impl AbstractTcpStream,
 		via: Option<impl AbstractOutbound + Sized + Send>,
-	) -> impl Future<Output = eyre::Result<()>> + Send {
-		match &self {
-			Outbounds::Tuic(tuic_outbound) => tuic_outbound.handle_tcp(target_addr, stream, via),
+	) -> eyre::Result<()> {
+		match self {
+			Outbounds::Tuic(tuic_outbound) => tuic_outbound.handle_tcp(target_addr, stream, via).await,
+			Outbounds::Socks(socks_outbound) => socks_outbound.handle_tcp(target_addr, stream, via).await,
 		}
 	}
 
-	fn handle_udp(
+	async fn handle_udp(
 		&self,
 		udp_stream: wind_core::udp::UdpStream,
 		via: Option<impl AbstractOutbound + Sized + Send>,
-	) -> impl std::future::Future<Output = eyre::Result<()>> + Send {
-		match &self {
-			Outbounds::Tuic(tuic_outbound) => tuic_outbound.handle_udp(udp_stream, via),
+	) -> eyre::Result<()> {
+		match self {
+			Outbounds::Tuic(tuic_outbound) => tuic_outbound.handle_udp(udp_stream, via).await,
+			Outbounds::Socks(socks_outbound) => socks_outbound.handle_udp(udp_stream, via).await,
 		}
 	}
 }
