@@ -1,6 +1,3 @@
-#![feature(impl_trait_in_fn_trait_return)]
-#![feature(type_alias_impl_trait)]
-#![feature(trait_alias)]
 
 pub mod dispatcher;
 pub mod inbound;

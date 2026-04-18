@@ -75,7 +75,7 @@ impl TuicOutbound {
 			.map_err(|e| eyre::eyre!("Failed to bind socket to {}: {}", socket_addr, e))?
 			.into_std()?;
 
-		let mut endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(TokioRuntime))?;
+		let endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(TokioRuntime))?;
 		endpoint.set_default_client_config(client_config);
 		let connection = endpoint
 			.connect(peer_addr, &server_name)

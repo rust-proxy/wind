@@ -93,7 +93,7 @@ pub async fn start_acme(
 							error!("Failed to start ACME HTTP-01 challenge server: {:?}", e);
 						}
 					}
-					rustls_acme::EventOk::DeployedNewCert => {
+					rustls_acme::EventOk::DeployedNewCert(_) => {
 						info!("ACME event: DeployedNewCert");
 						axum_cancel.swap(None).inspect(|v| v.cancel());
 					}

@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use crate::Error;
-
 /// TLS configuration for quiche
 #[derive(Debug, Clone)]
 pub struct TlsConfig {

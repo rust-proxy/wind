@@ -361,22 +361,6 @@ async fn connect_socks5_tcp(
 }
 
 // ============================================================================
-// TargetAddr helper – port extraction
-// ============================================================================
-
-trait TargetAddrExt {
-	fn port(&self) -> u16;
-}
-
-impl TargetAddrExt for TargetAddr {
-	fn port(&self) -> u16 {
-		match self {
-			TargetAddr::IPv4(_, p) | TargetAddr::IPv6(_, p) | TargetAddr::Domain(_, p) => *p,
-		}
-	}
-}
-
-// ============================================================================
 // Inbound factory
 // ============================================================================
 

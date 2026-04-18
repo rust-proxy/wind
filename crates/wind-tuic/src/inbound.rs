@@ -53,19 +53,19 @@ impl AsyncWrite for QuicBidiStream {
 	fn poll_write(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
 		Pin::new(&mut self.send)
 			.poll_write(cx, buf)
-			.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+			.map_err(std::io::Error::other)
 	}
 
 	fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
 		Pin::new(&mut self.send)
 			.poll_flush(cx)
-			.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+			.map_err(std::io::Error::other)
 	}
 
 	fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
 		Pin::new(&mut self.send)
 			.poll_shutdown(cx)
-			.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+			.map_err(std::io::Error::other)
 	}
 }
 
@@ -669,14 +669,9 @@ async fn get_or_create_session<C: InboundCallback>(
 
 	// Task 1: Bridge reassembled packets (crossfire rx -> mpsc tx to outbound)
 	tokio::spawn(async move {
-		loop {
-			match reassembled_rx.recv().await {
-				Ok(packet) => {
-					if to_outbound_tx.send(packet).await.is_err() {
-						break;
-					}
-				}
-				Err(_) => break,
+		while let Ok(packet) = reassembled_rx.recv().await {
+			if to_outbound_tx.send(packet).await.is_err() {
+				break;
 			}
 		}
 	});

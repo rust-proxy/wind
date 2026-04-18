@@ -1,5 +1,3 @@
-#![feature(error_generic_member_access)]
-
 use std::{backtrace::Backtrace, net::SocketAddr};
 
 use fast_socks5::{ReplyError, server::SocksServerError, util::target_addr::TargetAddr as SocksTargetAddr};

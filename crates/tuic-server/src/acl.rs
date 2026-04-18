@@ -1,13 +1,13 @@
+#[cfg(test)]
 use std::net::{IpAddr, SocketAddr};
 
 use derive_more::Display;
 use pest::Parser;
 use pest_derive::Parser;
 use serde::{Deserialize, Deserializer, Serialize, de};
-use wind_core::{
-	is_private_ip,
-	rule::{self as wrule, NetworkType},
-};
+#[cfg(test)]
+use wind_core::is_private_ip;
+use wind_core::rule::{self as wrule, NetworkType};
 
 #[derive(Parser)]
 #[grammar = "acl.pest"]
@@ -117,6 +117,7 @@ pub enum AclPortSpec {
 // Matching Logic
 // ============================================================================
 
+#[cfg(test)]
 impl AclRule {
 	/// Returns `true` if the supplied socket address, port and transport
 	/// protocol satisfy this rule.
@@ -172,6 +173,7 @@ impl AclRule {
 	}
 }
 
+#[cfg(test)]
 impl AclPortEntry {
 	/// Check if this port entry matches the given port and protocol
 	fn matches(&self, port: u16, is_tcp: bool) -> bool {

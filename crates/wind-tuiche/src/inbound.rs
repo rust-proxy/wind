@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     utils::ConnectionOpts,
-    Error, Result,
+    Result,
 };
 
 /// TUIC server implementation using quiche

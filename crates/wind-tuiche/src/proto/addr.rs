@@ -5,13 +5,13 @@ use std::{
 
 use bytes::{Buf, BufMut};
 use num_enum::{FromPrimitive, IntoPrimitive};
-use snafu::{ResultExt, ensure};
+use snafu::ensure;
 use tokio_util::codec::{Decoder, Encoder};
 use wind_core::types::TargetAddr;
 
 #[cfg(feature = "decode")]
 use crate::proto::ProtoError;
-use crate::proto::{BytesRemainingSnafu, DomainTooLongSnafu, FailParseDomainSnafu, UnknownAddressTypeSnafu};
+use crate::proto::{BytesRemainingSnafu, DomainTooLongSnafu, UnknownAddressTypeSnafu};
 
 /// Codec for TUIC address encoding and decoding
 #[derive(Debug, Clone, Copy)]

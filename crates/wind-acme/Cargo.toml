@@ -14,13 +14,13 @@ aws-lc-rs = ["rustls/aws-lc-rs", "rustls-acme/aws-lc-rs"]
 [dependencies]
 # TLS / ACME
 rustls = { version = "0.23", default-features = false }
-rustls-acme = { git = "https://github.com/FlorianUekermann/rustls-acme", default-features = false, features = ["tower", "webpki-roots"] }
+rustls-acme = { git = "https://github.com/rust-proxy/rustls-acme", default-features = false, features = ["tower", "webpki-roots"] }
 
 # HTTP challenge server
 axum = { version = "0.8", features = ["tokio"] }
 
 # Async
-tokio = { version = "1", default-features = false, features = ["macros", "net", "time", "rt"] }
+tokio = { version = "1", default-features = false, features = ["macros", "net", "time", "rt", "fs"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 

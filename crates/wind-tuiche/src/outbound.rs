@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     utils::ConnectionOpts,
-    Error, Result,
+    Result,
 };
 
 /// TUIC client implementation using quiche

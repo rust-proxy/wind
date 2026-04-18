@@ -3,7 +3,7 @@ pub use error::*;
 
 mod header;
 
-use bytes::{Buf, BytesMut};
+use bytes::BytesMut;
 use eyre::eyre;
 pub use header::*;
 
@@ -14,11 +14,12 @@ mod addr;
 pub use addr::*;
 
 mod udp_stream;
-use tokio_util::codec::{Decoder, Encoder};
+use tokio_util::codec::Decoder;
 pub use udp_stream::*;
-use wind_core::{io::quinn::QuinnCompat, tcp::AbstractTcpStream, types::TargetAddr};
+
 
 use crate::Error;
+use wind_core::types::TargetAddr;
 
 pub const VER: u8 = 5;
 

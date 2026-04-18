@@ -1,5 +1,3 @@
-#![feature(error_generic_member_access)]
-
 pub mod proto;
 mod task;
 pub mod tls;
