@@ -1,6 +1,5 @@
 #![feature(error_generic_member_access)]
 
-pub mod proto;
 mod task;
 pub mod tls;
 pub mod utils;
@@ -22,7 +21,7 @@ mod tests {
 
 	#[test]
 	fn test_version_constant() {
-		assert_eq!(proto::VER, 5);
+		assert_eq!(tuic_proto::VER, 5);
 	}
 
 	#[test]

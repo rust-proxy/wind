@@ -16,6 +16,7 @@ boringssl = []   # Enable BoringSSL support via quiche
 
 [dependencies]
 wind-core = { version = "0.1.1", path = "../wind-core", features = ["quic"] }
+tuic-proto = { version = "0.1.1", path = "../tuic-proto", features = ["decode", "encode"] }
 
 # Async
 tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "sync"] }

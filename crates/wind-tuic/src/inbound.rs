@@ -30,7 +30,7 @@ use wind_core::{
 	warn,
 };
 
-use crate::proto::{CmdType, Command};
+use tuic_proto::{CmdType, Command};
 
 /// Wrapper to combine quinn's SendStream and RecvStream into a single
 /// bidirectional stream
@@ -242,7 +242,7 @@ struct InboundCtx {
 struct UdpSession {
 	/// Protocol stream for fragment reassembly and sending responses back via
 	/// QUIC
-	tuic_stream: Arc<crate::proto::UdpStream>,
+	tuic_stream: Arc<tuic_proto::UdpStream>,
 }
 
 async fn handle_connection<C: InboundCallback>(
@@ -377,8 +377,8 @@ async fn handle_uni_stream<C: InboundCallback>(
 	let mut buf = BytesMut::from(&data[..]);
 
 	// Decode header and command using helper functions
-	let header = crate::proto::decode_header(&mut buf, "uni stream")?;
-	let cmd = crate::proto::decode_command(header.command, &mut buf, "uni stream")?;
+	let header = tuic_proto::decode_header(&mut buf, "uni stream")?;
+	let cmd = tuic_proto::decode_command(header.command, &mut buf, "uni stream")?;
 
 	match cmd {
 		Command::Auth { uuid, token } => {
@@ -392,11 +392,11 @@ async fn handle_uni_stream<C: InboundCallback>(
 			size,
 		} => {
 			// Decode address (may be Address::None for non-first fragments)
-			let addr = crate::proto::decode_address(&mut buf, "uni stream packet")?;
+			let addr = tuic_proto::decode_address(&mut buf, "uni stream packet")?;
 			let payload = buf.split_to(size as usize).freeze();
 
 			// Convert address to TargetAddr, using placeholder for non-first fragments
-			let target_addr = match crate::proto::address_to_target(addr) {
+			let target_addr = match tuic_proto::address_to_target(addr) {
 				Ok(t) => t,
 				Err(_) => wind_core::types::TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
 			};
@@ -445,12 +445,12 @@ async fn handle_bi_stream<C: InboundCallback>(
 		.map_err(|e| eyre::eyre!("Failed to read header: {}", e))?;
 	let mut buf = BytesMut::from(&header_buf[..]);
 
-	let header = crate::proto::decode_header(&mut buf, "bi stream")?;
+	let header = tuic_proto::decode_header(&mut buf, "bi stream")?;
 
 	match header.command {
 		CmdType::Connect => {
 			// Decode command (Connect has no additional fields)
-			let _cmd = crate::proto::decode_command(CmdType::Connect, &mut BytesMut::new(), "bi stream")?;
+			let _cmd = tuic_proto::decode_command(CmdType::Connect, &mut BytesMut::new(), "bi stream")?;
 
 			// Read exactly the address bytes, leaving the relay payload in `recv`
 			// so that the same stream can be used for bidirectional data relay.
@@ -459,7 +459,7 @@ async fn handle_bi_stream<C: InboundCallback>(
 				.wrap_err("Failed to read connect address")?;
 
 			// Convert address to TargetAddr using helper function
-			let target_addr = crate::proto::address_to_target(addr)?;
+			let target_addr = tuic_proto::address_to_target(addr)?;
 
 			info!("TCP connect to {}", target_addr);
 
@@ -495,11 +495,11 @@ async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: 
 	let mut buf = BytesMut::from(data.as_ref());
 
 	// Decode header using helper function
-	let header = crate::proto::decode_header(&mut buf, "datagram")?;
+	let header = tuic_proto::decode_header(&mut buf, "datagram")?;
 
 	match header.command {
 		CmdType::Packet => {
-			let cmd = crate::proto::decode_command(CmdType::Packet, &mut buf, "datagram")?;
+			let cmd = tuic_proto::decode_command(CmdType::Packet, &mut buf, "datagram")?;
 
 			if let Command::Packet {
 				assoc_id,
@@ -509,11 +509,11 @@ async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: 
 				size,
 			} = cmd
 			{
-				let addr = crate::proto::decode_address(&mut buf, "datagram packet")?;
+				let addr = tuic_proto::decode_address(&mut buf, "datagram packet")?;
 				let payload = buf.split_to(size as usize).freeze();
 
 				// Convert address to TargetAddr, using placeholder for non-first fragments
-				let target_addr = match crate::proto::address_to_target(addr) {
+				let target_addr = match tuic_proto::address_to_target(addr) {
 					Ok(t) => t,
 					Err(_) => wind_core::types::TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
 				};
@@ -628,7 +628,7 @@ async fn get_or_create_session<C: InboundCallback>(
 	ctx: &Arc<InboundCtx>,
 	assoc_id: u16,
 	callback: &C,
-) -> eyre::Result<Arc<crate::proto::UdpStream>> {
+) -> eyre::Result<Arc<tuic_proto::UdpStream>> {
 	// Fast path: check with read lock
 	{
 		let sessions = ctx.udp_sessions.read().await;
@@ -653,7 +653,7 @@ async fn get_or_create_session<C: InboundCallback>(
 	let (from_outbound_tx, mut from_outbound_rx) = mpsc::channel::<UdpPacket>(100);
 
 	// Create proto::UdpStream for fragment reassembly and response sending
-	let tuic_stream = Arc::new(crate::proto::UdpStream::new(ctx.conn.clone(), assoc_id, reassembled_tx));
+	let tuic_stream = Arc::new(tuic_proto::UdpStream::new(ctx.conn.clone(), assoc_id, reassembled_tx));
 
 	// UdpStream for the outbound handler
 	let outbound_stream = CoreUdpStream {
@@ -704,7 +704,7 @@ async fn get_or_create_session<C: InboundCallback>(
 /// Unlike `read_to_end`, this function reads only as many bytes as the address
 /// encoding requires, so the remaining bytes in `recv` are available as relay
 /// payload after the address has been decoded.
-async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate::proto::Address> {
+async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<tuic_proto::Address> {
 	// Read address type byte first to determine how many more bytes are needed.
 	let mut type_byte = [0u8; 1];
 	recv.read_exact(&mut type_byte)
@@ -753,7 +753,7 @@ async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate:
 		}
 	}
 
-	crate::proto::decode_address(&mut buf, "bi stream connect")
+	tuic_proto::decode_address(&mut buf, "bi stream connect")
 }
 
 /// Handle UDP dissociate

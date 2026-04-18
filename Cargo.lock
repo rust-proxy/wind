@@ -3948,6 +3948,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuic-proto"
+version = "0.1.1"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "const-hex",
+ "crossfire 2.1.10",
+ "eyre",
+ "moka",
+ "num_enum",
+ "quinn 0.12.0",
+ "snafu",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "wind-core",
+]
+
+[[package]]
 name = "tuic-server"
 version = "0.1.1"
 dependencies = [
@@ -4473,6 +4492,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tuic-proto",
  "uuid",
  "wind-core",
 ]
@@ -4491,6 +4511,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
+ "tuic-proto",
  "uuid",
  "wind-core",
 ]

@@ -4,7 +4,7 @@ use snafu::ensure;
 use tokio_util::codec::{Decoder, Encoder};
 
 use super::{Command, VER};
-use crate::proto::{BytesRemainingSnafu, UnknownCommandTypeSnafu, VersionDismatchSnafu};
+use crate::{BytesRemainingSnafu, UnknownCommandTypeSnafu, VersionDismatchSnafu};
 
 #[derive(Debug, Clone, Copy)]
 pub struct HeaderCodec;
@@ -35,7 +35,7 @@ impl Header {
 
 #[cfg(feature = "decode")]
 impl Decoder for HeaderCodec {
-	type Error = crate::proto::ProtoError;
+	type Error = crate::ProtoError;
 	type Item = Header;
 
 	fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -71,7 +71,7 @@ impl Decoder for HeaderCodec {
 
 #[cfg(feature = "encode")]
 impl Encoder<Header> for HeaderCodec {
-	type Error = std::io::Error;
+	type Error = crate::ProtoError;
 
 	fn encode(&mut self, item: Header, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
 		dst.reserve(2);
@@ -90,5 +90,63 @@ impl From<&Command> for CmdType {
 			Command::Dissociate { .. } => CmdType::Dissociate,
 			Command::Heartbeat => CmdType::Heartbeat,
 		}
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use futures_util::SinkExt as _;
+	use tokio_stream::StreamExt as _;
+	use tokio_util::codec::{FramedRead, FramedWrite};
+
+	use crate::proto::{CmdType, Header, HeaderCodec, ProtoError, VER};
+
+	/// Usual test
+	#[test_log::test(tokio::test)]
+	async fn test_header_1() -> eyre::Result<()> {
+		let header = Header {
+			version: VER,
+			command: CmdType::Connect,
+		};
+		let buffer = Vec::with_capacity(2);
+		let mut writer = FramedWrite::new(buffer, HeaderCodec);
+		let expect_len = 2;
+
+		writer.send(header.clone()).await?;
+		assert_eq!(writer.get_ref().len(), expect_len);
+		let buffer = writer.get_ref();
+		let mut reader = FramedRead::new(buffer.as_slice(), HeaderCodec);
+
+		let frame = reader.next().await.unwrap()?;
+		assert_eq!(header, frame);
+
+		Ok(())
+	}
+	/// Data not fully arrive
+	#[test_log::test(tokio::test)]
+	async fn test_header_2() -> eyre::Result<()> {
+		let header = Header {
+			version: VER,
+			command: CmdType::Auth,
+		};
+		let buffer = Vec::with_capacity(2);
+		let mut writer = FramedWrite::new(buffer, HeaderCodec);
+		writer.send(header.clone()).await?;
+		let mut buffer = writer.into_inner();
+		let full_len = buffer.len();
+		let mut half_b = buffer.split_off(full_len / 2 as usize);
+		let mut half_a = buffer;
+		{
+			let mut reader = FramedRead::new(half_a.as_slice(), HeaderCodec);
+			assert!(matches!(
+				reader.next().await.unwrap().unwrap_err(),
+				ProtoError::BytesRemaining
+			));
+		}
+		half_a.append(&mut half_b);
+		let mut reader = FramedRead::new(half_a.as_slice(), HeaderCodec);
+		assert_eq!(reader.next().await.unwrap()?, header);
+
+		Ok(())
 	}
 }

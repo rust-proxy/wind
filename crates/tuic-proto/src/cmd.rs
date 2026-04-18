@@ -2,8 +2,8 @@ use bytes::{Buf, BufMut as _};
 use tokio_util::codec::{Decoder, Encoder};
 use uuid::Uuid;
 
-use super::CmdType;
-use crate::proto::{BytesRemainingSnafu, UnknownCommandTypeSnafu};
+use crate::header::CmdType;
+use crate::{BytesRemainingSnafu, UnknownCommandTypeSnafu};
 
 #[derive(Debug, Clone, Copy)]
 pub struct CmdCodec(pub CmdType);
@@ -31,7 +31,7 @@ pub enum Command {
 // https://github.com/proxy-rs/wind/blob/main/crates/wind-tuic/SPEC.md#5-command-definitions
 #[cfg(feature = "decode")]
 impl Decoder for CmdCodec {
-	type Error = crate::proto::ProtoError;
+	type Error = crate::ProtoError;
 	type Item = Command;
 
 	fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -83,7 +83,7 @@ impl Decoder for CmdCodec {
 
 #[cfg(feature = "encode")]
 impl Encoder<Command> for CmdCodec {
-	type Error = crate::proto::ProtoError;
+	type Error = crate::ProtoError;
 
 	fn encode(&mut self, item: Command, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
 		match item {
