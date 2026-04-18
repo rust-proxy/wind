@@ -54,7 +54,7 @@ impl TuicOutbound {
 			#[cfg(feature = "ring")]
 			let _ = rustls::crypto::ring::default_provider().install_default();
 		}
-		info!(target: "[OUT]", "Creating a new outboud");
+		info!(target: "[OUT]", "Creating a new outbound");
 		let client_config = {
 			let tls_config = super::tls::tls_config(&server_name, &opts)?;
 

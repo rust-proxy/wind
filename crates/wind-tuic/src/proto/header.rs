@@ -4,7 +4,7 @@ use snafu::ensure;
 use tokio_util::codec::{Decoder, Encoder};
 
 use super::{Command, VER};
-use crate::proto::{BytesRemainingSnafu, UnknownCommandTypeSnafu, VersionDismatchSnafu};
+use crate::proto::{BytesRemainingSnafu, UnknownCommandTypeSnafu, VersionMismatchSnafu};
 
 #[derive(Debug, Clone, Copy)]
 pub struct HeaderCodec;
@@ -45,7 +45,7 @@ impl Decoder for HeaderCodec {
 		let ver = src.get_u8();
 		ensure!(
 			ver == VER,
-			VersionDismatchSnafu {
+			VersionMismatchSnafu {
 				expect: VER,
 				current: ver
 			}

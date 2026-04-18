@@ -108,7 +108,7 @@ If a request meets any of the following conditions:
 1. The HTTP method is not `CONNECT` (e.g., `GET`, `POST`)
 2. The method is `CONNECT`, but the `Proxy-Authorization` header is missing or invalid
 
-The server MUST proxy the request to a pre-configured camouflage upstream (a legitimate HTTP server) or serve static, benign HTML content. The server's response headers, status codes, and response body MUST strictly match what a normal web server would return (e.g., returning `200 OK` for valid paths, `404 Not Found` for missing paths, or `405 Method Not Allowed` for unauthorized CONNECTs handled by the upstream).
+The server MUST proxy the request to a pre-configured camouflage upstream (a legitimate HTTP server) or serve static, benign HTML content. The server's response headers, status codes, and response body MUST strictly match what a normal web server would return (e.g., returning `200 OK` for valid paths, `404 Not Found` for missing paths, or `405 Method Not Allowed` for unauthorized CONNECT requests handled by the upstream).
 
 ## 7. Security Considerations
 

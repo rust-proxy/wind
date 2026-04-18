@@ -131,27 +131,3 @@ release-name = "x86_64-darwin"
 os = "macos-latest"
 target = "aarch64-apple-darwin"
 release-name = "aarch64-darwin"
-
-# ==================== Other Targets ====================
-
-# FreeBSD
-[[target]]
-os = "ubuntu-latest"
-target = "x86_64-unknown-freebsd"
-release-name = "x86_64-freebsd"
-tool = "cross"
-skip-test = true
-
-# RISC-V 64-bit Linux
-[[target]]
-os = "ubuntu-latest"
-target = "riscv64gc-unknown-linux-gnu"
-release-name = "riscv64gc-linux"
-tool = "cross"
-
-# LoongArch 64-bit Linux
-[[target]]
-os = "ubuntu-latest"
-target = "loongarch64-unknown-linux-gnu"
-release-name = "loongarch64-linux"
-tool = "cross"

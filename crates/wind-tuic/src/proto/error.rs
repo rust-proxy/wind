@@ -6,7 +6,7 @@ use snafu::prelude::*;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ProtoError {
-	VersionDismatch {
+	VersionMismatch {
 		expect: u8,
 		current: u8,
 		backtrace: Backtrace,
