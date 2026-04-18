@@ -209,11 +209,10 @@ impl TuicOutbound {
 									})
 								};
 
-							if let Some(packet) = complete_packet {
-                                if let Err(e) = tuic_udp_stream.receive_packet(packet).await {
+							if let Some(packet) = complete_packet
+                                && let Err(e) = tuic_udp_stream.receive_packet(packet).await {
 									warn!(target: "[OUT]", "Failed to send packet to UDP session {:#06x}: {}", assoc_id, e);
 								}
-                            }
 						} else {
 								warn!(target: "[OUT]", "Received UDP packet for unknown association {:#06x}", assoc_id);
 							}

@@ -155,7 +155,7 @@ impl<R: Router> InboundCallback for Dispatcher<R> {
 		match action {
 			RouteAction::Reject(reason) => {
 				tracing::debug!("[dispatcher] TCP {} → reject: {}", target_addr, reason);
-				return Err(eyre::eyre!("connection rejected: {}", reason));
+				Err(eyre::eyre!("connection rejected: {}", reason))
 			}
 			RouteAction::Forward(name) => {
 				tracing::debug!("[dispatcher] TCP {} → outbound '{}'", target_addr, name);

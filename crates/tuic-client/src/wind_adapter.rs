@@ -87,8 +87,8 @@ impl TuicOutboundAdapter {
 	}
 
 	/// Initialize the global wind-tuic connection
-	pub fn set_global(adapter: Self) -> Result<(), Self> {
-		WIND_CONNECTION.set(adapter)
+	pub fn set_global(adapter: Self) -> Result<(), Box<Self>> {
+		WIND_CONNECTION.set(adapter).map_err(Box::new)
 	}
 }
 

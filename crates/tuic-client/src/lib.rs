@@ -18,7 +18,7 @@ pub use config::Config;
 pub async fn run(cfg: Config) -> eyre::Result<()> {
 	// Initialize wind-tuic connection
 	let ctx = Arc::new(AppContext::default());
-	let _adapter = wind_adapter::create_connection(ctx, cfg.relay).await?;
+	wind_adapter::create_connection(ctx, cfg.relay).await?;
 
 	tracing::info!("TUIC client initialized with wind-tuic backend");
 

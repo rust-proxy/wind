@@ -217,10 +217,15 @@ pub enum RuleType {
 // MatchContext
 // ============================================================================
 
+pub type GeoIpLookup<'a> = &'a dyn Fn(&str, IpAddr) -> bool;
+pub type AsnLookup<'a> = &'a dyn Fn(u32, IpAddr) -> bool;
+pub type GeoSiteLookup<'a> = &'a dyn Fn(&str, &str) -> bool;
+
 /// Context supplied to [`Rule::matches`].
 ///
 /// Fill in the fields that are known; unknown fields should be `None` (the
 /// default).
+#[derive(Default)]
 pub struct MatchContext<'a> {
 	// -- Connection info --
 	pub src_ip: Option<IpAddr>,
@@ -245,36 +250,12 @@ pub struct MatchContext<'a> {
 	pub uid: Option<u32>,
 
 	// -- External lookup functions (provided by caller) --
-	pub geoip_lookup: Option<&'a dyn Fn(&str, IpAddr) -> bool>,
-	pub asn_lookup: Option<&'a dyn Fn(u32, IpAddr) -> bool>,
-	pub geosite_lookup: Option<&'a dyn Fn(&str, &str) -> bool>,
+	pub geoip_lookup: Option<GeoIpLookup<'a>>,
+	pub asn_lookup: Option<AsnLookup<'a>>,
+	pub geosite_lookup: Option<GeoSiteLookup<'a>>,
 }
 
 // Manual impls because the function-pointer fields prevent derive.
-
-impl<'a> Default for MatchContext<'a> {
-	fn default() -> Self {
-		Self {
-			src_ip: None,
-			dst_ip: None,
-			src_port: None,
-			dst_port: None,
-			domain: None,
-			network: None,
-			dscp: None,
-			inbound_port: None,
-			inbound_type: None,
-			inbound_user: None,
-			inbound_name: None,
-			process_path: None,
-			process_name: None,
-			uid: None,
-			geoip_lookup: None,
-			asn_lookup: None,
-			geosite_lookup: None,
-		}
-	}
-}
 
 impl<'a> Clone for MatchContext<'a> {
 	fn clone(&self) -> Self {

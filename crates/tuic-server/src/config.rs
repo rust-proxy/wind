@@ -96,6 +96,9 @@ pub struct Config {
 	#[educe(Default = false)]
 	pub zero_rtt_handshake: bool,
 
+	#[educe(Default = "tuic".to_string())]
+	pub backend: String,
+
 	#[educe(Default = true)]
 	pub dual_stack: bool,
 

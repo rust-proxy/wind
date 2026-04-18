@@ -82,7 +82,7 @@ fn parse_udp_request_sync(data: &[u8]) -> Result<(u8, SocksTargetAddr, &[u8]), S
 			SocksTargetAddr::Ip(SocketAddr::V6(std::net::SocketAddrV6::new(ip, port, 0, 0)))
 		}
 		_ => {
-			return Err(format!("Unsupported address type: {}", atyp).into());
+			return Err(format!("Unsupported address type: {}", atyp));
 		}
 	};
 

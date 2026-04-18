@@ -41,7 +41,7 @@ impl InboundCallback for Manager {
 use wind_socks::outbound::SocksOutbound;
 
 pub enum Outbounds {
-	Tuic(TuicOutbound),
+	Tuic(Box<TuicOutbound>),
 	Socks(SocksOutbound),
 }
 impl AbstractOutbound for Outbounds {

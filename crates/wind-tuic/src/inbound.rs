@@ -51,21 +51,15 @@ impl AsyncRead for QuicBidiStream {
 
 impl AsyncWrite for QuicBidiStream {
 	fn poll_write(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
-		Pin::new(&mut self.send)
-			.poll_write(cx, buf)
-			.map_err(std::io::Error::other)
+		Pin::new(&mut self.send).poll_write(cx, buf).map_err(std::io::Error::other)
 	}
 
 	fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-		Pin::new(&mut self.send)
-			.poll_flush(cx)
-			.map_err(std::io::Error::other)
+		Pin::new(&mut self.send).poll_flush(cx).map_err(std::io::Error::other)
 	}
 
 	fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-		Pin::new(&mut self.send)
-			.poll_shutdown(cx)
-			.map_err(std::io::Error::other)
+		Pin::new(&mut self.send).poll_shutdown(cx).map_err(std::io::Error::other)
 	}
 }
 

@@ -22,6 +22,7 @@ jemallocator = ["tikv-jemallocator"]
 # Wind framework
 wind-core = { path = "../wind-core" }
 wind-tuic = { path = "../wind-tuic", features = ["server"] }
+wind-tuiche = { path = "../wind-tuiche", features = ["server"] }
 wind-acme = { path = "../wind-acme" }
 fast-socks5 = { version = "1" }
 

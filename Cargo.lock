@@ -3994,6 +3994,7 @@ dependencies = [
  "wind-acme",
  "wind-core",
  "wind-tuic",
+ "wind-tuiche",
 ]
 
 [[package]]

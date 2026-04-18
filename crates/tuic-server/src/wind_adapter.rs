@@ -41,6 +41,21 @@ use wind_core::{
 	utils::{StackPrefer, is_private_ip},
 };
 use wind_tuic::inbound::{TuicInbound, TuicInboundOpts};
+use wind_tuiche::inbound::{TuicheInbound, TuicheInboundBuilder};
+
+pub enum ServerInbound {
+	Tuic(TuicInbound),
+	Tuiche(TuicheInbound),
+}
+
+impl wind_core::AbstractInbound for ServerInbound {
+	async fn listen(&self, cb: &impl wind_core::InboundCallback) -> eyre::Result<()> {
+		match self {
+			ServerInbound::Tuic(inbound) => inbound.listen(cb).await,
+			ServerInbound::Tuiche(inbound) => inbound.listen(cb).await,
+		}
+	}
+}
 
 use crate::{AppContext as TuicAppContext, acl::acl_to_rules, config::OutboundRule};
 
@@ -366,7 +381,7 @@ async fn connect_socks5_tcp(
 
 /// Creates a wind-tuic inbound and a fully-wired `Dispatcher` from
 /// tuic-server configuration.
-pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(TuicInbound, Dispatcher<TuicRouter>)> {
+pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInbound, Dispatcher<TuicRouter>)> {
 	let cfg = &ctx.cfg;
 
 	// Load or generate TLS certificate and key
@@ -398,26 +413,37 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(TuicInbou
 		load_cert_from_files(&cfg.tls.certificate, &cfg.tls.private_key)?
 	};
 
-	let opts = TuicInboundOpts {
-		listen_addr: cfg.server,
-		certificate: certs,
-		private_key: key,
-		alpn: cfg.tls.alpn.clone(),
-		users: cfg.users.clone(),
-		auth_timeout: cfg.auth_timeout,
-		max_idle_time: cfg.quic.max_idle_time,
-		max_concurrent_bi_streams: 512,
-		max_concurrent_uni_streams: 512,
-		send_window: cfg.quic.send_window,
-		receive_window: cfg.quic.receive_window,
-		zero_rtt: cfg.zero_rtt_handshake,
-		initial_mtu: cfg.quic.initial_mtu,
-		min_mtu: cfg.quic.min_mtu,
-		gso: cfg.quic.gso,
-	};
-
 	let wind_ctx = Arc::new(AppContext::default());
-	let inbound = TuicInbound::new(wind_ctx, opts);
+
+	let inbound = if cfg.backend == "tuiche" {
+		tracing::info!("Initializing wind-tuiche backend (experimental)");
+		let mut builder = TuicheInboundBuilder::new()
+			.listen_addr(cfg.server)
+			.max_idle_time(cfg.quic.max_idle_time);
+		for (uuid, pwd) in &cfg.users {
+			builder = builder.user(*uuid, pwd.clone());
+		}
+		ServerInbound::Tuiche(builder.build().await?)
+	} else {
+		let opts = TuicInboundOpts {
+			listen_addr: cfg.server,
+			certificate: certs,
+			private_key: key,
+			alpn: cfg.tls.alpn.clone(),
+			users: cfg.users.clone(),
+			auth_timeout: cfg.auth_timeout,
+			max_idle_time: cfg.quic.max_idle_time,
+			max_concurrent_bi_streams: 512,
+			max_concurrent_uni_streams: 512,
+			send_window: cfg.quic.send_window,
+			receive_window: cfg.quic.receive_window,
+			zero_rtt: cfg.zero_rtt_handshake,
+			initial_mtu: cfg.quic.initial_mtu,
+			min_mtu: cfg.quic.min_mtu,
+			gso: cfg.quic.gso,
+		};
+		ServerInbound::Tuic(TuicInbound::new(wind_ctx, opts))
+	};
 
 	// Build the Dispatcher
 	let router = TuicRouter::new(ctx.clone());

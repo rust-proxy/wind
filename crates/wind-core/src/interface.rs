@@ -41,6 +41,7 @@ pub enum Network {
 	ICMPv6,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackPrefer {
 	V4,
