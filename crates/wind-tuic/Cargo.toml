@@ -58,7 +58,7 @@ thiserror = "1"
 tracing = "0.1"
 
 # QUIC with quiche
-quiche = { version = "0.21", default-features = false, features = ["boringssl-vendored", "qlog"], optional = true }
+quiche = { version = "0.21", default-features = false, features = ["boringssl-boring-crate", "qlog"], optional = true }
 
 # QUIC with quinn
 quinn = { workspace = true, default-features = false, features = ["runtime-tokio"], optional = true }
