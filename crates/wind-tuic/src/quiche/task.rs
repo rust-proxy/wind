@@ -7,20 +7,21 @@ use tokio::time;
 /// Error indicating a task timed out
 #[derive(Debug, thiserror::Error)]
 #[error("Task timed out")]
+#[allow(dead_code)]
 pub struct TimeoutError;
 
-/// Run a future with a timeout
+#[allow(dead_code)]
 pub async fn with_timeout<T, F>(timeout: Duration, future: F) -> Result<T, TimeoutError>
 where
 	F: std::future::Future<Output = T>,
 {
-	match time::timeout(timeout, future).await {
-		Ok(result) => Ok(result),
+	match tokio::time::timeout(timeout, future).await {
+		Ok(res) => Ok(res),
 		Err(_) => Err(TimeoutError),
 	}
 }
 
-/// Run a future with retries
+#[allow(dead_code)]
 pub async fn with_retries<T, E, F, Fut>(
 	max_retries: u32,
 	initial_delay: Duration,

@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use wind_core::{AbstractOutbound, AppContext, info, tcp::AbstractTcpStream, types::TargetAddr, warn};
 
-use crate::{Error, task::ClientTaskExt};
-use tuic_proto::{ClientProtoExt, UdpStream as TuicUdpStream};
+use crate::proto::{ClientProtoExt, UdpStream as TuicUdpStream};
+use crate::{Error, quinn::task::ClientTaskExt};
 
 pub struct TuicOutboundOpts {
 	pub peer_addr: SocketAddr,
@@ -142,7 +142,7 @@ impl TuicOutbound {
 						let mut buf = bytes::BytesMut::from(bytes.as_ref());
 
 						// Parse header, command, and address using helper functions
-						let header = match tuic_proto::decode_header(&mut buf, "datagram") {
+						let header = match crate::proto::decode_header(&mut buf, "datagram") {
 							Ok(h) => h,
 							Err(e) => {
 								warn!(target: "[OUT]", "Failed to decode header: {}", e);
@@ -150,7 +150,7 @@ impl TuicOutbound {
 							}
 						};
 
-						let cmd = match tuic_proto::decode_command(header.command, &mut buf, "datagram") {
+						let cmd = match crate::proto::decode_command(header.command, &mut buf, "datagram") {
 							Ok(c) => c,
 							Err(e) => {
 								warn!(target: "[OUT]", "Failed to decode command: {}", e);
@@ -159,7 +159,7 @@ impl TuicOutbound {
 						};
 
 						// Process UDP packet
-						if let tuic_proto::Command::Packet {
+						if let crate::proto::Command::Packet {
 							assoc_id,
 							pkt_id,
 							frag_total,
@@ -167,7 +167,7 @@ impl TuicOutbound {
 							size,
 						} = cmd {
 							// Parse address
-							let addr = match tuic_proto::decode_address(&mut buf, "UDP packet") {
+							let addr = match crate::proto::decode_address(&mut buf, "UDP packet") {
 								Ok(a) => a,
 								Err(e) => {
 									warn!(target: "[OUT]", "Failed to decode address: {}", e);
@@ -179,7 +179,7 @@ impl TuicOutbound {
 							let payload = buf.copy_to_bytes(size as usize);
 
 							// Convert address to TargetAddr and handle logging
-							let (target, has_address) = match tuic_proto::address_to_target(addr) {
+							let (target, has_address) = match crate::proto::address_to_target(addr) {
 								Ok(t) => (t, true),
 								Err(_) => {
 									(TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0), false)
@@ -256,7 +256,7 @@ impl AbstractOutbound for TuicOutbound {
 
 		let connection = self.connection.clone();
 		let (receive_tx, receive_rx) = crossfire::mpmc::bounded_async(128);
-		let tuic_stream = Arc::new(tuic_proto::UdpStream::new(connection.clone(), assoc_id, receive_tx));
+		let tuic_stream = Arc::new(crate::proto::UdpStream::new(connection.clone(), assoc_id, receive_tx));
 		self.udp_session.insert(assoc_id, tuic_stream.clone()).await;
 		let cancel_stream = cancel.clone();
 

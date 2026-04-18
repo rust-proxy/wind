@@ -4,9 +4,10 @@ use std::{net::SocketAddr, time::Duration};
 
 use uuid::Uuid;
 
-use crate::{Result, utils::ConnectionOpts};
+use crate::{Result, quiche::utils::ConnectionOpts};
 
 /// TUIC client implementation using quiche
+#[allow(dead_code)]
 pub struct TuicheOutbound {
 	server_addr: SocketAddr,
 	server_name: String,

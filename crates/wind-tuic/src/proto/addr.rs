@@ -8,7 +8,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 use snafu::{ResultExt, ensure};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::{BytesRemainingSnafu, DomainTooLongSnafu, FailParseDomainSnafu, ProtoError, UnknownAddressTypeSnafu};
+use crate::proto::{BytesRemainingSnafu, DomainTooLongSnafu, FailParseDomainSnafu, ProtoError, UnknownAddressTypeSnafu};
 
 use wind_core::types::TargetAddr;
 

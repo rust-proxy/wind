@@ -51,6 +51,7 @@ pub enum StackPrefer {
 }
 
 impl StackPrefer {
+	#[allow(dead_code)]
 	pub fn support_v6(&self) -> bool {
 		!matches!(self, StackPrefer::V4)
 	}

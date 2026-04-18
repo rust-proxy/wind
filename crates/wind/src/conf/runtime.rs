@@ -1,5 +1,5 @@
 use wind_socks::inbound::SocksInboundOpt;
-use wind_tuic::outbound::TuicOutboundOpts;
+use wind_tuic::quinn::outbound::TuicOutboundOpts;
 
 use crate::{conf::persistent::PersistentConfig, util::target_addr_to_socket_addr};
 

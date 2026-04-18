@@ -6,7 +6,7 @@ use wind_core::{
 	AbstractOutbound, AppContext, InboundCallback, inbound::AbstractInbound, info, tcp::AbstractTcpStream, types::TargetAddr,
 };
 use wind_socks::inbound::SocksInbound;
-use wind_tuic::outbound::TuicOutbound;
+use wind_tuic::quinn::outbound::TuicOutbound;
 
 mod util;
 use crate::{

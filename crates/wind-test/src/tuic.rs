@@ -104,8 +104,8 @@ mod tests {
 	use uuid::Uuid;
 	use wind_core::{AbstractInbound, AbstractOutbound};
 	use wind_tuic::{
-		inbound::{TuicInbound, TuicInboundOpts},
-		outbound::{TuicOutbound, TuicOutboundOpts},
+		quinn::inbound::{TuicInbound, TuicInboundOpts},
+		quinn::outbound::{TuicOutbound, TuicOutboundOpts},
 	};
 
 	use super::*;
@@ -177,7 +177,7 @@ mod tests {
 			skip_cert_verify: true,
 			alpn: vec!["h3".to_string()],
 		};
-		let client = Arc::new(TuicOutbound::new(ctx.clone(), opts).await?);
+		let client: std::sync::Arc<TuicOutbound> = std::sync::Arc::new(TuicOutbound::new(ctx.clone(), opts).await?);
 		let poll_client = client.clone();
 		tokio::spawn(async move {
 			let _ = poll_client.start_poll().await;
@@ -194,7 +194,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_tuic_connection() {
 		let setup = setup_tuic_server().await.expect("Failed to start TUIC server");
-		let result = connect_tuic_client(&setup).await;
+		let result: eyre::Result<std::sync::Arc<TuicOutbound>> = connect_tuic_client(&setup).await;
 		assert!(result.is_ok(), "Client should connect successfully: {:?}", result.err());
 	}
 
@@ -202,7 +202,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_tuic_auth_valid_credentials() {
 		let setup = setup_tuic_server().await.expect("Failed to start TUIC server");
-		let result = connect_tuic_client(&setup).await;
+		let result: eyre::Result<std::sync::Arc<TuicOutbound>> = connect_tuic_client(&setup).await;
 		assert!(result.is_ok(), "Valid credentials must be accepted: {:?}", result.err());
 	}
 
@@ -225,7 +225,7 @@ mod tests {
 			skip_cert_verify: true,
 			alpn: vec!["h3".to_string()],
 		};
-		let result = TuicOutbound::new(ctx, opts).await;
+		let result: eyre::Result<TuicOutbound> = TuicOutbound::new(ctx, opts).await;
 		assert!(
 			result.is_ok(),
 			"QUIC transport connection should succeed regardless of password (auth is async): {:?}",
@@ -251,7 +251,7 @@ mod tests {
 			skip_cert_verify: true,
 			alpn: vec!["h3".to_string()],
 		};
-		let result = TuicOutbound::new(ctx, opts).await;
+		let result: eyre::Result<TuicOutbound> = TuicOutbound::new(ctx, opts).await;
 		assert!(
 			result.is_ok(),
 			"QUIC transport should succeed with unknown UUID; auth failure is handled async: {:?}",
@@ -291,7 +291,7 @@ mod tests {
 		});
 
 		let setup = setup_tuic_server().await.expect("Failed to start TUIC server");
-		let client = connect_tuic_client(&setup).await.expect("Failed to connect TUIC client");
+		let client: std::sync::Arc<TuicOutbound> = connect_tuic_client(&setup).await.expect("Failed to connect TUIC client");
 
 		// `local` is the test end; `remote` is passed to handle_tcp as the local
 		// stream.
@@ -331,7 +331,7 @@ mod tests {
 		});
 
 		let setup = setup_tuic_server().await.expect("Failed to start TUIC server");
-		let client = connect_tuic_client(&setup).await.expect("Failed to connect TUIC client");
+		let client: std::sync::Arc<TuicOutbound> = connect_tuic_client(&setup).await.expect("Failed to connect TUIC client");
 
 		let (mut local, remote) = tokio::io::duplex(65536);
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());

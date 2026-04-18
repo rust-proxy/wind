@@ -40,8 +40,8 @@ use wind_core::{
 	udp::{UdpPacket, UdpStream},
 	utils::{StackPrefer, is_private_ip},
 };
-use wind_tuic::inbound::{TuicInbound, TuicInboundOpts};
-use wind_tuiche::inbound::{TuicheInbound, TuicheInboundBuilder};
+use wind_tuic::quiche::inbound::{TuicheInbound, TuicheInboundBuilder};
+use wind_tuic::quinn::inbound::{TuicInbound, TuicInboundOpts};
 
 pub enum ServerInbound {
 	Tuic(TuicInbound),

@@ -476,7 +476,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 	let key_der = cert.key_pair.serialize_der();
 
 	// Setup TUIC server options
-	let tuic_opts = wind_tuic::inbound::TuicInboundOpts {
+	let tuic_opts = wind_tuic::quinn::inbound::TuicInboundOpts {
 		listen_addr: format!("127.0.0.1:{}", config.tuic_port).parse()?,
 		certificate: vec![rustls::pki_types::CertificateDer::from(cert_der)],
 		private_key: rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
@@ -498,7 +498,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 	#[derive(Clone)]
 	struct TestManager {
 		socks_inbound: Arc<wind_socks::inbound::SocksInbound>,
-		tuic_inbound: Arc<wind_tuic::inbound::TuicInbound>,
+		tuic_inbound: Arc<wind_tuic::quinn::inbound::TuicInbound>,
 	}
 
 	impl InboundCallback for TestManager {
@@ -605,7 +605,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 	}
 
 	// Initialize inbound servers
-	let tuic_inbound = Arc::new(wind_tuic::inbound::TuicInbound::new(ctx.clone(), tuic_opts));
+	let tuic_inbound = Arc::new(wind_tuic::quinn::inbound::TuicInbound::new(ctx.clone(), tuic_opts));
 	let socks_inbound = Arc::new(wind_socks::inbound::SocksInbound::new(config.socks_opt, ctx.token.child_token()).await);
 
 	let manager = Arc::new(TestManager {

@@ -9,7 +9,7 @@ use wind_core::{
 	info, warn,
 };
 
-use crate::{Result, utils::ConnectionOpts};
+use crate::{Result, quiche::utils::ConnectionOpts};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 

@@ -4,7 +4,7 @@ use snafu::ensure;
 use tokio_util::codec::{Decoder, Encoder};
 
 use super::{Command, VER};
-use crate::{BytesRemainingSnafu, UnknownCommandTypeSnafu, VersionDismatchSnafu};
+use crate::proto::{BytesRemainingSnafu, UnknownCommandTypeSnafu, VersionDismatchSnafu};
 
 #[derive(Debug, Clone, Copy)]
 pub struct HeaderCodec;
@@ -35,7 +35,7 @@ impl Header {
 
 #[cfg(feature = "decode")]
 impl Decoder for HeaderCodec {
-	type Error = crate::ProtoError;
+	type Error = crate::proto::ProtoError;
 	type Item = Header;
 
 	fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -71,7 +71,7 @@ impl Decoder for HeaderCodec {
 
 #[cfg(feature = "encode")]
 impl Encoder<Header> for HeaderCodec {
-	type Error = crate::ProtoError;
+	type Error = crate::proto::ProtoError;
 
 	fn encode(&mut self, item: Header, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
 		dst.reserve(2);

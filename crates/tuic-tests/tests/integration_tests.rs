@@ -64,7 +64,7 @@ fn test_full_protocol_roundtrip() {
 	}
 
 	// 2. Connect with different address types
-	let addresses = vec![
+	let addresses: Vec<Address> = vec![
 		Address::None,
 		Address::Domain("example.com".to_string(), 443),
 		Address::IPv4("192.168.1.1".parse::<Ipv4Addr>().unwrap(), 8080),

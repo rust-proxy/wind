@@ -809,18 +809,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossfire"
-version = "3.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0042e53977a94d5d10de04ce7eb6016aa212c08e83ea202f7a9f102ff104303"
-dependencies = [
- "crossbeam-utils",
- "futures-core",
- "parking_lot",
- "smallvec",
-]
-
-[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3948,25 +3936,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tuic-proto"
-version = "0.1.1"
-dependencies = [
- "arc-swap",
- "bytes",
- "const-hex",
- "crossfire 2.1.10",
- "eyre",
- "moka",
- "num_enum",
- "quinn 0.12.0",
- "snafu",
- "tokio",
- "tokio-util",
- "uuid",
- "wind-core",
-]
-
-[[package]]
 name = "tuic-server"
 version = "0.1.1"
 dependencies = [
@@ -4013,7 +3982,6 @@ dependencies = [
  "wind-acme",
  "wind-core",
  "wind-tuic",
- "wind-tuiche",
 ]
 
 [[package]]
@@ -4035,6 +4003,7 @@ dependencies = [
  "tuic-client",
  "tuic-server",
  "uuid",
+ "wind-core",
  "wind-tuic",
 ]
 
@@ -4470,7 +4439,7 @@ dependencies = [
  "bytes",
  "color-eyre",
  "const-hex",
- "crossfire 2.1.10",
+ "crossfire",
  "enum_dispatch",
  "eyre",
  "futures-util",
@@ -4478,6 +4447,7 @@ dependencies = [
  "num_enum",
  "pin-project",
  "portable-atomic",
+ "quiche",
  "quinn 0.12.0",
  "quinn-congestions",
  "rcgen 0.13.2",
@@ -4487,31 +4457,12 @@ dependencies = [
  "serde",
  "snafu",
  "test-log",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tracing",
- "tuic-proto",
- "uuid",
- "wind-core",
-]
-
-[[package]]
-name = "wind-tuiche"
-version = "0.1.1"
-dependencies = [
- "bytes",
- "crossfire 3.1.7",
- "eyre",
- "moka",
- "num_enum",
- "quiche",
- "snafu",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tuic-proto",
  "uuid",
  "wind-core",
 ]

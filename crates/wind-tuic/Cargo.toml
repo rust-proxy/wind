@@ -7,15 +7,23 @@ description.workspace = true
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["server", "client", "aws-lc-rs"]
+default = ["server", "client", "quiche", "quinn", "aws-lc-rs"]
 decode = []
 encode = []
 server = ["decode"]
 client = ["encode"]
+
+# Quiche Backend
+boringssl = []   # Enable BoringSSL support via quiche
+quiche = ["dep:quiche"]
+
+# Quinn Backend
+quinn = ["dep:quinn", "dep:quinn-congestions", "dep:tokio-rustls", "dep:rustls", "dep:rustls-platform-verifier"]
 aws-lc-rs = [
     "rustls/aws-lc-rs",
     "quinn/rustls-aws-lc-rs",
-    "aws-lc-rs/prebuilt-nasm"
+    "dep:aws-lc-rs",
+    "aws-lc-rs?/prebuilt-nasm"
 ]
 ring = [
     "rustls/ring",
@@ -23,49 +31,47 @@ ring = [
 ]
 
 [dependencies]
-wind-core = { version = "0.1.1", path = "../wind-core", features = ["quic"]}
-tuic-proto = { version = "0.1.1", path = "../tuic-proto", features = ["decode", "encode"] }
+wind-core = { version = "0.1.1", path = "../wind-core", features = ["quic"] }
 
 # Async
-tokio = { version = "1", default-features = false, features = ["net"] }
+tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "sync"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-
-quinn = { workspace = true, default-features = false, features = ["runtime-tokio"]}
-quinn-congestions = { workspace = true }
-
-aws-lc-rs = { version = "*", optional = true, default-features = false }
-crossfire = { version = "2", features = ["tokio"] }
-
 tokio-stream = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
+# Utilities
 bytes = "1"
-serde = { version = "1", features = ["derive"] }
-uuid = "1"
-hex = { package = "const-hex", version = "1" }
-
 eyre = "0.6"
-
-# Patterns
+uuid = { version = "1", features = ["v4"] }
+crossfire = { version = "2", features = ["tokio"] }
+moka = { version = "0.12", features = ["future"] }
 snafu = "0.8"
 num_enum = "0.7"
+hex = { package = "const-hex", version = "1" }
+arc-swap = "1.9.1"
+serde = { version = "1", features = ["derive"] }
 enum_dispatch = "0.3"
 secrecy = "0.10"
 pin-project = "1"
-moka = { version = "0.12", features = ["future"] }
 portable-atomic = { version = "1" }
-arc-swap = "1"
-
-# TLS
-tokio-rustls = { version = "0.26", default-features = false, features = ["logging"] }
-rustls = { version  = "0.23", default-features = false }
-rustls-platform-verifier = { version = "0.6", default-features = false }
-
-
+thiserror = "1"
 tracing = "0.1"
 
+# QUIC with quiche
+quiche = { version = "0.21", default-features = false, features = ["boringssl-vendored", "qlog"], optional = true }
+
+# QUIC with quinn
+quinn = { workspace = true, default-features = false, features = ["runtime-tokio"], optional = true }
+quinn-congestions = { workspace = true, optional = true }
+
+# TLS for quinn
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging"], optional = true }
+rustls = { version  = "0.23", default-features = false, optional = true }
+rustls-platform-verifier = { version = "0.6", default-features = false, optional = true }
+aws-lc-rs = { version = "*", optional = true, default-features = false }
+
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "io-util"] }
+tokio = { version = "1", features = ["full", "test-util", "macros", "rt-multi-thread", "io-util"] }
 eyre = "0.6"
 color-eyre = { version = "0.6", default-features = false }
 rcgen = "0.13"

@@ -56,6 +56,7 @@ pub fn address_to_target(addr: Address) -> Result<TargetAddr, Error> {
 	}
 }
 
+#[cfg(feature = "quinn")]
 /// Helper function to encode and send data via unidirectional stream
 pub async fn encode_and_send_uni(
 	conn: &quinn::Connection,
@@ -74,6 +75,7 @@ pub async fn encode_and_send_uni(
 	Ok(())
 }
 
+#[cfg(feature = "quinn")]
 pub trait ClientProtoExt {
 	fn send_auth(&self, uuid: &uuid::Uuid, secret: &[u8]) -> impl Future<Output = Result<(), Error>> + Send;
 	fn send_heartbeat(&self) -> impl Future<Output = Result<(), Error>> + Send;
@@ -93,6 +95,7 @@ pub trait ClientProtoExt {
 	fn drop_udp(&self, assoc_id: u16) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+#[cfg(feature = "quinn")]
 impl ClientProtoExt for quinn::Connection {
 	async fn send_auth(&self, uuid: &uuid::Uuid, secret: &[u8]) -> Result<(), Error> {
 		// Generate the authentication token

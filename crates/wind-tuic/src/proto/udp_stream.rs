@@ -13,7 +13,7 @@ use moka::future::Cache;
 use tokio_util::codec::Encoder;
 use wind_core::{types::TargetAddr, udp::UdpPacket};
 
-use crate::{Address, AddressCodec, ClientProtoExt as _, CmdCodec, CmdType, Command, Header, HeaderCodec};
+use crate::proto::{Address, AddressCodec, ClientProtoExt as _, CmdCodec, CmdType, Command, Header, HeaderCodec};
 
 // Define MTU sizes for UDP segmentation
 const MAX_FRAGMENTS: u8 = 255; // Maximum number of fragments allowed

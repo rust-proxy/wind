@@ -1,14 +1,10 @@
-mod task;
-pub mod tls;
-pub mod utils;
+#![feature(error_generic_member_access)]
 
-pub use utils::{CongestionControl, UdpRelayMode};
-
-#[cfg(feature = "server")]
-pub mod inbound;
-
-#[cfg(feature = "client")]
-pub mod outbound;
+pub mod proto;
+#[cfg(feature = "quiche")]
+pub mod quiche;
+#[cfg(feature = "quinn")]
+pub mod quinn;
 
 pub type Error = eyre::Report;
 pub type Result<T> = eyre::Result<T>;

@@ -5,7 +5,7 @@ use rustls::{
 	pki_types::{CertificateDer, ServerName, UnixTime},
 };
 
-use crate::{Error, outbound::TuicOutboundOpts};
+use crate::{Error, quinn::outbound::TuicOutboundOpts};
 
 #[allow(clippy::result_large_err)]
 pub(crate) fn tls_config(_servername: &str, opts: &TuicOutboundOpts) -> Result<rustls::ClientConfig, Error> {

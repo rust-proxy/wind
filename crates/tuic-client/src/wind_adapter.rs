@@ -7,7 +7,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use once_cell::sync::OnceCell;
 use wind_core::{AbstractOutbound, AppContext, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
-use wind_tuic::outbound::{TuicOutbound, TuicOutboundOpts};
+use wind_tuic::quinn::outbound::{TuicOutbound, TuicOutboundOpts};
 
 use crate::config::Relay;
 
@@ -54,7 +54,7 @@ impl TuicOutboundAdapter {
 		};
 
 		// Create outbound
-		let outbound = TuicOutbound::new(ctx, opts).await?;
+		let outbound: TuicOutbound = TuicOutbound::new(ctx, opts).await?;
 
 		// Start polling
 		outbound.start_poll().await?;
