@@ -12,16 +12,18 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["aws-lc-rs"]
+default = ["aws-lc-rs", "quinn", "quiche"]
 ring = ["rustls/ring", "rcgen/ring", "quinn/rustls-ring"]
 aws-lc-rs = ["dep:aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "quinn/rustls-aws-lc-rs"]
 jemallocator = ["tikv-jemallocator"]
+quinn = ["wind-tuic/quinn"]
+quiche = ["wind-tuic/quiche"]
 
 [dependencies]
 
 # Wind framework
 wind-core = { path = "../wind-core" }
-wind-tuic = { path = "../wind-tuic", features = ["server", "quinn", "quiche"] }
+wind-tuic = { path = "../wind-tuic", features = ["server"] }
 wind-acme = { path = "../wind-acme" }
 fast-socks5 = { version = "1" }
 
@@ -73,7 +75,7 @@ thiserror = { version = "2", default-features = false }
 eyre = { version = "0.6" }
 
 tikv-jemallocator = { version = "0.6", optional = true }
-rand = "0.10.0"
+rand = "0.10"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"]}

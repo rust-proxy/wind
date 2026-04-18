@@ -42,11 +42,11 @@ release-name = "x86_64-linux-musl"
 tool = "cross"
 
 # 32-bit Linux (MUSL - statically linked)
-[[target]]
-os = "ubuntu-latest"
-target = "i686-unknown-linux-musl"
-release-name = "i686-linux-musl"
-tool = "cross"
+# [[target]]
+# os = "ubuntu-latest"
+# target = "i686-unknown-linux-musl"
+# release-name = "i686-linux-musl"
+# tool = "cross"
 
 # ==================== ARM Linux Targets (GNU) ====================
 
@@ -81,18 +81,18 @@ release-name = "aarch64-linux-musl"
 tool = "cross"
 
 # ARMv7 Linux (MUSL - soft float ABI, statically linked)
-[[target]]
-os = "ubuntu-latest"
-target = "armv7-unknown-linux-musleabi"
-release-name = "armv7-linux-musl"
-tool = "cross"
+# [[target]]
+# os = "ubuntu-latest"
+# target = "armv7-unknown-linux-musleabi"
+# release-name = "armv7-linux-musl"
+# tool = "cross"
 
 # ARMv7 Linux (MUSL - hard float ABI, statically linked)
-[[target]]
-os = "ubuntu-latest"
-target = "armv7-unknown-linux-musleabihf"
-release-name = "armv7-linux-muslhf"
-tool = "cross"
+# [[target]]
+# os = "ubuntu-latest"
+# target = "armv7-unknown-linux-musleabihf"
+# release-name = "armv7-linux-muslhf"
+# tool = "cross"
 
 # ==================== Windows Targets ====================
 
