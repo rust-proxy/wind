@@ -1,0 +1,38 @@
+[package]
+name = "wind-tuiche"
+version.workspace = true
+repository.workspace = true
+edition.workspace = true
+description.workspace = true
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["server", "client"]
+decode = []
+encode = []
+server = ["decode"]
+client = ["encode"]
+boringssl = []   # Enable BoringSSL support via quiche
+
+[dependencies]
+wind-core = { version = "0.1.1", path = "../wind-core", features = ["quic"] }
+
+# Async
+tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "sync"] }
+
+# QUIC with quiche
+quiche = { version = "0.21", default-features = false, features = ["ffi", "qlog"] }
+
+# Utilities
+bytes = "1"
+eyre = "0.6"
+uuid = { version = "1", features = ["v4"] }
+crossfire = "3.1"
+moka = { version = "0.12", features = ["future"] }
+snafu = "0.8"
+num_enum = "0.7"
+tokio-util = { version = "0.7", features = ["codec"] }
+thiserror = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
