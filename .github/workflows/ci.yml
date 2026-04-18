@@ -35,7 +35,7 @@ jobs:
 
   release:
     name: Release
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/next' || startsWith(github.ref, 'refs/tags/v')))
     needs: [build]
     uses: rust-proxy/workflows/.github/workflows/release-publish.yml@v1.0.12
     with:
