@@ -389,10 +389,20 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 	// Load or generate TLS certificate and key
 	let mut cert_resolver = None;
 	let (certs, key) = if cfg.tls.auto_ssl && crate::tls::is_valid_domain(&cfg.tls.hostname) {
-		tracing::info!("auto_ssl enabled, starting ACME management for: {}", cfg.tls.hostname);
+		tracing::info!(
+			"auto_ssl enabled, starting ACME management for: {} (staging: {})",
+			cfg.tls.hostname,
+			cfg.tls.acme_staging
+		);
 		let cache_dir = std::path::Path::new("acme-cache");
-		let resolver =
-			wind_acme::start_acme(ctx.cancel.child_token(), &cfg.tls.hostname, &cfg.tls.acme_email, cache_dir).await?;
+		let resolver = wind_acme::start_acme(
+			ctx.cancel.child_token(),
+			&cfg.tls.hostname,
+			&cfg.tls.acme_email,
+			cache_dir,
+			!cfg.tls.acme_staging,
+		)
+		.await?;
 		cert_resolver = Some(resolver);
 		(vec![], rustls::pki_types::PrivateKeyDer::Pkcs8(vec![].into()))
 	} else if cfg.tls.self_sign {

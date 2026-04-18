@@ -47,6 +47,7 @@ pub async fn start_acme(
 	hostname: &str,
 	acme_email: &str,
 	cache_dir: &Path,
+	production: bool,
 ) -> Result<Arc<dyn ResolvesServerCert>> {
 	if !is_valid_domain(hostname) {
 		return Err(eyre::eyre!("Invalid domain name: {hostname}"));
@@ -67,7 +68,7 @@ pub async fn start_acme(
 	let mut state = AcmeConfig::new(vec![hostname.to_string()])
 		.contact(vec![contact])
 		.cache(DirCache::new(cache_dir.to_path_buf()))
-		.directory_lets_encrypt(true)
+		.directory_lets_encrypt(production)
 		.challenge_type(Http01)
 		.state();
 

@@ -211,6 +211,8 @@ pub struct TlsConfig {
 	pub auto_ssl: bool,
 	#[educe(Default(expression = ""))]
 	pub acme_email: String,
+	#[educe(Default(expression = false))]
+	pub acme_staging: bool,
 }
 
 #[derive(Deserialize, Serialize, Educe)]
