@@ -7,10 +7,9 @@ use bytes::{Buf, BufMut};
 use num_enum::{FromPrimitive, IntoPrimitive};
 use snafu::{ResultExt, ensure};
 use tokio_util::codec::{Decoder, Encoder};
+use wind_core::types::TargetAddr;
 
 use crate::proto::{BytesRemainingSnafu, DomainTooLongSnafu, FailParseDomainSnafu, ProtoError, UnknownAddressTypeSnafu};
-
-use wind_core::types::TargetAddr;
 
 //-----------------------------------------------------------------------------
 // Type Definitions

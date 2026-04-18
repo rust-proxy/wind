@@ -60,6 +60,7 @@ impl InboundCallback for DirectCallback {
 
 		tokio::spawn(async move {
 			let mut buf = vec![0u8; 65536];
+			#[allow(clippy::while_let_loop)]
 			loop {
 				match relay_socket.recv_from(&mut buf).await {
 					Ok((n, peer)) => {
@@ -103,9 +104,9 @@ mod tests {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 	use uuid::Uuid;
 	use wind_core::{AbstractInbound, AbstractOutbound};
-	use wind_tuic::{
-		quinn::inbound::{TuicInbound, TuicInboundOpts},
-		quinn::outbound::{TuicOutbound, TuicOutboundOpts},
+	use wind_tuic::quinn::{
+		inbound::{TuicInbound, TuicInboundOpts},
+		outbound::{TuicOutbound, TuicOutboundOpts},
 	};
 
 	use super::*;

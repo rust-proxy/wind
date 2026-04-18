@@ -40,8 +40,10 @@ use wind_core::{
 	udp::{UdpPacket, UdpStream},
 	utils::{StackPrefer, is_private_ip},
 };
-use wind_tuic::quiche::inbound::{TuicheInbound, TuicheInboundBuilder};
-use wind_tuic::quinn::inbound::{TuicInbound, TuicInboundOpts};
+use wind_tuic::{
+	quiche::inbound::{TuicheInbound, TuicheInboundBuilder},
+	quinn::inbound::{TuicInbound, TuicInboundOpts},
+};
 
 pub enum ServerInbound {
 	Tuic(TuicInbound),
@@ -385,28 +387,14 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 	let cfg = &ctx.cfg;
 
 	// Load or generate TLS certificate and key
+	let mut cert_resolver = None;
 	let (certs, key) = if cfg.tls.auto_ssl && crate::tls::is_valid_domain(&cfg.tls.hostname) {
-		// wind-tuic takes raw cert/key; ACME via wind-acme is only supported
-		// through the standalone Server path which uses a resolver.
-		// Here we attempt to load existing cert files, or fall back to self-signed.
-		tracing::warn!(
-			"auto_ssl with wind-tuic adapter is not fully supported; attempting to load existing certs or falling back to \
-			 self-signed for: {}",
-			cfg.tls.hostname
-		);
-		let cert_path = &cfg.tls.certificate;
-		let key_path = &cfg.tls.private_key;
-
-		match load_cert_from_files(cert_path, key_path) {
-			Ok(pair) => {
-				tracing::info!("Loaded existing certificate from disk");
-				pair
-			}
-			Err(_) => {
-				tracing::warn!("No valid certificate found, using self-signed");
-				generate_self_signed(&cfg.tls.hostname)?
-			}
-		}
+		tracing::info!("auto_ssl enabled, starting ACME management for: {}", cfg.tls.hostname);
+		let cache_dir = std::path::Path::new("acme-cache");
+		let resolver =
+			wind_acme::start_acme(ctx.cancel.child_token(), &cfg.tls.hostname, &cfg.tls.acme_email, cache_dir).await?;
+		cert_resolver = Some(resolver);
+		(vec![], rustls::pki_types::PrivateKeyDer::Pkcs8(vec![].into()))
 	} else if cfg.tls.self_sign {
 		generate_self_signed(&cfg.tls.hostname)?
 	} else {
@@ -429,6 +417,7 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 			listen_addr: cfg.server,
 			certificate: certs,
 			private_key: key,
+			cert_resolver,
 			alpn: cfg.tls.alpn.clone(),
 			users: cfg.users.clone(),
 			auth_timeout: cfg.auth_timeout,

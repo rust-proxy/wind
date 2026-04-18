@@ -332,6 +332,7 @@ impl UdpStream {
 
 	/// Process an incoming packet fragment
 	/// This would be called by the packet handler in the TUIC protocol
+	#[allow(clippy::too_many_arguments)]
 	pub async fn process_fragment(
 		&self,
 		assoc_id: u16,

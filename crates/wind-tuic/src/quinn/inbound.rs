@@ -73,6 +73,9 @@ pub struct TuicInboundOpts {
 	/// TLS private key
 	pub private_key: PrivateKeyDer<'static>,
 
+	/// Certificate resolver (e.g. for ACME)
+	pub cert_resolver: Option<Arc<dyn rustls::server::ResolvesServerCert>>,
+
 	/// ALPN protocols
 	pub alpn: Vec<String>,
 
@@ -116,6 +119,7 @@ impl Default for TuicInboundOpts {
 			listen_addr: "0.0.0.0:443".parse().unwrap(),
 			certificate: Vec::new(),
 			private_key: PrivateKeyDer::Pkcs8(vec![].into()),
+			cert_resolver: None,
 			alpn: vec!["h3".to_string()],
 			users: HashMap::new(),
 			auth_timeout: Duration::from_secs(3),
@@ -150,10 +154,15 @@ impl TuicInbound {
 
 	fn create_server_config(&self) -> eyre::Result<ServerConfig> {
 		// Setup TLS configuration
-		let mut crypto = RustlsServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-			.with_no_client_auth()
-			.with_single_cert(self.opts.certificate.clone(), self.opts.private_key.clone_key())
-			.wrap_err("Failed to configure TLS certificate")?;
+		let builder = RustlsServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13]).with_no_client_auth();
+
+		let mut crypto = if let Some(resolver) = &self.opts.cert_resolver {
+			builder.with_cert_resolver(resolver.clone())
+		} else {
+			builder
+				.with_single_cert(self.opts.certificate.clone(), self.opts.private_key.clone_key())
+				.wrap_err("Failed to configure TLS certificate")?
+		};
 
 		crypto.alpn_protocols = self.opts.alpn.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 
@@ -567,6 +576,7 @@ async fn handle_auth(connection: &InboundCtx, uuid: Uuid, token: [u8; 32]) -> ey
 }
 
 /// Handle UDP packet with fragmentation support
+#[allow(clippy::too_many_arguments)]
 async fn handle_udp_packet<C: InboundCallback>(
 	ctx: &Arc<InboundCtx>,
 	assoc_id: u16,

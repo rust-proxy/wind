@@ -11,16 +11,16 @@ mod addr;
 pub use addr::*;
 
 mod udp_stream;
-pub use udp_stream::*;
-
 use std::future::Future;
 
 use bytes::{Buf, BytesMut};
 use eyre::eyre;
 use tokio_util::codec::{Decoder, Encoder};
+pub use udp_stream::*;
 use wind_core::{io::quinn::QuinnCompat, tcp::AbstractTcpStream, types::TargetAddr};
 
-// Replace Error from crate::Error with our own local eyre::Error wrapper or alias
+// Replace Error from crate::Error with our own local eyre::Error wrapper or
+// alias
 pub type Error = eyre::Report;
 
 pub const VER: u8 = 5;

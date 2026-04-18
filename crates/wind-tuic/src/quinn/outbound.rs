@@ -12,8 +12,11 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use wind_core::{AbstractOutbound, AppContext, info, tcp::AbstractTcpStream, types::TargetAddr, warn};
 
-use crate::proto::{ClientProtoExt, UdpStream as TuicUdpStream};
-use crate::{Error, quinn::task::ClientTaskExt};
+use crate::{
+	Error,
+	proto::{ClientProtoExt, UdpStream as TuicUdpStream},
+	quinn::task::ClientTaskExt,
+};
 
 pub struct TuicOutboundOpts {
 	pub peer_addr: SocketAddr,

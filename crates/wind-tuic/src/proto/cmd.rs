@@ -2,8 +2,7 @@ use bytes::{Buf, BufMut as _};
 use tokio_util::codec::{Decoder, Encoder};
 use uuid::Uuid;
 
-use crate::proto::header::CmdType;
-use crate::proto::{BytesRemainingSnafu, UnknownCommandTypeSnafu};
+use crate::proto::{BytesRemainingSnafu, UnknownCommandTypeSnafu, header::CmdType};
 
 #[derive(Debug, Clone, Copy)]
 pub struct CmdCodec(pub CmdType);
