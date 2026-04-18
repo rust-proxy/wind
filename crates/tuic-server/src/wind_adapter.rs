@@ -168,15 +168,19 @@ impl OutboundAction for TuicOutboundHandler {
 						.as_deref()
 						.ok_or_else(|| eyre::eyre!("socks5 outbound missing 'addr'"))?;
 
-					let socks_stream = connect_socks5_tcp(socks_addr, &target, &self.rule).await?;
-					tokio::io::copy_bidirectional(&mut stream, &mut { socks_stream }).await?;
+					let mut socks_stream = connect_socks5_tcp(socks_addr, &target, &self.rule).await?;
+					if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut socks_stream).await {
+						tracing::debug!("socks5 copy_bidirectional ended: {}", e);
+					}
 				}
 				_ => {
 					// "direct" and anything else treated as direct
 					let ip_mode = self.rule.ip_mode.unwrap_or(StackPrefer::V4first);
 					let target_sa = resolve_target(&target, ip_mode).await?;
 					let mut target_stream = connect_direct_tcp(target_sa, &self.rule).await?;
-					tokio::io::copy_bidirectional(&mut stream, &mut target_stream).await?;
+					if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut target_stream).await {
+						tracing::debug!("direct copy_bidirectional ended: {}", e);
+					}
 				}
 			}
 

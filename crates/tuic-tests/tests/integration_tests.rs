@@ -275,6 +275,8 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 			hostname: "localhost".to_string(),
 			auto_ssl: false,
 			acme_email: "admin@example.com".to_string(),
+			acme_staging: false,
+			..Default::default()
 		},
 		data_dir: std::env::temp_dir(),
 		quic: tuic_server::config::QuicConfig::default(),
@@ -580,6 +582,8 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 			hostname: "localhost".to_string(),
 			auto_ssl: false,
 			acme_email: "admin@example.com".to_string(),
+			acme_staging: false,
+			..Default::default()
 		},
 		data_dir: std::env::temp_dir(),
 		quic: tuic_server::config::QuicConfig::default(),
@@ -789,6 +793,7 @@ async fn test_client_proxy_configuration() -> eyre::Result<()> {
 			hostname: "localhost".to_string(),
 			auto_ssl: false,
 			acme_email: "admin@example.com".to_string(),
+			..Default::default()
 		},
 		data_dir: std::env::temp_dir(),
 		udp_relay_ipv6: true,
