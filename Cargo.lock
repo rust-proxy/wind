@@ -1530,7 +1530,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2487,7 +2487,7 @@ dependencies = [
  "quinn-udp 0.5.14",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2506,7 +2506,7 @@ dependencies = [
  "quinn-udp 0.6.1",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2578,7 +2578,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -2590,7 +2590,7 @@ source = "git+https://github.com/Tipuch/quinn.git?branch=bbrv3#7f5080dc830e03a8e
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -2881,7 +2881,7 @@ dependencies = [
 [[package]]
 name = "rustls-acme"
 version = "0.15.1"
-source = "git+https://github.com/rust-proxy/rustls-acme#b6b476be8e10736fb1193b34e3fec8b8edc10ce9"
+source = "git+https://github.com/rust-proxy/rustls-acme#98c7909bfb3ecaaaacd7915a0a1ee9d246d210a7"
 dependencies = [
  "async-io",
  "async-trait",

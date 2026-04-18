@@ -84,6 +84,9 @@ pub async fn start_acme(
 					// Requesting certificate for the first time or renewing
 					rustls_acme::EventOk::AccountCacheStore => {
 						info!("ACME event: AccountCacheStore");
+					}
+					rustls_acme::EventOk::ValidationChallenge(challenge) => {
+						info!("ACME event: ValidationChallenge for {}", challenge.url);
 						let child = Arc::new(cancel.child_token());
 						axum_cancel.swap(Some(child.clone())).inspect(|v| v.cancel());
 						let http01_service = state.http01_challenge_tower_service();
