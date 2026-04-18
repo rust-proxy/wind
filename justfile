@@ -5,5 +5,8 @@ run:
 test:
     cargo test -- --ignored
 
+fast-release:
+    cross build --profile fast-release
+
 server:
   cargo run --package tuic-server --bin tuic-server -- -c ./config.toml
