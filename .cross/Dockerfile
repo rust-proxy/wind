@@ -1,17 +1,20 @@
 ARG CROSS_BASE_IMAGE=scratch
 ARG DEBIAN_FRONTEND=noninteractive
+
 FROM $CROSS_BASE_IMAGE
+
+ARG CROSS_BASE_IMAGE
+
+COPY .github/sccache.sh /
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends clang llvm && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    target="${CROSS_BASE_IMAGE##*/}" && \
+    chmod +x /sccache.sh && \
+    /sccache.sh "${target%%:*}"
 
-ENV CC=clang
-ENV CXX=clang++
-ENV AR=llvm-ar
-
-COPY .github/sccache.sh /
-ARG CROSS_BASE_IMAGE
-RUN target="${CROSS_BASE_IMAGE##*/}" && /sccache.sh "${target%%:*}"
-
-ENV RUSTC_WRAPPER="/usr/bin/sccache"
+ENV CC=clang \
+    CXX=clang++ \
+    AR=llvm-ar \
+    RUSTC_WRAPPER="/usr/bin/sccache"
