@@ -14,4 +14,5 @@ RUN apt-get update && \
 ENV CC=clang \
     CXX=clang++ \
     AR=llvm-ar \
-    RUSTC_WRAPPER="/usr/bin/sccache"
+    RUSTC_WRAPPER="/usr/bin/sccache" \
+    SCCACHE_DIRECT=true
