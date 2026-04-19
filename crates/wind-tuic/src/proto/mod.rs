@@ -74,9 +74,7 @@ pub fn decode_command(cmd_type: CmdType, buf: &mut impl Buf, context: &str) -> R
 			if buf.remaining() < 2 {
 				return Err(eyre!("Incomplete dissociate command in {}", context));
 			}
-			Ok(Command::Dissociate {
-				assoc_id: buf.get_u16(),
-			})
+			Ok(Command::Dissociate { assoc_id: buf.get_u16() })
 		}
 		CmdType::Heartbeat => Ok(Command::Heartbeat),
 		CmdType::Other(v) => Err(eyre!("Unknown command type: {}", v)),

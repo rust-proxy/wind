@@ -15,4 +15,4 @@ ENV CC=clang \
     CXX=clang++ \
     AR=llvm-ar \
     RUSTC_WRAPPER="/usr/bin/sccache" \
-    SCCACHE_DIRECT=true
+    SCCACHE_DIR="/tmp/sccache"

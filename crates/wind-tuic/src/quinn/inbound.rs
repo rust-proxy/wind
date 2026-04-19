@@ -11,7 +11,6 @@ use std::{
 	time::Duration,
 };
 
-use bytes::Bytes;
 use eyre::{Context, ContextCompat};
 use quinn::{Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime, TransportConfig, VarInt};
 use rustls::{
@@ -766,8 +765,8 @@ async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate:
 				.map_err(|e| eyre::eyre!("Failed to read domain port: {}", e))?;
 			let port = u16::from_be_bytes(port_buf);
 
-			let domain_str = String::from_utf8(domain_slice.to_vec())
-				.map_err(|_| eyre::eyre!("Invalid UTF-8 domain address"))?;
+			let domain_str =
+				String::from_utf8(domain_slice.to_vec()).map_err(|_| eyre::eyre!("Invalid UTF-8 domain address"))?;
 			Ok(crate::proto::Address::Domain(domain_str, port))
 		}
 		t => Err(eyre::eyre!("Unknown address type byte 0x{:02x}", t)),

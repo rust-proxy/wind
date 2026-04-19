@@ -171,21 +171,13 @@ impl FragmentReassemblyBuffer {
 						.map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone()));
 					let target = Arc::try_unwrap(m.target.into_inner()).unwrap_or_else(|a| (*a).clone());
 
-					Some(UdpPacket {
-						source,
-						target,
-						payload,
-					})
+					Some(UdpPacket { source, target, payload })
 				}
 				Err(arc) => {
 					let source = arc.source.load().as_ref().map(|a| (**a).clone());
 					let target = (**arc.target.load()).clone();
 
-					Some(UdpPacket {
-						source,
-						target,
-						payload,
-					})
+					Some(UdpPacket { source, target, payload })
 				}
 			}
 		} else {
