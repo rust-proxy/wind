@@ -15,7 +15,7 @@ use std::future::Future;
 
 use bytes::{Buf, BytesMut};
 use eyre::eyre;
-use tokio_util::codec::{Decoder, Encoder};
+use tokio_util::codec::Encoder;
 pub use udp_stream::*;
 use wind_core::{io::quinn::QuinnCompat, tcp::AbstractTcpStream, types::TargetAddr};
 
@@ -26,24 +26,114 @@ pub type Error = eyre::Report;
 pub const VER: u8 = 5;
 
 /// Helper function to decode header with better error reporting
-pub fn decode_header(buf: &mut BytesMut, context: &str) -> Result<Header, Error> {
-	HeaderCodec
-		.decode(buf)?
-		.ok_or_else(|| eyre!("Incomplete header in {}", context))
+pub fn decode_header(buf: &mut impl Buf, context: &str) -> Result<Header, Error> {
+	if buf.remaining() < 2 {
+		return Err(eyre!("Incomplete header in {}", context));
+	}
+	let ver = buf.get_u8();
+	if ver != VER {
+		return Err(eyre!("Version mismatch: expected {}, got {}", VER, ver));
+	}
+	let cmd = CmdType::from(buf.get_u8());
+	if matches!(cmd, CmdType::Other(_)) {
+		return Err(eyre!("Unknown command type: {}", u8::from(cmd)));
+	}
+	Ok(Header::new(cmd))
 }
 
 /// Helper function to decode command with better error reporting
-pub fn decode_command(cmd_type: CmdType, buf: &mut BytesMut, context: &str) -> Result<Command, Error> {
-	CmdCodec(cmd_type)
-		.decode(buf)?
-		.ok_or_else(|| eyre!("Incomplete command in {}", context))
+pub fn decode_command(cmd_type: CmdType, buf: &mut impl Buf, context: &str) -> Result<Command, Error> {
+	match cmd_type {
+		CmdType::Auth => {
+			if buf.remaining() < 16 + 32 {
+				return Err(eyre!("Incomplete auth command in {}", context));
+			}
+			let mut uuid = [0; 16];
+			buf.copy_to_slice(&mut uuid);
+			let mut token = [0; 32];
+			buf.copy_to_slice(&mut token);
+			Ok(Command::Auth {
+				uuid: uuid::Uuid::from_bytes(uuid),
+				token,
+			})
+		}
+		CmdType::Connect => Ok(Command::Connect),
+		CmdType::Packet => {
+			if buf.remaining() < 8 {
+				return Err(eyre!("Incomplete packet command in {}", context));
+			}
+			Ok(Command::Packet {
+				assoc_id: buf.get_u16(),
+				pkt_id: buf.get_u16(),
+				frag_total: buf.get_u8(),
+				frag_id: buf.get_u8(),
+				size: buf.get_u16(),
+			})
+		}
+		CmdType::Dissociate => {
+			if buf.remaining() < 2 {
+				return Err(eyre!("Incomplete dissociate command in {}", context));
+			}
+			Ok(Command::Dissociate {
+				assoc_id: buf.get_u16(),
+			})
+		}
+		CmdType::Heartbeat => Ok(Command::Heartbeat),
+		CmdType::Other(v) => Err(eyre!("Unknown command type: {}", v)),
+	}
 }
 
 /// Helper function to decode address with better error reporting
-pub fn decode_address(buf: &mut BytesMut, context: &str) -> Result<Address, Error> {
-	AddressCodec
-		.decode(buf)?
-		.ok_or_else(|| eyre!("Incomplete address in {}", context))
+pub fn decode_address(buf: &mut impl Buf, context: &str) -> Result<Address, Error> {
+	if !buf.has_remaining() {
+		return Err(eyre!("Incomplete address in {}", context));
+	}
+	let addr_type = AddressType::from(buf.chunk()[0]);
+
+	match addr_type {
+		AddressType::None => {
+			buf.advance(1);
+			Ok(Address::None)
+		}
+		AddressType::IPv4 => {
+			if buf.remaining() < 1 + 4 + 2 {
+				return Err(eyre!("Incomplete IPv4 address in {}", context));
+			}
+			buf.advance(1);
+			let mut octets = [0; 4];
+			buf.copy_to_slice(&mut octets);
+			let ip = std::net::Ipv4Addr::from(octets);
+			let port = buf.get_u16();
+			Ok(Address::IPv4(ip, port))
+		}
+		AddressType::IPv6 => {
+			if buf.remaining() < 1 + 16 + 2 {
+				return Err(eyre!("Incomplete IPv6 address in {}", context));
+			}
+			buf.advance(1);
+			let mut octets = [0; 16];
+			buf.copy_to_slice(&mut octets);
+			let ip = std::net::Ipv6Addr::from(octets);
+			let port = buf.get_u16();
+			Ok(Address::IPv6(ip, port))
+		}
+		AddressType::Domain => {
+			if buf.remaining() < 2 {
+				return Err(eyre!("Incomplete Domain address in {}", context));
+			}
+			let len = buf.chunk()[1] as usize;
+			if buf.remaining() < 1 + 1 + len + 2 {
+				return Err(eyre!("Incomplete Domain address in {}", context));
+			}
+			buf.advance(2);
+			let mut domain = vec![0; len];
+			buf.copy_to_slice(&mut domain);
+			let s = String::from_utf8(domain).map_err(|_| eyre!("Invalid UTF-8 domain in {}", context))?;
+			let port = buf.get_u16();
+			Ok(Address::Domain(s, port))
+		}
+		AddressType::Other(v) => Err(eyre!("Unknown address type: {}", v)),
+	}
 }
 
 /// Helper function to convert Address to TargetAddr

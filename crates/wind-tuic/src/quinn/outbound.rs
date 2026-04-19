@@ -137,12 +137,10 @@ impl TuicOutbound {
 					Ok(_) = bi_rx.recv() => {
 						warn!(target: "[OUT]", "Received bi-directional stream on Outbound");
 					}
-					Ok(bytes) = datagram_rx.recv() => {
-						info!(target: "[OUT]", "Received datagram: {} bytes", bytes.len());
+					Ok(mut buf) = datagram_rx.recv() => {
+						info!(target: "[OUT]", "Received datagram: {} bytes", buf.len());
 						// Process the received datagram
 						use bytes::Buf;
-
-						let mut buf = bytes::BytesMut::from(bytes.as_ref());
 
 						// Parse header, command, and address using helper functions
 						let header = match crate::proto::decode_header(&mut buf, "datagram") {

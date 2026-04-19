@@ -11,7 +11,7 @@ use std::{
 	time::Duration,
 };
 
-use bytes::BytesMut;
+use bytes::Bytes;
 use eyre::{Context, ContextCompat};
 use quinn::{Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime, TransportConfig, VarInt};
 use rustls::{
@@ -383,7 +383,7 @@ async fn handle_uni_stream<C: InboundCallback>(
 		.read_to_end(65536)
 		.await
 		.map_err(|e| eyre::eyre!("Failed to read stream: {}", e))?;
-	let mut buf = BytesMut::from(&data[..]);
+	let mut buf = bytes::Bytes::from(data);
 
 	// Decode header and command using helper functions
 	let header = crate::proto::decode_header(&mut buf, "uni stream")?;
@@ -402,7 +402,7 @@ async fn handle_uni_stream<C: InboundCallback>(
 		} => {
 			// Decode address (may be Address::None for non-first fragments)
 			let addr = crate::proto::decode_address(&mut buf, "uni stream packet")?;
-			let payload = buf.split_to(size as usize).freeze();
+			let payload = buf.split_to(size as usize);
 
 			// Convert address to TargetAddr, using placeholder for non-first fragments
 			let target_addr = match crate::proto::address_to_target(addr) {
@@ -448,18 +448,18 @@ async fn handle_bi_stream<C: InboundCallback>(
 	}
 
 	// Read header and command
-	let mut header_buf = vec![0u8; 2];
+	let mut header_buf = [0u8; 2];
 	recv.read_exact(&mut header_buf)
 		.await
 		.map_err(|e| eyre::eyre!("Failed to read header: {}", e))?;
-	let mut buf = BytesMut::from(&header_buf[..]);
+	let mut buf = &header_buf[..];
 
 	let header = crate::proto::decode_header(&mut buf, "bi stream")?;
 
 	match header.command {
 		CmdType::Connect => {
 			// Decode command (Connect has no additional fields)
-			let _cmd = crate::proto::decode_command(CmdType::Connect, &mut BytesMut::new(), "bi stream")?;
+			let _cmd = crate::proto::decode_command(CmdType::Connect, &mut [].as_ref(), "bi stream")?;
 
 			// Read exactly the address bytes, leaving the relay payload in `recv`
 			// so that the same stream can be used for bidirectional data relay.
@@ -501,7 +501,7 @@ async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: 
 		}
 	}
 
-	let mut buf = BytesMut::from(data.as_ref());
+	let mut buf = data;
 
 	// Decode header using helper function
 	let header = crate::proto::decode_header(&mut buf, "datagram")?;
@@ -519,7 +519,7 @@ async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: 
 			} = cmd
 			{
 				let addr = crate::proto::decode_address(&mut buf, "datagram packet")?;
-				let payload = buf.split_to(size as usize).freeze();
+				let payload = buf.split_to(size as usize);
 
 				// Convert address to TargetAddr, using placeholder for non-first fragments
 				let target_addr = match crate::proto::address_to_target(addr) {
@@ -721,20 +721,18 @@ async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate:
 		.await
 		.map_err(|e| eyre::eyre!("Failed to read address type: {}", e))?;
 
-	let mut buf = BytesMut::with_capacity(20);
-	buf.extend_from_slice(&type_byte);
-
 	match type_byte[0] {
-		0xFF => {
-			// AddressType::None — just the single type byte
-		}
+		0xFF => Ok(crate::proto::Address::None),
 		0x01 => {
 			// AddressType::IPv4 — 4-byte address + 2-byte port
 			let mut rest = [0u8; 6];
 			recv.read_exact(&mut rest)
 				.await
 				.map_err(|e| eyre::eyre!("Failed to read IPv4 address: {}", e))?;
-			buf.extend_from_slice(&rest);
+			let mut ip_bytes = [0u8; 4];
+			ip_bytes.copy_from_slice(&rest[0..4]);
+			let port = u16::from_be_bytes([rest[4], rest[5]]);
+			Ok(crate::proto::Address::IPv4(std::net::Ipv4Addr::from(ip_bytes), port))
 		}
 		0x02 => {
 			// AddressType::IPv6 — 16-byte address + 2-byte port
@@ -742,7 +740,10 @@ async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate:
 			recv.read_exact(&mut rest)
 				.await
 				.map_err(|e| eyre::eyre!("Failed to read IPv6 address: {}", e))?;
-			buf.extend_from_slice(&rest);
+			let mut ip_bytes = [0u8; 16];
+			ip_bytes.copy_from_slice(&rest[0..16]);
+			let port = u16::from_be_bytes([rest[16], rest[17]]);
+			Ok(crate::proto::Address::IPv6(std::net::Ipv6Addr::from(ip_bytes), port))
 		}
 		0x00 => {
 			// AddressType::Domain — 1-byte length + <length> bytes + 2-byte port
@@ -750,20 +751,27 @@ async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate:
 			recv.read_exact(&mut len_byte)
 				.await
 				.map_err(|e| eyre::eyre!("Failed to read domain length: {}", e))?;
-			buf.extend_from_slice(&len_byte);
 			let domain_len = len_byte[0] as usize;
-			let mut rest = vec![0u8; domain_len + 2];
-			recv.read_exact(&mut rest)
+
+			// Max domain len is 255. Use a stack buffer.
+			let mut domain_buf = [0u8; 255];
+			let domain_slice = &mut domain_buf[..domain_len];
+			recv.read_exact(domain_slice)
 				.await
 				.map_err(|e| eyre::eyre!("Failed to read domain address: {}", e))?;
-			buf.extend_from_slice(&rest);
-		}
-		t => {
-			return Err(eyre::eyre!("Unknown address type byte 0x{:02x}", t));
-		}
-	}
 
-	crate::proto::decode_address(&mut buf, "bi stream connect")
+			let mut port_buf = [0u8; 2];
+			recv.read_exact(&mut port_buf)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read domain port: {}", e))?;
+			let port = u16::from_be_bytes(port_buf);
+
+			let domain_str = String::from_utf8(domain_slice.to_vec())
+				.map_err(|_| eyre::eyre!("Invalid UTF-8 domain address"))?;
+			Ok(crate::proto::Address::Domain(domain_str, port))
+		}
+		t => Err(eyre::eyre!("Unknown address type byte 0x{:02x}", t)),
+	}
 }
 
 /// Handle UDP dissociate

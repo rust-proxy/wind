@@ -83,40 +83,44 @@ impl FragmentReassemblyBuffer {
 		let target_clone = target.clone();
 
 		// Get or create the fragment metadata
-		let meta = self
-			.fragments
-			.entry(key)
-			.or_insert_with(async {
-				Arc::new(FragmentMetadata {
-					frag_total,
-					fragments: Cache::new(frag_total.into()),
-					last_updated: AtomicU64::new(init_time().elapsed().as_secs()),
-					source: ArcSwapOption::new(source.clone().map(Arc::new)),
-					target: ArcSwap::new(Arc::new(target)),
+		let is_complete = {
+			let meta = self
+				.fragments
+				.entry(key)
+				.or_insert_with(async {
+					Arc::new(FragmentMetadata {
+						frag_total,
+						fragments: Cache::new(frag_total.into()),
+						last_updated: AtomicU64::new(init_time().elapsed().as_secs()),
+						source: ArcSwapOption::new(source.clone().map(Arc::new)),
+						target: ArcSwap::new(Arc::new(target)),
+					})
 				})
-			})
-			.await;
+				.await;
 
-		// If this is the first fragment (frag_id == 0) and it has a real address,
-		// update the target address in case we received other fragments first with
-		// placeholder addresses
-		if frag_id == 0 && !is_placeholder_addr {
-			meta.value().target.store(Arc::new(target_clone));
-		}
+			// If this is the first fragment (frag_id == 0) and it has a real address,
+			// update the target address in case we received other fragments first with
+			// placeholder addresses
+			if frag_id == 0 && !is_placeholder_addr {
+				meta.value().target.store(Arc::new(target_clone));
+			}
 
-		// Update timestamp
-		meta.value()
-			.last_updated
-			.store(init_time().elapsed().as_secs(), Ordering::Relaxed);
+			// Update timestamp
+			meta.value()
+				.last_updated
+				.store(init_time().elapsed().as_secs(), Ordering::Relaxed);
 
-		// Store this fragment
-		meta.value().fragments.insert(frag_id, payload).await;
+			// Store this fragment
+			meta.value().fragments.insert(frag_id, payload).await;
 
-		// Ensure all pending cache operations are completed
-		meta.value().fragments.run_pending_tasks().await;
+			// Ensure all pending cache operations are completed
+			meta.value().fragments.run_pending_tasks().await;
 
-		// Check if all fragments have been received
-		if meta.value().fragments.entry_count() == meta.value().frag_total as u64 {
+			// Check if all fragments have been received
+			meta.value().fragments.entry_count() == meta.value().frag_total as u64
+		};
+
+		if is_complete {
 			// All fragments received, reassemble the packet
 			return self.reassemble_packet(key).await;
 		}
@@ -158,14 +162,32 @@ impl FragmentReassemblyBuffer {
 			}
 
 			// Return the reassembled packet
-			let source = meta.source.load().as_ref().map(|arc| (**arc).clone());
-			let target = (**meta.target.load()).clone();
+			let payload = buffer.freeze();
+			match Arc::try_unwrap(meta) {
+				Ok(m) => {
+					let source = m
+						.source
+						.into_inner()
+						.map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone()));
+					let target = Arc::try_unwrap(m.target.into_inner()).unwrap_or_else(|a| (*a).clone());
 
-			Some(UdpPacket {
-				source,
-				target,
-				payload: buffer.freeze(),
-			})
+					Some(UdpPacket {
+						source,
+						target,
+						payload,
+					})
+				}
+				Err(arc) => {
+					let source = arc.source.load().as_ref().map(|a| (**a).clone());
+					let target = (**arc.target.load()).clone();
+
+					Some(UdpPacket {
+						source,
+						target,
+						payload,
+					})
+				}
+			}
 		} else {
 			None
 		}
