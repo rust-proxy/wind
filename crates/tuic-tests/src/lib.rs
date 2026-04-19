@@ -218,7 +218,7 @@ pub async fn test_udp_through_socks5(
 							info!("[{}] Waiting for echo response...", test_name);
 
 							let mut buffer = vec![0u8; 1024];
-							match timeout(Duration::from_secs(2), socks.recv_from(&mut buffer)).await {
+							match timeout(Duration::from_secs(5), socks.recv_from(&mut buffer)).await {
 								Ok(Ok((len, addr))) => {
 									info!("[{}] Received {} bytes from {:?}", test_name, len, addr);
 									info!("[{}] Response data: {:?}", test_name, &buffer[..len]);

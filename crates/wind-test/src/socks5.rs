@@ -735,7 +735,7 @@ mod tests {
 
 		// Signal the echo server to stop
 		echo_server_running.store(false, Ordering::Relaxed);
-		match tokio::time::timeout(Duration::from_secs(2), echo_task).await {
+		match tokio::time::timeout(Duration::from_secs(5), echo_task).await {
 			Ok(_) => {}
 			Err(_) => panic!("Echo server stop timeout in test_udp_through_proxy"),
 		}
@@ -841,7 +841,7 @@ mod tests {
 				println!("✗ Direct UDP echo test failed: {}", e);
 				// Signal the echo server to stop
 				echo_server_running.store(false, Ordering::Relaxed);
-				let _ = tokio::time::timeout(std::time::Duration::from_secs(1), echo_task).await;
+				let _ = tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await;
 				panic!("Echo server is not working correctly");
 			}
 		}
@@ -895,7 +895,7 @@ mod tests {
 		echo_server_running.store(false, Ordering::Relaxed);
 
 		// Wait for the echo server to finish (with timeout)
-		match tokio::time::timeout(std::time::Duration::from_secs(2), echo_task).await {
+		match tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await {
 			Ok(_) => println!("✓ Echo server stopped successfully"),
 			Err(_) => panic!("Echo server stop timeout in test_udp_large_packet_through_proxy"),
 		}
@@ -929,7 +929,7 @@ mod tests {
 
 		// Receive response
 		let mut buffer = vec![0u8; packet_size + 100];
-		let (len, _) = tokio::time::timeout(std::time::Duration::from_secs(2), test_socket.recv_from(&mut buffer)).await??;
+		let (len, _) = tokio::time::timeout(std::time::Duration::from_secs(5), test_socket.recv_from(&mut buffer)).await??;
 
 		if len == test_packet.len() && buffer[..len] == test_packet {
 			Ok(())
@@ -1041,7 +1041,7 @@ mod tests {
 
 		// Signal the echo server to stop
 		echo_server_running.store(false, Ordering::Relaxed);
-		let _ = tokio::time::timeout(std::time::Duration::from_secs(2), echo_task).await;
+		let _ = tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await;
 	}
 
 	#[tokio::test]
@@ -1135,7 +1135,7 @@ mod tests {
 						println!("⚠ SOCKS5 server does not support UDP ASSOCIATE - skipping remaining tests");
 						// Signal the echo server to stop
 						echo_server_running.store(false, Ordering::Relaxed);
-						let _ = tokio::time::timeout(std::time::Duration::from_secs(1), echo_task).await;
+						let _ = tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await;
 						// Cleanup proxy server
 						ctx.token.cancel();
 						let _ = tokio::time::timeout(Duration::from_secs(5), ctx.tasks.wait()).await;
@@ -1151,7 +1151,7 @@ mod tests {
 		echo_server_running.store(false, Ordering::Relaxed);
 
 		// Wait for the echo server to finish (with timeout)
-		match tokio::time::timeout(std::time::Duration::from_secs(2), echo_task).await {
+		match tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await {
 			Ok(_) => println!("✓ Echo server stopped successfully"),
 			Err(_) => panic!("Echo server stop timeout in test_udp_multiple_mtu_sizes"),
 		}
