@@ -210,6 +210,10 @@ impl AbstractInbound for TuicInbound {
 
 		info!("TUIC server listening on {}", endpoint.local_addr().unwrap());
 
+		// Share the user table across all connections via Arc so each accepted
+		// connection only bumps a refcount instead of cloning the whole HashMap.
+		let users = Arc::new(self.opts.users.clone());
+
 		// Accept connections loop
 		loop {
 			tokio::select! {
@@ -219,7 +223,7 @@ impl AbstractInbound for TuicInbound {
 				}
 				Some(incoming) = endpoint.accept() => {
 					let opts = &self.opts;
-					let users = opts.users.clone();
+					let users = users.clone();
 					let auth_timeout = opts.auth_timeout;
 					let zero_rtt = opts.zero_rtt;
 					let cb = cb.clone();
@@ -242,7 +246,7 @@ struct InboundCtx {
 	conn: quinn::Connection,
 	uuid: Arc<RwLock<Option<Uuid>>>,
 	auth_notify: Arc<Notify>,
-	users: HashMap<Uuid, String>,
+	users: Arc<HashMap<Uuid, String>>,
 	udp_sessions: Arc<RwLock<HashMap<u16, UdpSession>>>,
 }
 
@@ -255,7 +259,7 @@ struct UdpSession {
 
 async fn handle_connection<C: InboundCallback>(
 	incoming: quinn::Incoming,
-	users: HashMap<Uuid, String>,
+	users: Arc<HashMap<Uuid, String>>,
 	auth_timeout: Duration,
 	zero_rtt: bool,
 	callback: C,
@@ -371,54 +375,89 @@ async fn handle_connection<C: InboundCallback>(
 	Ok(())
 }
 
-/// Handle unidirectional stream (Auth, Packet, Dissociate, Heartbeat)
+/// Handle unidirectional stream (Auth, Packet, Dissociate, Heartbeat).
+///
+/// Reads only as many bytes as the decoded command requires instead of
+/// buffering the whole stream, so a misbehaving peer cannot force the server
+/// to allocate up to 64 KiB per uni stream regardless of command type.
 async fn handle_uni_stream<C: InboundCallback>(
 	ctx: Arc<InboundCtx>,
 	mut recv: quinn::RecvStream,
 	callback: C,
 ) -> eyre::Result<()> {
-	// Read all data from stream
-	let data = recv
-		.read_to_end(65536)
+	// Read header only (2 bytes): version + command type.
+	let mut header_buf = [0u8; 2];
+	recv.read_exact(&mut header_buf)
 		.await
-		.map_err(|e| eyre::eyre!("Failed to read stream: {}", e))?;
-	let mut buf = bytes::Bytes::from(data);
+		.map_err(|e| eyre::eyre!("Failed to read uni stream header: {}", e))?;
+	let header = crate::proto::decode_header(&mut &header_buf[..], "uni stream")?;
 
-	// Decode header and command using helper functions
-	let header = crate::proto::decode_header(&mut buf, "uni stream")?;
-	let cmd = crate::proto::decode_command(header.command, &mut buf, "uni stream")?;
-
-	match cmd {
-		Command::Auth { uuid, token } => {
-			handle_auth(&ctx, uuid, token).await?;
+	match header.command {
+		CmdType::Auth => {
+			// Auth payload is fixed-size: 16 bytes UUID + 32 bytes token.
+			let mut body = [0u8; 16 + 32];
+			recv.read_exact(&mut body)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read auth body: {}", e))?;
+			let cmd = crate::proto::decode_command(CmdType::Auth, &mut &body[..], "uni stream")?;
+			if let Command::Auth { uuid, token } = cmd {
+				handle_auth(&ctx, uuid, token).await?;
+			}
 		}
-		Command::Packet {
-			assoc_id,
-			pkt_id,
-			frag_total,
-			frag_id,
-			size,
-		} => {
-			// Decode address (may be Address::None for non-first fragments)
-			let addr = crate::proto::decode_address(&mut buf, "uni stream packet")?;
-			let payload = buf.split_to(size as usize);
+		CmdType::Packet => {
+			// Packet command fields are fixed-size: 8 bytes.
+			let mut cmd_body = [0u8; 8];
+			recv.read_exact(&mut cmd_body)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read packet command: {}", e))?;
+			let cmd = crate::proto::decode_command(CmdType::Packet, &mut &cmd_body[..], "uni stream")?;
+			let Command::Packet {
+				assoc_id,
+				pkt_id,
+				frag_total,
+				frag_id,
+				size,
+			} = cmd
+			else {
+				unreachable!("decode_command(Packet, ..) must return Command::Packet");
+			};
 
-			// Convert address to TargetAddr, using placeholder for non-first fragments
+			// Address is variable-width but self-delimiting (capped at ~258 bytes).
+			let addr = read_address_exact(&mut recv)
+				.await
+				.wrap_err("Failed to read uni stream packet address")?;
+
+			// Payload is bounded by the advertised `size` (u16, ≤ 65535).
+			let mut payload = vec![0u8; size as usize];
+			if size > 0 {
+				recv.read_exact(&mut payload)
+					.await
+					.map_err(|e| eyre::eyre!("Failed to read packet payload: {}", e))?;
+			}
+			let payload = bytes::Bytes::from(payload);
+
 			let target_addr = match crate::proto::address_to_target(addr) {
 				Ok(t) => t,
 				Err(_) => wind_core::types::TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
 			};
 			handle_udp_packet(&ctx, assoc_id, pkt_id, frag_total, frag_id, target_addr, payload, &callback).await?;
 		}
-		Command::Dissociate { assoc_id } => {
-			handle_dissociate(&ctx, assoc_id).await?;
+		CmdType::Dissociate => {
+			// Dissociate payload: 2-byte assoc_id.
+			let mut body = [0u8; 2];
+			recv.read_exact(&mut body)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read dissociate body: {}", e))?;
+			let cmd = crate::proto::decode_command(CmdType::Dissociate, &mut &body[..], "uni stream")?;
+			if let Command::Dissociate { assoc_id } = cmd {
+				handle_dissociate(&ctx, assoc_id).await?;
+			}
 		}
-		Command::Heartbeat => {
-			// Just acknowledge heartbeat
+		CmdType::Heartbeat => {
 			info!("Received heartbeat from {:?}", ctx.uuid.read().await);
 		}
-		_ => {
-			warn!("Unexpected command on uni stream: {:?}", cmd);
+		other => {
+			warn!("Unexpected command on uni stream: {:?}", other);
 		}
 	}
 

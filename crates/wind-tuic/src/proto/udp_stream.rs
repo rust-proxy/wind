@@ -128,12 +128,20 @@ impl FragmentReassemblyBuffer {
 		None // Not all fragments received yet
 	}
 
-	/// Clean up expired fragments
-	fn cleanup_expired(&self) {
-		let _ = self.fragments.invalidate_entries_if(move |_, meta| {
+	/// Clean up expired fragments.
+	///
+	/// `invalidate_entries_if` only registers a predicate; the actual eviction
+	/// happens during housekeeping. We drive it via `run_pending_tasks` so the
+	/// cleanup is observable before this call returns.
+	async fn cleanup_expired(&self) {
+		if let Err(e) = self.fragments.invalidate_entries_if(move |_, meta| {
 			init_time().elapsed() - Duration::from_secs(meta.last_updated.load(Ordering::Relaxed))
 				>= Duration::from_millis(FRAGMENT_TIMEOUT_MS)
-		});
+		}) {
+			wind_core::warn!(target: "[UDP]", "Failed to register fragment cleanup predicate: {:?}", e);
+			return;
+		}
+		self.fragments.run_pending_tasks().await;
 	}
 
 	/// Reassemble a complete packet from fragments
@@ -275,9 +283,12 @@ impl UdpStream {
 			));
 		}
 
-		// Assign a packet ID for all fragments in this packet
+		// Assign a packet ID for all fragments in this packet.
+		// `try_from` guards against future changes that might weaken the
+		// bounds check above from silently truncating the fragment count.
 		let pkt_id = self.next_pkt_id.fetch_add(1, Ordering::Relaxed);
-		let frag_total = fragment_count as u8;
+		let frag_total = u8::try_from(fragment_count)
+			.map_err(|_| eyre::eyre!("Fragment count {} exceeds u8 range", fragment_count))?;
 
 		// Fragment and send each piece
 		let mut offset = 0;
@@ -296,8 +307,14 @@ impl UdpStream {
 			// Extract this fragment's payload
 			let fragment_payload = packet.payload.slice(offset..end);
 
-			// Create fragment with proper header encoding
-			let mut buf = BytesMut::with_capacity(12);
+			// Allocate one buffer sized for header + payload so we can append
+			// without reallocation or an intermediate concat.
+			let header_overhead = if frag_id == 0 {
+				first_frag_header_overhead
+			} else {
+				subsequent_frag_header_overhead
+			};
+			let mut buf = BytesMut::with_capacity(header_overhead + fragment_payload.len());
 
 			// Create packet command with fragmentation info
 			HeaderCodec.encode(Header::new(CmdType::Packet), &mut buf)?;
@@ -319,8 +336,8 @@ impl UdpStream {
 				AddressCodec.encode(Address::None, &mut buf)?;
 			}
 
-			// Combine header and payload
-			let combined_payload = Bytes::from([buf.freeze(), fragment_payload].concat());
+			buf.put_slice(&fragment_payload);
+			let combined_payload = buf.freeze();
 
 			// Debug: Log the actual datagram size
 			let datagram_size = combined_payload.len();
@@ -383,7 +400,7 @@ impl UdpStream {
 	}
 
 	pub async fn collect_garbage(&self) {
-		self.fragment_buffer.cleanup_expired();
+		self.fragment_buffer.cleanup_expired().await;
 	}
 
 	pub async fn close(&mut self) -> Result<(), crate::Error> {

@@ -3,3 +3,4 @@ target/
 **/*.rs.bk
 /target
 config.toml
+.claude

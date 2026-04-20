@@ -72,12 +72,20 @@ impl UdpSession {
 		}
 
 		let src_addr_display = src_addr.to_string();
+		// `peer_addr` fails if the socket has not yet been connected (no client
+		// packet has arrived) or if the socket has been disconnected. Fall back
+		// to a placeholder rather than panicking inside a log line.
+		let dst_addr_display = self
+			.socket
+			.peer_addr()
+			.map(|a| a.to_string())
+			.unwrap_or_else(|_| "<unconnected>".to_string());
 
 		debug!(
 			"[socks5] [{ctrl_addr}] [associate] [{assoc_id:#06x}] send packet from {src_addr_display} to {dst_addr}",
 			ctrl_addr = self.ctrl_addr,
 			assoc_id = self.assoc_id,
-			dst_addr = self.socket.peer_addr().unwrap(),
+			dst_addr = dst_addr_display,
 		);
 
 		if let Err(err) = self.socket.send(pkt, 0, src_addr).await {
@@ -86,7 +94,7 @@ impl UdpSession {
 				 error: {err}",
 				ctrl_addr = self.ctrl_addr,
 				assoc_id = self.assoc_id,
-				dst_addr = self.socket.peer_addr().unwrap(),
+				dst_addr = dst_addr_display,
 			);
 
 			return Err(Error::Io(err));
