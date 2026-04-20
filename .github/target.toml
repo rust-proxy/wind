@@ -125,6 +125,7 @@ skip-test = true
 os = "macos-15-intel"
 target = "x86_64-apple-darwin"
 release-name = "x86_64-darwin"
+mold = true
 
 # Apple Silicon macOS (ARM64)
 [[target]]
