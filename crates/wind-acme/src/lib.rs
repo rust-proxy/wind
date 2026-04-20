@@ -101,6 +101,9 @@ pub async fn start_acme(
 						info!("ACME event: DeployedNewCert");
 						axum_cancel.swap(None).inspect(|v| v.cancel());
 					}
+					rustls_acme::EventOk::DeployedCachedCert(_) => {
+						info!("ACME event: DeployedCachedCert");
+					}
 					_ => info!("ACME event: {:?}", event),
 				},
 				Some(Err(e)) => error!("ACME error: {:?}", e),

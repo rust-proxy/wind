@@ -10,6 +10,7 @@ pub mod acl;
 pub mod compat;
 pub mod config;
 pub mod error;
+pub mod log;
 pub mod tls;
 pub mod utils;
 pub mod wind_adapter;

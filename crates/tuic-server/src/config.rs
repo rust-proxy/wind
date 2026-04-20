@@ -80,6 +80,8 @@ pub struct Cli {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
 	pub log_level: LogLevel,
+	#[serde(default)]
+	pub log: LogConfig,
 	#[educe(Default(expression = "[::]:8443".parse().unwrap()))]
 	pub server: SocketAddr,
 	pub users: HashMap<Uuid, String>,
@@ -500,18 +502,56 @@ impl Config {
 	}
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 #[derive(Educe)]
 #[educe(Default)]
 pub enum LogLevel {
-	Trace,
-	Debug,
+	Trace = 0,
+	Debug = 1,
 	#[educe(Default)]
-	Info,
-	Warn,
-	Error,
-	Off,
+	Info = 2,
+	Warn = 3,
+	Error = 4,
+	Off = 5,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+	#[default]
+	Text,
+	Json,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogRotation {
+	#[default]
+	Never,
+	Hourly,
+	Daily,
+}
+
+/// Logging settings.
+#[derive(Debug, Clone, Deserialize, Serialize, Educe)]
+#[serde(deny_unknown_fields)]
+#[educe(Default)]
+pub struct LogConfig {
+	/// Log output format for stdout and log_file.
+	pub format: LogFormat,
+
+	/// Use compact log format (single-line, less verbose). Only applies to
+	/// `text` format.
+	#[educe(Default = true)]
+	pub compact: bool,
+
+	/// Optional log file path. When set, logs are also written to this file
+	/// with the configured `log_rotation` policy.
+	pub log_file: Option<PathBuf>,
+
+	/// Rotation policy for `log_file`.
+	pub log_rotation: LogRotation,
 }
 impl From<LogLevel> for LevelFilter {
 	fn from(value: LogLevel) -> Self {

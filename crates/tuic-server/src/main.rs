@@ -3,8 +3,6 @@ use std::process;
 use clap::Parser;
 #[cfg(feature = "jemallocator")]
 use tikv_jemallocator::Jemalloc;
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::{fmt::time::LocalTime, layer::SubscriberExt, util::SubscriberInitExt};
 use tuic_server::config::{Cli, Control, EnvState, parse_config};
 
 #[cfg(feature = "jemallocator")]
@@ -35,26 +33,7 @@ async fn main() -> eyre::Result<()> {
 			return Err(err);
 		}
 	};
-	let filter = tracing_subscriber::filter::Targets::new()
-		.with_targets(vec![
-			("tuic", cfg.log_level),
-			("tuic_server", cfg.log_level),
-			("wind_core", cfg.log_level),
-			("wind_tuic", cfg.log_level),
-			("wind_acme", cfg.log_level),
-		])
-		.with_default(LevelFilter::INFO);
-	let registry = tracing_subscriber::registry();
-	registry
-		.with(filter)
-		.with(
-			tracing_subscriber::fmt::layer()
-				.with_target(true)
-				.with_timer(LocalTime::new(time::macros::format_description!(
-					"[year repr:last_two]-[month]-[day] [hour]:[minute]:[second]"
-				))),
-		)
-		.try_init()?;
+	let _guards = tuic_server::log::init(&cfg)?;
 	tokio::select! {
 		res = tuic_server::run(cfg) => {
 			if let Err(err) = res {

@@ -67,7 +67,8 @@ pest_derive = "2.8"
 # Logging
 time = { version = "0.3", features = ["macros", "local-offset"] }
 humantime = { version = "2", default-features = false }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["tracing-log", "std", "local-time","fmt", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["tracing-log", "std", "local-time","fmt", "ansi", "json"] }
+tracing-appender = "0.2"
 tracing = "0.1"
 
 # Error handling
