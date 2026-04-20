@@ -14,7 +14,7 @@ use socks5_server::{
 	auth::{NoAuth, Password},
 };
 use tokio::{net::TcpListener, sync::RwLock as AsyncRwLock};
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, warn};
 
 use crate::{config::Local, error::Error};
 
@@ -119,31 +119,34 @@ impl Server {
 		loop {
 			match server.inner.accept().await {
 				Ok((conn, addr)) => {
-					debug!("[socks5] [{addr}] connection established");
-
-					tokio::spawn(async move {
-						match conn.handshake().await {
-							Ok(Connection::Associate(associate, _)) => {
-								let assoc_id = server.next_assoc_id.fetch_add(1, Ordering::Relaxed);
-								info!("[socks5] [{addr}] [associate] [{assoc_id:#06x}]");
-								Self::handle_associate(associate, assoc_id, server.dual_stack, server.max_pkt_size).await;
-							}
-							Ok(Connection::Bind(bind, _)) => {
-								info!("[socks5] [{addr}] [bind]");
-								Self::handle_bind(bind).await;
-							}
-							Ok(Connection::Connect(connect, target_addr)) => {
-								info!("[socks5] [{addr}] [connect] {target_addr}");
-								Self::handle_connect(connect, target_addr).await;
-							}
-							Err(err) => warn!("[socks5] [{addr}] handshake error: {err}"),
-						};
-
-						debug!("[socks5] [{addr}] connection closed");
-					});
+					let span = tracing::info_span!("socks5", peer = %addr);
+					tokio::spawn(Self::handle_socks5_conn(server, conn).instrument(span));
 				}
 				Err(err) => warn!("[socks5] failed to establish connection: {err}"),
 			}
 		}
+	}
+
+	async fn handle_socks5_conn(server: &Server, conn: socks5_server::IncomingConnection) {
+		debug!("connection established");
+
+		match conn.handshake().await {
+			Ok(Connection::Associate(associate, _)) => {
+				let assoc_id = server.next_assoc_id.fetch_add(1, Ordering::Relaxed);
+				info!(assoc_id = format_args!("{assoc_id:#06x}"), "associate");
+				Self::handle_associate(associate, assoc_id, server.dual_stack, server.max_pkt_size).await;
+			}
+			Ok(Connection::Bind(bind, _)) => {
+				info!("bind");
+				Self::handle_bind(bind).await;
+			}
+			Ok(Connection::Connect(connect, target_addr)) => {
+				info!(target = %target_addr, "connect");
+				Self::handle_connect(connect, target_addr).await;
+			}
+			Err(err) => warn!(error = %err, "handshake error"),
+		}
+
+		debug!("connection closed");
 	}
 }

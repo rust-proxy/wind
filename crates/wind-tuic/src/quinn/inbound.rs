@@ -22,6 +22,7 @@ use tokio::{
 	sync::{Notify, RwLock, mpsc},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use uuid::Uuid;
 use wind_core::{
 	AbstractInbound, AppContext, InboundCallback, error, info,
@@ -30,6 +31,13 @@ use wind_core::{
 };
 
 use crate::proto::{CmdType, Command};
+
+/// Spawn helper: await the future and log any error.
+async fn spawn_logged(label: &str, fut: impl std::future::Future<Output = eyre::Result<()>>) {
+	if let Err(err) = fut.await {
+		error!("{label} error: {err:?}");
+	}
+}
 
 /// Wrapper to combine quinn's SendStream and RecvStream into a single
 /// bidirectional stream
@@ -230,12 +238,13 @@ impl AbstractInbound for TuicInbound {
 					// Child token so cancelling the server propagates into every
 					// in-flight connection handler and its spawned subtasks.
 					let conn_cancel = self.cancel.child_token();
+					let remote = incoming.remote_address();
+					let span = tracing::info_span!("conn", peer = %remote);
 
-					tokio::spawn(async move {
-						if let Err(err) = handle_connection(incoming, users, auth_timeout, zero_rtt, cb, conn_cancel).await {
-							error!("Connection handler error: {:?}", err);
-						}
-					});
+					tokio::spawn(spawn_logged(
+						"Connection handler",
+						handle_connection(incoming, users, auth_timeout, zero_rtt, cb, conn_cancel),
+					).instrument(span));
 				}
 			}
 		}
@@ -358,11 +367,10 @@ async fn handle_connection<C: InboundCallback>(
 
 				let conn = connection.clone();
 				let cb = callback.clone();
-				tokio::spawn(async move {
-					if let Err(e) = handle_uni_stream(conn, recv, cb).await {
-						error!("Uni stream error: {:?}", e);
-					}
-				});
+				tokio::spawn(spawn_logged(
+					"Uni stream",
+					handle_uni_stream(conn, recv, cb),
+				).instrument(tracing::debug_span!("uni_stream")));
 			}
 			// Handle bidirectional streams
 			result = connection.conn.accept_bi() => {
@@ -376,11 +384,10 @@ async fn handle_connection<C: InboundCallback>(
 
 				let conn = connection.clone();
 				let cb = callback.clone();
-				tokio::spawn(async move {
-					if let Err(e) = handle_bi_stream(conn, send, recv, cb).await {
-						error!("Bi stream error: {:?}", e);
-					}
-				});
+				tokio::spawn(spawn_logged(
+					"Bi stream",
+					handle_bi_stream(conn, send, recv, cb),
+				).instrument(tracing::debug_span!("bi_stream")));
 			}
 			// Handle datagrams
 			result = connection.conn.read_datagram() => {
@@ -394,11 +401,10 @@ async fn handle_connection<C: InboundCallback>(
 
 				let conn = connection.clone();
 				let cb = callback.clone();
-				tokio::spawn(async move {
-					if let Err(e) = handle_datagram(conn, datagram, cb).await {
-						error!("Datagram error: {:?}", e);
-					}
-				});
+				tokio::spawn(spawn_logged(
+					"Datagram",
+					handle_datagram(conn, datagram, cb),
+				).instrument(tracing::debug_span!("datagram")));
 			}
 		}
 	}
@@ -539,7 +545,7 @@ async fn handle_bi_stream<C: InboundCallback>(
 			// Convert address to TargetAddr using helper function
 			let target_addr = crate::proto::address_to_target(addr)?;
 
-			info!("TCP connect to {}", target_addr);
+			info!(target = %target_addr, "TCP connect");
 
 			// Create bidirectional stream from quinn's send/recv pair
 			let stream = QuicBidiStream { send, recv };
@@ -639,7 +645,7 @@ async fn handle_auth(connection: &InboundCtx, uuid: Uuid, token: [u8; 32]) -> ey
 	// Mark as authenticated
 	*connection.uuid.write().await = Some(uuid);
 	connection.auth_notify.notify_waiters();
-	info!("Connection authenticated as {}", uuid);
+	info!(uuid = %uuid, "authenticated");
 
 	Ok(())
 }

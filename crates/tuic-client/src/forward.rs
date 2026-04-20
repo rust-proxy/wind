@@ -15,7 +15,7 @@ use tokio::{
 	net::{TcpListener, UdpSocket},
 	sync::RwLock as AsyncRwLock,
 };
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, warn};
 use wind_core::{
 	AbstractOutbound,
 	types::TargetAddr,
@@ -79,41 +79,47 @@ pub async fn start(tcp: Vec<TcpForward>, udp: Vec<UdpForward>) {
 }
 
 async fn run_tcp_forwarder(entry: TcpForward) {
-	match create_tcp_listener(entry.listen) {
-		Ok(listener) => {
-			warn!(
-				"[forward-tcp] listening on {listen} -> {remote:?}",
-				listen = listener.local_addr().unwrap(),
-				remote = entry.remote
-			);
-			loop {
-				match listener.accept().await {
-					Ok((inbound, peer)) => {
-						let remote = entry.remote.clone();
-						tokio::spawn(async move {
-							info!("[forward-tcp] [{peer}] connected", peer = peer);
-							let fut = async {
-								let adapter = wind_adapter::get_connection()
-									.ok_or_else(|| Error::Other(anyhow::anyhow!("wind adapter not initialized")))?;
-								let target = TargetAddr::Domain(remote.0, remote.1);
-								adapter
-									.handle_tcp(target, inbound, None::<wind_adapter::TuicOutboundAdapter>)
-									.await
-									.map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
-								Ok::<(), Error>(())
-							};
-							if let Err(err) = fut.await {
-								warn!("[forward-tcp] [{peer}] error: {err}");
-							}
-							debug!("[forward-tcp] [{peer}] closed");
-						});
-					}
-					Err(err) => warn!("[forward-tcp] accept error: {err}"),
-				}
-			}
+	let listener = match create_tcp_listener(entry.listen) {
+		Ok(l) => l,
+		Err(err) => {
+			warn!("[forward-tcp] failed to bind listener: {err}");
+			return;
 		}
-		Err(err) => warn!("[forward-tcp] failed to bind listener: {err}"),
+	};
+	warn!(
+		"[forward-tcp] listening on {listen} -> {remote:?}",
+		listen = listener.local_addr().unwrap(),
+		remote = entry.remote
+	);
+	loop {
+		match listener.accept().await {
+			Ok((inbound, peer)) => {
+				let remote = entry.remote.clone();
+				let span = tracing::info_span!("forward_tcp", peer = %peer);
+				tokio::spawn(handle_tcp_conn(inbound, remote).instrument(span));
+			}
+			Err(err) => warn!("[forward-tcp] accept error: {err}"),
+		}
 	}
+}
+
+async fn handle_tcp_conn(inbound: tokio::net::TcpStream, remote: (String, u16)) {
+	info!("connected");
+	let result: Result<(), Error> = async {
+		let adapter =
+			wind_adapter::get_connection().ok_or_else(|| Error::Other(anyhow::anyhow!("wind adapter not initialized")))?;
+		let target = TargetAddr::Domain(remote.0, remote.1);
+		adapter
+			.handle_tcp(target, inbound, None::<wind_adapter::TuicOutboundAdapter>)
+			.await
+			.map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
+		Ok(())
+	}
+	.await;
+	if let Err(err) = result {
+		warn!(error = %err, "error");
+	}
+	debug!("closed");
 }
 
 fn create_tcp_listener(addr: SocketAddr) -> Result<TcpListener, Error> {

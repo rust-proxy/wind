@@ -31,6 +31,7 @@ use std::{
 
 use fast_socks5::client::{Config as Socks5Config, Socks5Stream};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
+use tracing::Instrument;
 use wind_core::{
 	AclRouter, AppContext, Dispatcher, OutboundAction, RouteAction, Router,
 	dispatcher::BoxFuture,
@@ -114,31 +115,36 @@ impl TuicRouter {
 
 impl Router for TuicRouter {
 	fn route<'a>(&'a self, target: &'a TargetAddr, is_tcp: bool) -> BoxFuture<'a, eyre::Result<RouteAction>> {
-		Box::pin(async move {
-			let default_ip_mode = self.ctx.cfg.outbound.default.ip_mode.unwrap_or(StackPrefer::V4first);
+		let span = tracing::debug_span!("route", target = %target, proto = if is_tcp { "tcp" } else { "udp" });
+		Box::pin(self.do_route(target, is_tcp).instrument(span))
+	}
+}
 
-			// Resolve to SocketAddr for experimental guards.
-			let resolved = resolve_target(target, default_ip_mode).await?;
+impl TuicRouter {
+	async fn do_route(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction> {
+		let default_ip_mode = self.ctx.cfg.outbound.default.ip_mode.unwrap_or(StackPrefer::V4first);
 
-			// --- Experimental guards ---
-			let exp = &self.ctx.cfg.experimental;
-			if exp.drop_loopback && resolved.ip().is_loopback() {
-				tracing::debug!("[router] dropping loopback connection to {}", resolved);
-				return Ok(RouteAction::Reject(format!("loopback address rejected: {}", resolved)));
-			}
-			if exp.drop_private && is_private_ip(&resolved.ip()) {
-				tracing::debug!("[router] dropping private-range connection to {}", resolved);
-				return Ok(RouteAction::Reject(format!("private address rejected: {}", resolved)));
-			}
+		// Resolve to SocketAddr for experimental guards.
+		let resolved = resolve_target(target, default_ip_mode).await?;
 
-			// --- Unified rule evaluation (converted ACL + explicit metacubex rules) ---
-			if let Some(acl_router) = &self.acl_router {
-				return acl_router.route(target, is_tcp).await;
-			}
+		// --- Experimental guards ---
+		let exp = &self.ctx.cfg.experimental;
+		if exp.drop_loopback && resolved.ip().is_loopback() {
+			tracing::debug!(resolved = %resolved, "dropping loopback connection");
+			return Ok(RouteAction::Reject(format!("loopback address rejected: {}", resolved)));
+		}
+		if exp.drop_private && is_private_ip(&resolved.ip()) {
+			tracing::debug!(resolved = %resolved, "dropping private-range connection");
+			return Ok(RouteAction::Reject(format!("private address rejected: {}", resolved)));
+		}
 
-			// No rule matched – use the default outbound.
-			Ok(RouteAction::Forward("default".to_string()))
-		})
+		// --- Unified rule evaluation (converted ACL + explicit metacubex rules) ---
+		if let Some(acl_router) = &self.acl_router {
+			return acl_router.route(target, is_tcp).await;
+		}
+
+		// No rule matched – use the default outbound.
+		Ok(RouteAction::Forward("default".to_string()))
 	}
 }
 
@@ -158,130 +164,133 @@ impl TuicOutboundHandler {
 }
 
 impl OutboundAction for TuicOutboundHandler {
-	fn handle_tcp<'a>(&'a self, target: TargetAddr, mut stream: Box<dyn AbstractTcpStream>) -> BoxFuture<'a, eyre::Result<()>> {
-		Box::pin(async move {
-			match self.rule.kind.as_str() {
-				"socks5" => {
-					let socks_addr = self
-						.rule
-						.addr
-						.as_deref()
-						.ok_or_else(|| eyre::eyre!("socks5 outbound missing 'addr'"))?;
-
-					let mut socks_stream = connect_socks5_tcp(socks_addr, &target, &self.rule).await?;
-					if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut socks_stream).await {
-						tracing::debug!("socks5 copy_bidirectional ended: {}", e);
-					}
-				}
-				_ => {
-					// "direct" and anything else treated as direct
-					let ip_mode = self.rule.ip_mode.unwrap_or(StackPrefer::V4first);
-					let target_sa = resolve_target(&target, ip_mode).await?;
-					let mut target_stream = connect_direct_tcp(target_sa, &self.rule).await?;
-					if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut target_stream).await {
-						tracing::debug!("direct copy_bidirectional ended: {}", e);
-					}
-				}
-			}
-
-			Ok(())
-		})
+	fn handle_tcp<'a>(&'a self, target: TargetAddr, stream: Box<dyn AbstractTcpStream>) -> BoxFuture<'a, eyre::Result<()>> {
+		let span = tracing::debug_span!("outbound_tcp", target = %target, kind = %self.rule.kind);
+		Box::pin(self.do_handle_tcp(target, stream).instrument(span))
 	}
 
 	fn handle_udp<'a>(&'a self, udp_stream: UdpStream) -> BoxFuture<'a, eyre::Result<()>> {
-		// Clone the rule fields we need into the async block.
-		let rule = self.rule.clone();
+		let span = tracing::debug_span!("outbound_udp", kind = %self.rule.kind);
+		Box::pin(relay_udp(self.rule.clone(), udp_stream).instrument(span))
+	}
+}
 
-		Box::pin(async move {
-			let UdpStream { tx, mut rx } = udp_stream;
-			let default_ip_mode = rule.ip_mode.unwrap_or(StackPrefer::V4first);
+impl TuicOutboundHandler {
+	async fn do_handle_tcp(&self, target: TargetAddr, mut stream: Box<dyn AbstractTcpStream>) -> eyre::Result<()> {
+		match self.rule.kind.as_str() {
+			"socks5" => {
+				let socks_addr = self
+					.rule
+					.addr
+					.as_deref()
+					.ok_or_else(|| eyre::eyre!("socks5 outbound missing 'addr'"))?;
 
-			// Bind a local UDP socket for direct relaying (reused across packets).
-			let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+				let mut socks_stream = connect_socks5_tcp(socks_addr, &target, &self.rule).await?;
+				if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut socks_stream).await {
+					tracing::debug!(error = %e, "socks5 copy_bidirectional ended");
+				}
+			}
+			_ => {
+				let ip_mode = self.rule.ip_mode.unwrap_or(StackPrefer::V4first);
+				let target_sa = resolve_target(&target, ip_mode).await?;
+				let mut target_stream = connect_direct_tcp(target_sa, &self.rule).await?;
+				if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut target_stream).await {
+					tracing::debug!(error = %e, "direct copy_bidirectional ended");
+				}
+			}
+		}
+		Ok(())
+	}
+}
 
-			// Task: client → target
-			let socket_send = relay_socket.clone();
-			let rule_send = rule.clone();
-			let send_task = tokio::spawn(async move {
-				while let Some(pkt) = rx.recv().await {
-					let resolved = match resolve_target(&pkt.target, default_ip_mode).await {
+async fn relay_udp(rule: OutboundRule, udp_stream: UdpStream) -> eyre::Result<()> {
+	let UdpStream { tx, mut rx } = udp_stream;
+	let default_ip_mode = rule.ip_mode.unwrap_or(StackPrefer::V4first);
+
+	// Bind a local UDP socket for direct relaying (reused across packets).
+	let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+
+	// Task: client → target
+	let socket_send = relay_socket.clone();
+	let rule_send = rule.clone();
+	let send_task = tokio::spawn(async move {
+		while let Some(pkt) = rx.recv().await {
+			let resolved = match resolve_target(&pkt.target, default_ip_mode).await {
+				Ok(sa) => sa,
+				Err(err) => {
+					tracing::warn!(target = %pkt.target, error = %err, "UDP resolve failed");
+					continue;
+				}
+			};
+
+			match rule_send.kind.as_str() {
+				"socks5" => {
+					if !rule_send.allow_udp.unwrap_or(false) {
+						tracing::debug!(target = %resolved, "socks5 outbound disallows UDP, dropping packet");
+						continue;
+					}
+					tracing::warn!(
+						target = %resolved,
+						"UDP-over-SOCKS5 is not implemented; sending directly"
+					);
+					if let Err(err) = socket_send.send_to(&pkt.payload, resolved).await {
+						tracing::warn!(target = %resolved, error = %err, "UDP send failed");
+					}
+				}
+				_ => {
+					let ip_mode = rule_send.ip_mode.unwrap_or(StackPrefer::V4first);
+					let target_sa = match resolve_target(&pkt.target, ip_mode).await {
 						Ok(sa) => sa,
 						Err(err) => {
-							tracing::warn!("[udp relay] resolve failed for {}: {}", pkt.target, err);
+							tracing::warn!(
+								target = %pkt.target,
+								?ip_mode,
+								error = %err,
+								"UDP resolve failed"
+							);
 							continue;
 						}
 					};
-
-					match rule_send.kind.as_str() {
-						"socks5" => {
-							if !rule_send.allow_udp.unwrap_or(false) {
-								tracing::debug!("[udp relay] socks5 outbound disallows UDP, dropping packet to {}", resolved);
-								continue;
-							}
-							tracing::warn!(
-								"[udp relay] UDP-over-SOCKS5 is not implemented; sending directly to {}",
-								resolved
-							);
-							if let Err(err) = socket_send.send_to(&pkt.payload, resolved).await {
-								tracing::warn!("[udp relay] send failed to {}: {}", resolved, err);
-							}
-						}
-						_ => {
-							let ip_mode = rule_send.ip_mode.unwrap_or(StackPrefer::V4first);
-							let target_sa = match resolve_target(&pkt.target, ip_mode).await {
-								Ok(sa) => sa,
-								Err(err) => {
-									tracing::warn!(
-										"[udp relay] resolve failed for {} with ip_mode {:?}: {}",
-										pkt.target,
-										ip_mode,
-										err
-									);
-									continue;
-								}
-							};
-							if let Err(err) = socket_send.send_to(&pkt.payload, target_sa).await {
-								tracing::warn!("[udp relay] send failed to {}: {}", target_sa, err);
-							}
-						}
+					if let Err(err) = socket_send.send_to(&pkt.payload, target_sa).await {
+						tracing::warn!(target = %target_sa, error = %err, "UDP send failed");
 					}
 				}
-			});
-
-			// Task: target → client (responses on relay socket)
-			let socket_recv = relay_socket.clone();
-			let recv_task = tokio::spawn(async move {
-				let mut buf = vec![0u8; 65535];
-				loop {
-					match socket_recv.recv_from(&mut buf).await {
-						Ok((len, src_addr)) => {
-							use bytes::Bytes;
-							let payload = Bytes::copy_from_slice(&buf[..len]);
-							let pkt = UdpPacket {
-								source: Some(TargetAddr::from(src_addr)),
-								target: TargetAddr::from(src_addr),
-								payload,
-							};
-							if tx.send(pkt).await.is_err() {
-								break;
-							}
-						}
-						Err(err) => {
-							tracing::warn!("[udp relay] recv error: {}", err);
-							break;
-						}
-					}
-				}
-			});
-
-			tokio::select! {
-				_ = send_task => {}
-				_ = recv_task => {}
 			}
+		}
+	});
 
-			Ok(())
-		})
+	// Task: target → client (responses on relay socket)
+	let socket_recv = relay_socket.clone();
+	let recv_task = tokio::spawn(async move {
+		let mut buf = vec![0u8; 65535];
+		loop {
+			match socket_recv.recv_from(&mut buf).await {
+				Ok((len, src_addr)) => {
+					use bytes::Bytes;
+					let payload = Bytes::copy_from_slice(&buf[..len]);
+					let pkt = UdpPacket {
+						source: Some(TargetAddr::from(src_addr)),
+						target: TargetAddr::from(src_addr),
+						payload,
+					};
+					if tx.send(pkt).await.is_err() {
+						break;
+					}
+				}
+				Err(err) => {
+					tracing::warn!(error = %err, "UDP recv error");
+					break;
+				}
+			}
+		}
+	});
+
+	tokio::select! {
+		_ = send_task => {}
+		_ = recv_task => {}
 	}
+
+	Ok(())
 }
 
 // ============================================================================

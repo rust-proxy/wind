@@ -17,6 +17,8 @@
 
 use std::{collections::HashMap, future::Future, net::IpAddr, pin::Pin, sync::Arc};
 
+use tracing::Instrument;
+
 use crate::{
 	InboundCallback,
 	rule::{MatchContext, NetworkType, Rule},
@@ -150,56 +152,49 @@ impl<R: Router> Clone for Dispatcher<R> {
 
 impl<R: Router> InboundCallback for Dispatcher<R> {
 	async fn handle_tcpstream(&self, target_addr: TargetAddr, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
+		let span = tracing::debug_span!("dispatch_tcp", target = %target_addr);
+		self.dispatch_tcp(target_addr, stream).instrument(span).await
+	}
+
+	async fn handle_udpstream(&self, udp_stream: UdpStream) -> eyre::Result<()> {
+		self.dispatch_udp(udp_stream)
+			.instrument(tracing::debug_span!("dispatch_udp"))
+			.await
+	}
+}
+
+impl<R: Router> Dispatcher<R> {
+	async fn dispatch_tcp(&self, target_addr: TargetAddr, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
 		let action = self.router.route(&target_addr, true).await?;
 
 		match action {
 			RouteAction::Reject(reason) => {
-				tracing::debug!("[dispatcher] TCP {} → reject: {}", target_addr, reason);
+				tracing::debug!(reason = %reason, "rejected");
 				Err(eyre::eyre!("connection rejected: {}", reason))
 			}
 			RouteAction::Forward(name) => {
-				tracing::debug!("[dispatcher] TCP {} → outbound '{}'", target_addr, name);
+				tracing::debug!(outbound = %name, "forwarding");
 
 				let handler = self
 					.resolve_handler(&name)
 					.ok_or_else(|| eyre::eyre!("no outbound handler registered for '{}' (and no 'default')", name))?;
 
-				// Erase the concrete stream type into a Box<dyn AbstractTcpStream>.
 				handler.handle_tcp(target_addr, Box::new(stream)).await
 			}
 		}
 	}
 
-	async fn handle_udpstream(&self, udp_stream: UdpStream) -> eyre::Result<()> {
-		// For UDP we peek at the target from the stream's perspective.
-		// Because UdpStream is a channel pair, we cannot peek without consuming
-		// a packet.  Instead we wrap the stream in a small shim that intercepts
-		// the first packet, classifies it, then replays it into the handler.
-		//
-		// For simplicity we classify using a sentinel "unknown" address when
-		// no target is readily available from the stream struct itself.  Real
-		// per-packet routing happens inside the OutboundAction handler.
-		//
-		// If your Router needs per-packet classification, implement it inside
-		// your OutboundAction::handle_udp instead.
-		//
-		// Here we use a dummy TargetAddr for initial routing (e.g. the handler
-		// selection stage). This works well for most use cases where all UDP is
-		// routed to the same outbound, or the OutboundAction handles per-packet
-		// routing internally.
-		//
-		// For finer-grained control, use a custom Router that inspects a known
-		// session target recorded elsewhere (e.g. from the TUIC header).
+	async fn dispatch_udp(&self, udp_stream: UdpStream) -> eyre::Result<()> {
 		let sentinel = TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0);
 		let action = self.router.route(&sentinel, false).await?;
 
 		match action {
 			RouteAction::Reject(reason) => {
-				tracing::debug!("[dispatcher] UDP session → reject: {}", reason);
+				tracing::debug!(reason = %reason, "rejected");
 				Err(eyre::eyre!("UDP session rejected: {}", reason))
 			}
 			RouteAction::Forward(name) => {
-				tracing::debug!("[dispatcher] UDP session → outbound '{}'", name);
+				tracing::debug!(outbound = %name, "forwarding");
 
 				let handler = self
 					.resolve_handler(&name)
@@ -262,31 +257,36 @@ impl AclRouter {
 
 impl Router for AclRouter {
 	fn route<'a>(&'a self, target: &'a TargetAddr, is_tcp: bool) -> BoxFuture<'a, eyre::Result<RouteAction>> {
-		Box::pin(async move {
-			let (domain, dst_ip, port) = match target {
-				TargetAddr::Domain(d, p) => (Some(d.as_str()), None, *p),
-				TargetAddr::IPv4(ip, p) => (None, Some(IpAddr::V4(*ip)), *p),
-				TargetAddr::IPv6(ip, p) => (None, Some(IpAddr::V6(*ip)), *p),
-			};
+		let span = tracing::trace_span!("acl_route", target = %target, proto = if is_tcp { "tcp" } else { "udp" });
+		Box::pin(self.eval_rules(target, is_tcp).instrument(span))
+	}
+}
 
-			let ctx = MatchContext {
-				domain,
-				dst_ip,
-				dst_port: Some(port),
-				network: Some(if is_tcp { NetworkType::Tcp } else { NetworkType::Udp }),
-				..Default::default()
-			};
+impl AclRouter {
+	async fn eval_rules(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction> {
+		let (domain, dst_ip, port) = match target {
+			TargetAddr::Domain(d, p) => (Some(d.as_str()), None, *p),
+			TargetAddr::IPv4(ip, p) => (None, Some(IpAddr::V4(*ip)), *p),
+			TargetAddr::IPv6(ip, p) => (None, Some(IpAddr::V6(*ip)), *p),
+		};
 
-			for rule in &self.rules {
-				if rule.matches(&ctx) {
-					tracing::debug!("[acl-router] {} matched rule: {}", target, rule);
-					return Ok(rule_target_to_action(&rule.target, rule));
-				}
+		let ctx = MatchContext {
+			domain,
+			dst_ip,
+			dst_port: Some(port),
+			network: Some(if is_tcp { NetworkType::Tcp } else { NetworkType::Udp }),
+			..Default::default()
+		};
+
+		for rule in &self.rules {
+			if rule.matches(&ctx) {
+				tracing::debug!(rule = %rule, "matched");
+				return Ok(rule_target_to_action(&rule.target, rule));
 			}
+		}
 
-			tracing::debug!("[acl-router] {} → default outbound '{}'", target, self.default_outbound);
-			Ok(RouteAction::Forward(self.default_outbound.clone()))
-		})
+		tracing::debug!(outbound = %self.default_outbound, "no rule matched, using default");
+		Ok(RouteAction::Forward(self.default_outbound.clone()))
 	}
 }
 
