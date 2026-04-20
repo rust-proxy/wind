@@ -1,19 +1,23 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use crossfire::AsyncRx;
+use crossfire::{AsyncRx, spsc};
 use quinn::{RecvStream, SendStream};
 use tokio_util::sync::CancellationToken;
-use wind_core::{AppContext, info};
+use wind_core::{AppContext, info, warn};
 
 use crate::Error;
 
-/// Size of the single-producer single-consumer buffer for QUIC streams
-/// This controls how many elements can be buffered in the channel
-/// before backpressure is applied
-const SPSC_BUFFER_SIZE: usize = 16;
+/// Size of the single-producer single-consumer buffer for QUIC streams.
+/// Larger buffers reduce backpressure stalls on bursty workloads at the cost
+/// of a small amount of extra memory per connection.
+const SPSC_BUFFER_SIZE: usize = 64;
 
-type IncomingRx = (AsyncRx<Bytes>, AsyncRx<(SendStream, RecvStream)>, AsyncRx<RecvStream>);
+type IncomingRx = (
+	AsyncRx<spsc::Array<Bytes>>,
+	AsyncRx<spsc::Array<(SendStream, RecvStream)>>,
+	AsyncRx<spsc::Array<RecvStream>>,
+);
 
 /// Generic helper to spawn a task that handles incoming items from a QUIC
 /// connection and forwards them to a channel
@@ -23,26 +27,30 @@ async fn spawn_handler<T, F, Fut>(
 	cancel_token: CancellationToken,
 	accept_fn: F,
 	name: &'static str,
-) -> AsyncRx<T>
+) -> AsyncRx<spsc::Array<T>>
 where
 	T: Send + Unpin + 'static,
 	F: Fn(quinn::Connection) -> Fut + Send + 'static,
 	Fut: std::future::Future<Output = Result<T, quinn::ConnectionError>> + Send,
 {
-	let (tx, rx) = crossfire::spsc::bounded_async(SPSC_BUFFER_SIZE);
+	let (tx, rx) = spsc::bounded_async(SPSC_BUFFER_SIZE);
 
 	ctx.tasks.spawn(async move {
 		loop {
 			tokio::select! {
 				res = accept_fn(connection.clone()) => {
 					let item = match res {
-						Err(e) => unimplemented!("unhandled error {e:?}"),
+						Err(e) => {
+							warn!("Connection error in {} handler: {e:?}", name);
+							break;
+						}
 						Ok(item) => item,
 					};
 
 					info!("Accepted new {}", name);
 					if let Err(e) = tx.send_timeout(item, Duration::from_secs(1)).await {
-						unimplemented!("unhandled error {e:?}");
+						warn!("{} channel send failed (receiver dropped or timeout): {e:?}", name);
+						break;
 					}
 				}
 				_ = cancel_token.cancelled() => {

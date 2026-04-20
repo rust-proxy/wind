@@ -43,7 +43,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 bytes = "1"
 eyre = "0.6"
 uuid = { version = "1", features = ["v4"] }
-crossfire = { version = "2", features = ["tokio"] }
+crossfire = { version = "3", features = ["tokio"] }
 moka = { version = "0.12", features = ["future"] }
 snafu = "0.9"
 num_enum = "0.7"

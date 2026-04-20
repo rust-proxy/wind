@@ -8,10 +8,12 @@ use std::{
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::{BufMut, Bytes, BytesMut};
-use crossfire::MAsyncTx;
+use crossfire::{MAsyncTx, mpmc};
 use moka::future::Cache;
 use tokio_util::codec::Encoder;
 use wind_core::{types::TargetAddr, udp::UdpPacket};
+
+type UdpPacketTx = MAsyncTx<mpmc::Array<UdpPacket>>;
 
 use crate::proto::{Address, AddressCodec, ClientProtoExt as _, CmdCodec, CmdType, Command, Header, HeaderCodec};
 
@@ -38,7 +40,7 @@ struct FragmentInfo {
 pub struct UdpStream {
 	connection: quinn::Connection,
 	assoc_id: u16,
-	receive_tx: MAsyncTx<UdpPacket>,
+	receive_tx: UdpPacketTx,
 	next_pkt_id: AtomicU16, // Track packet IDs for fragmentation
 	// Fragment reassembly state (wrapped in Mutex for interior mutability)
 	fragment_buffer: FragmentReassemblyBuffer,
@@ -203,7 +205,7 @@ impl FragmentReassemblyBuffer {
 }
 
 impl UdpStream {
-	pub fn new(connection: quinn::Connection, assoc_id: u16, receive_tx: MAsyncTx<UdpPacket>) -> Self {
+	pub fn new(connection: quinn::Connection, assoc_id: u16, receive_tx: UdpPacketTx) -> Self {
 		Self {
 			connection,
 			assoc_id,

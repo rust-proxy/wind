@@ -1,7 +1,7 @@
 use std::{
 	ops::Deref,
 	path::{Path, PathBuf},
-	sync::{Arc, RwLock},
+	sync::Arc,
 	time::Duration,
 };
 
@@ -20,7 +20,7 @@ use tracing::warn;
 pub struct CertResolver {
 	cert_path: PathBuf,
 	key_path: PathBuf,
-	cert_key: RwLock<Arc<CertifiedKey>>,
+	cert_key: ArcSwap<CertifiedKey>,
 	hash: ArcSwap<[u8; 32]>,
 }
 impl CertResolver {
@@ -30,7 +30,7 @@ impl CertResolver {
 		let resolver = Arc::new(Self {
 			cert_path: cert_path.to_owned(),
 			key_path: key_path.to_owned(),
-			cert_key: RwLock::new(cert_key),
+			cert_key: ArcSwap::new(cert_key),
 			hash: ArcSwap::new(Arc::new(hash)),
 		});
 		// Start file watcher in background
@@ -59,8 +59,7 @@ impl CertResolver {
 
 	async fn reload_cert_key(&self) -> Result<()> {
 		let new_cert_key = load_cert_key(&self.cert_path, &self.key_path).await?;
-		let mut guard = self.cert_key.write().map_err(|_| eyre::eyre!("Certificate lock poisoned"))?;
-		*guard = new_cert_key;
+		self.cert_key.store(new_cert_key);
 		Ok(())
 	}
 
@@ -74,7 +73,7 @@ impl CertResolver {
 }
 impl ResolvesServerCert for CertResolver {
 	fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-		self.cert_key.read().map(|guard| guard.deref().clone()).ok()
+		Some(self.cert_key.load_full())
 	}
 }
 
@@ -253,7 +252,7 @@ mod tests {
 			.await
 			.unwrap();
 
-		let certified_key = resolver.cert_key.read().unwrap();
+		let certified_key = resolver.cert_key.load_full();
 		assert!(!certified_key.cert.is_empty());
 		Ok(())
 	}
@@ -273,7 +272,7 @@ mod tests {
 			.unwrap();
 
 		let initial_fingerprint = {
-			let key = resolver.cert_key.read().unwrap();
+			let key = resolver.cert_key.load_full();
 			key.cert[0].as_ref().to_vec()
 		};
 
@@ -284,7 +283,7 @@ mod tests {
 		tokio::time::sleep(Duration::from_secs(5)).await;
 
 		let updated_fingerprint = {
-			let key = resolver.cert_key.read().unwrap();
+			let key = resolver.cert_key.load_full();
 			key.cert[0].as_ref().to_vec()
 		};
 		assert_ne!(cert_pem, new_cert_pem);

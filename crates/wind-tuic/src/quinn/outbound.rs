@@ -256,7 +256,7 @@ impl AbstractOutbound for TuicOutbound {
 		info!(target: "[OUT]", "Creating new UDP association: {:#06x}", assoc_id);
 
 		let connection = self.connection.clone();
-		let (receive_tx, receive_rx) = crossfire::mpmc::bounded_async(128);
+		let (receive_tx, receive_rx) = crossfire::mpmc::bounded_async(256);
 		let tuic_stream = Arc::new(crate::proto::UdpStream::new(connection.clone(), assoc_id, receive_tx));
 		self.udp_session.insert(assoc_id, tuic_stream.clone()).await;
 		let cancel_stream = cancel.clone();

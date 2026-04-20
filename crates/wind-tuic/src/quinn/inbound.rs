@@ -11,7 +11,9 @@ use std::{
 	time::Duration,
 };
 
+use arc_swap::ArcSwapOption;
 use eyre::{Context, ContextCompat};
+use moka::future::Cache;
 use quinn::{Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime, TransportConfig, VarInt};
 use rustls::{
 	ServerConfig as RustlsServerConfig,
@@ -19,7 +21,7 @@ use rustls::{
 };
 use tokio::{
 	io::{AsyncRead, AsyncWrite},
-	sync::{Notify, RwLock, mpsc},
+	sync::{Notify, mpsc},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -256,13 +258,14 @@ impl AbstractInbound for TuicInbound {
 /// Represents an authenticated connection
 struct InboundCtx {
 	conn: quinn::Connection,
-	uuid: Arc<RwLock<Option<Uuid>>>,
+	uuid: ArcSwapOption<Uuid>,
 	auth_notify: Arc<Notify>,
 	users: Arc<HashMap<Uuid, String>>,
-	udp_sessions: Arc<RwLock<HashMap<u16, UdpSession>>>,
+	udp_sessions: Cache<u16, UdpSession>,
 }
 
 /// UDP session tracking
+#[derive(Clone)]
 struct UdpSession {
 	/// Protocol stream for fragment reassembly and sending responses back via
 	/// QUIC
@@ -320,10 +323,10 @@ async fn handle_connection<C: InboundCallback>(
 
 	let connection = Arc::new(InboundCtx {
 		conn: conn.clone(),
-		uuid: Arc::new(RwLock::new(None)),
+		uuid: ArcSwapOption::empty(),
 		auth_notify: Arc::new(Notify::new()),
 		users,
-		udp_sessions: Arc::new(RwLock::new(HashMap::new())),
+		udp_sessions: Cache::new(u16::MAX.into()),
 	});
 
 	// Spawn authentication timeout task. If the server is shutting down or the
@@ -333,8 +336,7 @@ async fn handle_connection<C: InboundCallback>(
 	tokio::spawn(async move {
 		tokio::select! {
 			_ = tokio::time::sleep(auth_timeout) => {
-				let uuid = conn_auth.uuid.read().await;
-				if uuid.is_none() {
+				if conn_auth.uuid.load().is_none() {
 					warn!("Connection from {} authentication timeout", remote_addr);
 					conn_auth.conn.close(VarInt::from_u32(0), b"auth timeout");
 				}
@@ -389,7 +391,9 @@ async fn handle_connection<C: InboundCallback>(
 					handle_bi_stream(conn, send, recv, cb),
 				).instrument(tracing::debug_span!("bi_stream")));
 			}
-			// Handle datagrams
+			// Handle datagrams — processed inline to avoid per-datagram task
+			// spawn overhead on the hot path. Datagrams are small and
+			// decoding + dispatching is fast.
 			result = connection.conn.read_datagram() => {
 				let datagram = match result {
 					Err(e) => {
@@ -401,10 +405,9 @@ async fn handle_connection<C: InboundCallback>(
 
 				let conn = connection.clone();
 				let cb = callback.clone();
-				tokio::spawn(spawn_logged(
-					"Datagram",
-					handle_datagram(conn, datagram, cb),
-				).instrument(tracing::debug_span!("datagram")));
+				if let Err(e) = handle_datagram(conn, datagram, cb).await {
+					error!("Datagram error: {e:?}");
+				}
 			}
 		}
 	}
@@ -491,7 +494,7 @@ async fn handle_uni_stream<C: InboundCallback>(
 			}
 		}
 		CmdType::Heartbeat => {
-			info!("Received heartbeat from {:?}", ctx.uuid.read().await);
+			info!("Received heartbeat from {:?}", ctx.uuid.load());
 		}
 		other => {
 			warn!("Unexpected command on uni stream: {:?}", other);
@@ -510,12 +513,9 @@ async fn handle_bi_stream<C: InboundCallback>(
 ) -> eyre::Result<()> {
 	// Check if authenticated - wait for auth if not yet done
 	{
-		let uuid = connection.uuid.read().await;
-		if uuid.is_none() {
-			drop(uuid);
+		if connection.uuid.load().is_none() {
 			connection.auth_notify.notified().await;
-			let uuid = connection.uuid.read().await;
-			if uuid.is_none() {
+			if connection.uuid.load().is_none() {
 				warn!("Unauthenticated bi stream attempt");
 				return Ok(());
 			}
@@ -565,12 +565,9 @@ async fn handle_bi_stream<C: InboundCallback>(
 async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: bytes::Bytes, callback: C) -> eyre::Result<()> {
 	// Check if authenticated - wait for auth if not yet done
 	{
-		let uuid = connection.uuid.read().await;
-		if uuid.is_none() {
-			drop(uuid);
+		if connection.uuid.load().is_none() {
 			connection.auth_notify.notified().await;
-			let uuid = connection.uuid.read().await;
-			if uuid.is_none() {
+			if connection.uuid.load().is_none() {
 				return Ok(());
 			}
 		}
@@ -643,7 +640,7 @@ async fn handle_auth(connection: &InboundCtx, uuid: Uuid, token: [u8; 32]) -> ey
 	}
 
 	// Mark as authenticated
-	*connection.uuid.write().await = Some(uuid);
+	connection.uuid.store(Some(Arc::new(uuid)));
 	connection.auth_notify.notify_waiters();
 	info!(uuid = %uuid, "authenticated");
 
@@ -714,84 +711,78 @@ async fn get_or_create_session<C: InboundCallback>(
 	assoc_id: u16,
 	callback: &C,
 ) -> eyre::Result<Arc<crate::proto::UdpStream>> {
-	// Fast path: check with read lock
-	{
-		let sessions = ctx.udp_sessions.read().await;
-		if let Some(session) = sessions.get(&assoc_id) {
-			return Ok(session.tuic_stream.clone());
-		}
-	}
-
-	// Slow path: take write lock and double-check
-	let mut sessions = ctx.udp_sessions.write().await;
-	if let Some(session) = sessions.get(&assoc_id) {
+	// Fast path: check the lock-free cache
+	if let Some(session) = ctx.udp_sessions.get(&assoc_id).await {
 		return Ok(session.tuic_stream.clone());
 	}
 
-	info!("Creating new UDP session for assoc_id {}", assoc_id);
+	// Slow path: use entry API for atomic get-or-insert.
+	// The moka cache `entry` API ensures only one caller creates the session
+	// for a given assoc_id, avoiding the double-checked locking pattern.
+	let cb = callback.clone();
+	let conn = ctx.conn.clone();
+	let session = ctx
+		.udp_sessions
+		.entry(assoc_id)
+		.or_insert_with(async {
+			info!("Creating new UDP session for assoc_id {}", assoc_id);
 
-	// Channel for reassembled packets: proto::UdpStream -> bridge task -> outbound
-	let (reassembled_tx, reassembled_rx) = crossfire::mpmc::bounded_async::<UdpPacket>(128);
+			// Channel for reassembled packets: proto::UdpStream -> bridge task -> outbound
+			let (reassembled_tx, reassembled_rx) = crossfire::mpmc::bounded_async::<UdpPacket>(128);
 
-	// Channels for the wind_core UdpStream (outbound handler <-> inbound)
-	let (to_outbound_tx, to_outbound_rx) = mpsc::channel::<UdpPacket>(100);
-	let (from_outbound_tx, mut from_outbound_rx) = mpsc::channel::<UdpPacket>(100);
+			// Channels for the wind_core UdpStream (outbound handler <-> inbound)
+			let (to_outbound_tx, to_outbound_rx) = mpsc::channel::<UdpPacket>(100);
+			let (from_outbound_tx, mut from_outbound_rx) = mpsc::channel::<UdpPacket>(100);
 
-	// Create proto::UdpStream for fragment reassembly and response sending
-	let tuic_stream = Arc::new(crate::proto::UdpStream::new(ctx.conn.clone(), assoc_id, reassembled_tx));
+			// Create proto::UdpStream for fragment reassembly and response sending
+			let tuic_stream = Arc::new(crate::proto::UdpStream::new(conn, assoc_id, reassembled_tx));
 
-	// UdpStream for the outbound handler
-	let outbound_stream = CoreUdpStream {
-		tx: from_outbound_tx,
-		rx: to_outbound_rx,
-	};
+			// UdpStream for the outbound handler
+			let outbound_stream = CoreUdpStream {
+				tx: from_outbound_tx,
+				rx: to_outbound_rx,
+			};
 
-	// Task 1: Bridge reassembled packets (crossfire rx -> mpsc tx to outbound).
-	//
-	// For UDP we prefer dropping packets over blocking: if the outbound handler
-	// cannot keep up, a slow destination must not stall reassembly for every
-	// other session sharing this connection. `try_send` fails immediately when
-	// the bounded channel is full; the only fatal error is `Closed`, which
-	// means the outbound side is gone for good.
-	tokio::spawn(async move {
-		while let Ok(packet) = reassembled_rx.recv().await {
-			match to_outbound_tx.try_send(packet) {
-				Ok(()) => {}
-				Err(mpsc::error::TrySendError::Full(_)) => {
-					warn!("UDP outbound queue full (assoc {}), dropping packet", assoc_id);
+			// Task 1: Bridge reassembled packets (crossfire rx -> mpsc tx to outbound).
+			tokio::spawn(async move {
+				while let Ok(packet) = reassembled_rx.recv().await {
+					match to_outbound_tx.try_send(packet) {
+						Ok(()) => {}
+						Err(mpsc::error::TrySendError::Full(_)) => {
+							warn!("UDP outbound queue full (assoc {}), dropping packet", assoc_id);
+						}
+						Err(mpsc::error::TrySendError::Closed(_)) => break,
+					}
 				}
-				Err(mpsc::error::TrySendError::Closed(_)) => break,
+			});
+
+			// Task 2: Forward outbound responses back to QUIC client
+			{
+				let response_stream = tuic_stream.clone();
+				tokio::spawn(async move {
+					while let Some(packet) = from_outbound_rx.recv().await {
+						if let Err(e) = response_stream.send_packet(packet).await {
+							warn!("Failed to send UDP response (assoc {}): {}", assoc_id, e);
+							break;
+						}
+					}
+				});
 			}
-		}
-	});
 
-	// Task 2: Forward outbound responses back to QUIC client
-	{
-		let response_stream = tuic_stream.clone();
-		tokio::spawn(async move {
-			while let Some(packet) = from_outbound_rx.recv().await {
-				if let Err(e) = response_stream.send_packet(packet).await {
-					warn!("Failed to send UDP response (assoc {}): {}", assoc_id, e);
-					break;
-				}
+			// Task 3: Hand off the UdpStream to the outbound via callback
+			{
+				tokio::spawn(async move {
+					if let Err(e) = cb.handle_udpstream(outbound_stream).await {
+						error!("UDP stream handler error (assoc {}): {}", assoc_id, e);
+					}
+				});
 			}
-		});
-	}
 
-	// Task 3: Hand off the UdpStream to the outbound via callback
-	{
-		let cb = callback.clone();
-		tokio::spawn(async move {
-			if let Err(e) = cb.handle_udpstream(outbound_stream).await {
-				error!("UDP stream handler error (assoc {}): {}", assoc_id, e);
-			}
-		});
-	}
+			UdpSession { tuic_stream }
+		})
+		.await;
 
-	let stream = tuic_stream.clone();
-	sessions.insert(assoc_id, UdpSession { tuic_stream: stream });
-
-	Ok(tuic_stream)
+	Ok(session.into_value().tuic_stream.clone())
 }
 
 /// Read exactly the bytes for one TUIC address from a Quinn receive stream.
@@ -860,8 +851,7 @@ async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate:
 
 /// Handle UDP dissociate
 async fn handle_dissociate(connection: &InboundCtx, assoc_id: u16) -> eyre::Result<()> {
-	let mut sessions = connection.udp_sessions.write().await;
-	sessions.remove(&assoc_id);
+	connection.udp_sessions.remove(&assoc_id).await;
 	info!("Dissociated UDP session {}", assoc_id);
 	Ok(())
 }
