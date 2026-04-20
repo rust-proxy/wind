@@ -80,21 +80,29 @@ impl FragmentReassemblyBuffer {
 
 		// Check if this is a placeholder address (used for non-first fragments)
 		let is_placeholder_addr = matches!(target, TargetAddr::IPv4(ip, 0) if ip.is_unspecified());
-		let target_clone = target.clone();
+		// Wrap in Arc once so both the `or_insert_with` future and the
+		// post-lookup `store` path can share a reference without cloning the
+		// underlying `TargetAddr` (which for `Domain` includes a `String`).
+		let target_arc = Arc::new(target);
+		let source_arc = source.map(Arc::new);
 
 		// Get or create the fragment metadata
 		let is_complete = {
 			let meta = self
 				.fragments
 				.entry(key)
-				.or_insert_with(async {
-					Arc::new(FragmentMetadata {
-						frag_total,
-						fragments: Cache::new(frag_total.into()),
-						last_updated: AtomicU64::new(init_time().elapsed().as_secs()),
-						source: ArcSwapOption::new(source.clone().map(Arc::new)),
-						target: ArcSwap::new(Arc::new(target)),
-					})
+				.or_insert_with({
+					let target_arc = target_arc.clone();
+					let source_arc = source_arc.clone();
+					async move {
+						Arc::new(FragmentMetadata {
+							frag_total,
+							fragments: Cache::new(frag_total.into()),
+							last_updated: AtomicU64::new(init_time().elapsed().as_secs()),
+							source: ArcSwapOption::new(source_arc),
+							target: ArcSwap::new(target_arc),
+						})
+					}
 				})
 				.await;
 
@@ -102,7 +110,7 @@ impl FragmentReassemblyBuffer {
 			// update the target address in case we received other fragments first with
 			// placeholder addresses
 			if frag_id == 0 && !is_placeholder_addr {
-				meta.value().target.store(Arc::new(target_clone));
+				meta.value().target.store(target_arc);
 			}
 
 			// Update timestamp
@@ -287,8 +295,8 @@ impl UdpStream {
 		// `try_from` guards against future changes that might weaken the
 		// bounds check above from silently truncating the fragment count.
 		let pkt_id = self.next_pkt_id.fetch_add(1, Ordering::Relaxed);
-		let frag_total = u8::try_from(fragment_count)
-			.map_err(|_| eyre::eyre!("Fragment count {} exceeds u8 range", fragment_count))?;
+		let frag_total =
+			u8::try_from(fragment_count).map_err(|_| eyre::eyre!("Fragment count {} exceeds u8 range", fragment_count))?;
 
 		// Fragment and send each piece
 		let mut offset = 0;

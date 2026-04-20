@@ -227,9 +227,12 @@ impl AbstractInbound for TuicInbound {
 					let auth_timeout = opts.auth_timeout;
 					let zero_rtt = opts.zero_rtt;
 					let cb = cb.clone();
+					// Child token so cancelling the server propagates into every
+					// in-flight connection handler and its spawned subtasks.
+					let conn_cancel = self.cancel.child_token();
 
 					tokio::spawn(async move {
-						if let Err(err) = handle_connection(incoming, users, auth_timeout, zero_rtt, cb).await {
+						if let Err(err) = handle_connection(incoming, users, auth_timeout, zero_rtt, cb, conn_cancel).await {
 							error!("Connection handler error: {:?}", err);
 						}
 					});
@@ -263,6 +266,7 @@ async fn handle_connection<C: InboundCallback>(
 	auth_timeout: Duration,
 	zero_rtt: bool,
 	callback: C,
+	cancel: CancellationToken,
 ) -> eyre::Result<()> {
 	let remote_addr = incoming.remote_address();
 
@@ -274,6 +278,12 @@ async fn handle_connection<C: InboundCallback>(
 		Ok(conn) => conn,
 	};
 
+	// Bound the handshake with a timeout tied to `auth_timeout` so that a peer
+	// who opens a QUIC connection but never completes the TLS handshake cannot
+	// hold resources indefinitely. Quinn has its own idle timeout, but applying
+	// an explicit bound here makes the handshake path fail-fast.
+	let handshake_timeout = auth_timeout.saturating_mul(2);
+
 	// Accept connection with optional 0-RTT
 	let conn = if zero_rtt {
 		match connecting.into_0rtt() {
@@ -282,13 +292,19 @@ async fn handle_connection<C: InboundCallback>(
 				conn
 			}
 			Err(connecting) => {
-				let conn = connecting.await.wrap_err("Failed to establish QUIC connection")?;
+				let conn = tokio::time::timeout(handshake_timeout, connecting)
+					.await
+					.map_err(|_| eyre::eyre!("QUIC handshake timed out after {:?}", handshake_timeout))?
+					.wrap_err("Failed to establish QUIC connection")?;
 				info!("Accepted 1-RTT connection from {}", remote_addr);
 				conn
 			}
 		}
 	} else {
-		let conn = connecting.await.wrap_err("Failed to establish QUIC connection")?;
+		let conn = tokio::time::timeout(handshake_timeout, connecting)
+			.await
+			.map_err(|_| eyre::eyre!("QUIC handshake timed out after {:?}", handshake_timeout))?
+			.wrap_err("Failed to establish QUIC connection")?;
 		info!("Accepted connection from {}", remote_addr);
 		conn
 	};
@@ -301,20 +317,35 @@ async fn handle_connection<C: InboundCallback>(
 		udp_sessions: Arc::new(RwLock::new(HashMap::new())),
 	});
 
-	// Spawn authentication timeout task
+	// Spawn authentication timeout task. If the server is shutting down or the
+	// connection dies before the timeout expires we abandon the sleep.
 	let conn_auth = connection.clone();
+	let auth_cancel = cancel.clone();
 	tokio::spawn(async move {
-		tokio::time::sleep(auth_timeout).await;
-		let uuid = conn_auth.uuid.read().await;
-		if uuid.is_none() {
-			warn!("Connection from {} authentication timeout", remote_addr);
-			conn_auth.conn.close(VarInt::from_u32(0), b"auth timeout");
+		tokio::select! {
+			_ = tokio::time::sleep(auth_timeout) => {
+				let uuid = conn_auth.uuid.read().await;
+				if uuid.is_none() {
+					warn!("Connection from {} authentication timeout", remote_addr);
+					conn_auth.conn.close(VarInt::from_u32(0), b"auth timeout");
+				}
+			}
+			_ = auth_cancel.cancelled() => {}
+			_ = conn_auth.conn.closed() => {}
 		}
 	});
 
 	// Handle incoming streams and datagrams
 	loop {
 		tokio::select! {
+			// Server shutdown: close the QUIC connection, which unblocks every
+			// spawned sub-task waiting on it (accept_uni, accept_bi, datagrams,
+			// send/recv), and drop out of the loop.
+			_ = cancel.cancelled() => {
+				connection.conn.close(VarInt::from_u32(0), b"server shutdown");
+				info!("Connection from {} closed by server shutdown", remote_addr);
+				break;
+			}
 			// Handle unidirectional streams
 			result = connection.conn.accept_uni() => {
 				let recv = match result {
@@ -709,11 +740,21 @@ async fn get_or_create_session<C: InboundCallback>(
 		rx: to_outbound_rx,
 	};
 
-	// Task 1: Bridge reassembled packets (crossfire rx -> mpsc tx to outbound)
+	// Task 1: Bridge reassembled packets (crossfire rx -> mpsc tx to outbound).
+	//
+	// For UDP we prefer dropping packets over blocking: if the outbound handler
+	// cannot keep up, a slow destination must not stall reassembly for every
+	// other session sharing this connection. `try_send` fails immediately when
+	// the bounded channel is full; the only fatal error is `Closed`, which
+	// means the outbound side is gone for good.
 	tokio::spawn(async move {
 		while let Ok(packet) = reassembled_rx.recv().await {
-			if to_outbound_tx.send(packet).await.is_err() {
-				break;
+			match to_outbound_tx.try_send(packet) {
+				Ok(()) => {}
+				Err(mpsc::error::TrySendError::Full(_)) => {
+					warn!("UDP outbound queue full (assoc {}), dropping packet", assoc_id);
+				}
+				Err(mpsc::error::TrySendError::Closed(_)) => break,
 			}
 		}
 	});
@@ -791,10 +832,10 @@ async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate:
 				.map_err(|e| eyre::eyre!("Failed to read domain length: {}", e))?;
 			let domain_len = len_byte[0] as usize;
 
-			// Max domain len is 255. Use a stack buffer.
-			let mut domain_buf = [0u8; 255];
-			let domain_slice = &mut domain_buf[..domain_len];
-			recv.read_exact(domain_slice)
+			// Read directly into a Vec sized to the exact length so we can
+			// hand it off to `String::from_utf8` without an extra copy.
+			let mut domain = vec![0u8; domain_len];
+			recv.read_exact(&mut domain)
 				.await
 				.map_err(|e| eyre::eyre!("Failed to read domain address: {}", e))?;
 
@@ -804,8 +845,7 @@ async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate:
 				.map_err(|e| eyre::eyre!("Failed to read domain port: {}", e))?;
 			let port = u16::from_be_bytes(port_buf);
 
-			let domain_str =
-				String::from_utf8(domain_slice.to_vec()).map_err(|_| eyre::eyre!("Invalid UTF-8 domain address"))?;
+			let domain_str = String::from_utf8(domain).map_err(|_| eyre::eyre!("Invalid UTF-8 domain address"))?;
 			Ok(crate::proto::Address::Domain(domain_str, port))
 		}
 		t => Err(eyre::eyre!("Unknown address type byte 0x{:02x}", t)),

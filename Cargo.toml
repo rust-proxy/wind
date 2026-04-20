@@ -28,7 +28,7 @@ quinn-congestions = { git = "https://github.com/proxy-rs/quinn-congestions.git",
 # datagram-socket = { path = "patches/datagram-socket" }
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 debug = 1
 lto = "fat"
 strip = true
@@ -37,9 +37,9 @@ codegen-units = 1
 
 [profile.fast-release]
 inherits = "release"
-#opt-level = "z"
+opt-level = 1
 debug = 1
-#lto = "fat"
-strip = true
-#incremental = false
-#codegen-units = 1
+lto = "thin"
+strip = false
+incremental = true
+codegen-units = 16
