@@ -1,4 +1,7 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{
+	net::{IpAddr, SocketAddr},
+	pin::Pin,
+};
 
 use eyre::{Context, Result};
 use hickory_resolver::{
@@ -27,21 +30,17 @@ impl HickoryResolver {
 }
 
 impl Resolver for HickoryResolver {
-	fn resolve<'a>(
-		&'a self,
-		host: &'a str,
-		port: u16,
-	) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SocketAddr>> + Send + 'a>> {
+	fn resolve<'a>(&'a self, host: &'a str) -> Pin<Box<dyn Future<Output = Result<IpAddr>> + Send + 'a>> {
 		Box::pin(async move {
 			if let Ok(ip) = host.parse::<IpAddr>() {
-				return Ok(SocketAddr::new(ip, port));
+				return Ok(ip);
 			}
 			let lookup = self
 				.inner
 				.lookup_ip(host)
 				.await
 				.with_context(|| format!("hickory lookup_ip {host}"))?;
-			let addrs: Vec<SocketAddr> = lookup.iter().map(|ip| SocketAddr::new(ip, port)).collect();
+			let addrs: Vec<IpAddr> = lookup.iter().collect();
 			if addrs.is_empty() {
 				eyre::bail!("no DNS records for {host}");
 			}
@@ -50,21 +49,17 @@ impl Resolver for HickoryResolver {
 		})
 	}
 
-	fn resolve_all<'a>(
-		&'a self,
-		host: &'a str,
-		port: u16,
-	) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<SocketAddr>>> + Send + 'a>> {
+	fn resolve_all<'a>(&'a self, host: &'a str) -> Pin<Box<dyn Future<Output = Result<Vec<IpAddr>>> + Send + 'a>> {
 		Box::pin(async move {
 			if let Ok(ip) = host.parse::<IpAddr>() {
-				return Ok(vec![SocketAddr::new(ip, port)]);
+				return Ok(vec![ip]);
 			}
 			let lookup = self
 				.inner
 				.lookup_ip(host)
 				.await
 				.with_context(|| format!("hickory lookup_ip {host}"))?;
-			let addrs: Vec<SocketAddr> = lookup.iter().map(|ip| SocketAddr::new(ip, port)).collect();
+			let addrs: Vec<IpAddr> = lookup.iter().collect();
 			if addrs.is_empty() {
 				eyre::bail!("no DNS records for {host}");
 			}

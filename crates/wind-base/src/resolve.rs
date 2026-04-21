@@ -7,6 +7,6 @@ pub async fn resolve_target(target: &TargetAddr, resolver: &dyn Resolver) -> eyr
 	match target {
 		TargetAddr::IPv4(ip, port) => Ok(SocketAddr::from((*ip, *port))),
 		TargetAddr::IPv6(ip, port) => Ok(SocketAddr::from((*ip, *port))),
-		TargetAddr::Domain(domain, port) => resolver.resolve(domain, *port).await,
+		TargetAddr::Domain(domain, port) => Ok(SocketAddr::new(resolver.resolve(domain).await?, *port)),
 	}
 }

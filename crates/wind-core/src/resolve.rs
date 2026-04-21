@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{future::Future, net::IpAddr, pin::Pin};
 
 use crate::utils::StackPrefer;
 
@@ -8,23 +8,15 @@ use crate::utils::StackPrefer;
 /// resolver. The trait is object-safe so it can be stored as
 /// `Arc<dyn Resolver>`.
 pub trait Resolver: Send + Sync + 'static {
-	/// Resolve `host` to a single [`SocketAddr`].
+	/// Resolve `host` to a single [`IpAddr`].
 	///
 	/// Literal IP addresses bypass the resolver and are returned directly.
-	fn resolve<'a>(
-		&'a self,
-		host: &'a str,
-		port: u16,
-	) -> std::pin::Pin<Box<dyn std::future::Future<Output = eyre::Result<SocketAddr>> + Send + 'a>>;
+	fn resolve<'a>(&'a self, host: &'a str) -> Pin<Box<dyn Future<Output = eyre::Result<IpAddr>> + Send + 'a>>;
 
-	/// Resolve `host` to every available [`SocketAddr`].
+	/// Resolve `host` to every available [`IpAddr`].
 	///
 	/// Literal IP addresses yield a single-entry vector.
-	fn resolve_all<'a>(
-		&'a self,
-		host: &'a str,
-		port: u16,
-	) -> std::pin::Pin<Box<dyn std::future::Future<Output = eyre::Result<Vec<SocketAddr>>> + Send + 'a>>;
+	fn resolve_all<'a>(&'a self, host: &'a str) -> Pin<Box<dyn Future<Output = eyre::Result<Vec<IpAddr>>> + Send + 'a>>;
 }
 
 /// System DNS resolver backed by [`tokio::net::lookup_host`].
@@ -42,16 +34,12 @@ impl SystemResolver {
 }
 
 impl Resolver for SystemResolver {
-	fn resolve<'a>(
-		&'a self,
-		host: &'a str,
-		port: u16,
-	) -> std::pin::Pin<Box<dyn std::future::Future<Output = eyre::Result<SocketAddr>> + Send + 'a>> {
+	fn resolve<'a>(&'a self, host: &'a str) -> Pin<Box<dyn Future<Output = eyre::Result<IpAddr>> + Send + 'a>> {
 		Box::pin(async move {
 			if let Ok(ip) = host.parse::<IpAddr>() {
-				return Ok(SocketAddr::new(ip, port));
+				return Ok(ip);
 			}
-			let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{host}:{port}")).await?.collect();
+			let addrs: Vec<IpAddr> = tokio::net::lookup_host(format!("{host}:0")).await?.map(|s| s.ip()).collect();
 			if addrs.is_empty() {
 				eyre::bail!("no DNS records for {host}");
 			}
@@ -60,16 +48,12 @@ impl Resolver for SystemResolver {
 		})
 	}
 
-	fn resolve_all<'a>(
-		&'a self,
-		host: &'a str,
-		port: u16,
-	) -> std::pin::Pin<Box<dyn std::future::Future<Output = eyre::Result<Vec<SocketAddr>>> + Send + 'a>> {
+	fn resolve_all<'a>(&'a self, host: &'a str) -> Pin<Box<dyn Future<Output = eyre::Result<Vec<IpAddr>>> + Send + 'a>> {
 		Box::pin(async move {
 			if let Ok(ip) = host.parse::<IpAddr>() {
-				return Ok(vec![SocketAddr::new(ip, port)]);
+				return Ok(vec![ip]);
 			}
-			let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{host}:{port}")).await?.collect();
+			let addrs: Vec<IpAddr> = tokio::net::lookup_host(format!("{host}:0")).await?.map(|s| s.ip()).collect();
 			if addrs.is_empty() {
 				eyre::bail!("no DNS records for {host}");
 			}
@@ -79,7 +63,7 @@ impl Resolver for SystemResolver {
 }
 
 /// Pick the best address from a resolved list according to [`StackPrefer`].
-pub fn pick_addr_by_preference(addrs: Vec<SocketAddr>, prefer: StackPrefer) -> Option<SocketAddr> {
+pub fn pick_addr_by_preference(addrs: Vec<IpAddr>, prefer: StackPrefer) -> Option<IpAddr> {
 	let v4 = || addrs.iter().copied().filter(|a| a.is_ipv4());
 	let v6 = || addrs.iter().copied().filter(|a| a.is_ipv6());
 
@@ -93,7 +77,7 @@ pub fn pick_addr_by_preference(addrs: Vec<SocketAddr>, prefer: StackPrefer) -> O
 
 /// Filter addresses according to [`StackPrefer`], preserving order within the
 /// preferred family.
-pub fn filter_addrs_by_preference(addrs: Vec<SocketAddr>, prefer: StackPrefer) -> Vec<SocketAddr> {
+pub fn filter_addrs_by_preference(addrs: Vec<IpAddr>, prefer: StackPrefer) -> Vec<IpAddr> {
 	match prefer {
 		StackPrefer::V4only => addrs.into_iter().filter(|a| a.is_ipv4()).collect(),
 		StackPrefer::V6only => addrs.into_iter().filter(|a| a.is_ipv6()).collect(),
