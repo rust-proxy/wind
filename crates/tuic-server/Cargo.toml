@@ -24,6 +24,7 @@ quiche = ["wind-tuic/quiche"]
 # Wind framework
 wind-core = { path = "../wind-core" }
 wind-base = { path = "../wind-base" }
+wind-dns = { path = "../wind-dns" }
 wind-socks = { path = "../wind-socks" }
 wind-tuic = { path = "../wind-tuic", features = ["server"] }
 wind-acme = { path = "../wind-acme" }

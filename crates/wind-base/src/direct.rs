@@ -8,10 +8,10 @@ use tracing::Instrument;
 use wind_core::{
 	OutboundAction,
 	dispatcher::BoxFuture,
+	resolve::Resolver,
 	tcp::AbstractTcpStream,
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
-	utils::StackPrefer,
 };
 
 use crate::resolve::resolve_target;
@@ -19,7 +19,6 @@ use crate::resolve::resolve_target;
 /// Options for a direct outbound connection.
 #[derive(Clone, Debug)]
 pub struct DirectOutboundOpts {
-	pub ip_mode: Option<StackPrefer>,
 	pub bind_ipv4: Option<Ipv4Addr>,
 	pub bind_ipv6: Option<Ipv6Addr>,
 	pub bind_device: Option<String>,
@@ -28,11 +27,12 @@ pub struct DirectOutboundOpts {
 /// Direct outbound handler – connects to the target without any proxy.
 pub struct DirectOutbound {
 	opts: DirectOutboundOpts,
+	resolver: Arc<dyn Resolver>,
 }
 
 impl DirectOutbound {
-	pub fn new(opts: DirectOutboundOpts) -> Self {
-		Self { opts }
+	pub fn new(opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>) -> Self {
+		Self { opts, resolver }
 	}
 }
 
@@ -41,8 +41,7 @@ impl OutboundAction for DirectOutbound {
 		let span = tracing::debug_span!("direct_tcp", target = %target);
 		Box::pin(
 			async move {
-				let ip_mode = self.opts.ip_mode.unwrap_or(StackPrefer::V4first);
-				let target_sa = resolve_target(&target, ip_mode).await?;
+				let target_sa = resolve_target(&target, self.resolver.as_ref()).await?;
 				let mut target_stream = connect_direct_tcp(target_sa, &self.opts).await?;
 				if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut target_stream).await {
 					tracing::debug!(error = %e, "direct copy_bidirectional ended");
@@ -55,7 +54,7 @@ impl OutboundAction for DirectOutbound {
 
 	fn handle_udp<'a>(&'a self, udp_stream: UdpStream) -> BoxFuture<'a, eyre::Result<()>> {
 		let span = tracing::debug_span!("direct_udp");
-		Box::pin(relay_udp_direct(self.opts.clone(), udp_stream).instrument(span))
+		Box::pin(relay_udp_direct(self.opts.clone(), self.resolver.clone(), udp_stream).instrument(span))
 	}
 }
 
@@ -84,9 +83,8 @@ pub async fn connect_direct_tcp(addr: SocketAddr, opts: &DirectOutboundOpts) -> 
 	Ok(socket.connect(addr).await?)
 }
 
-async fn relay_udp_direct(opts: DirectOutboundOpts, udp_stream: UdpStream) -> eyre::Result<()> {
+async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>, udp_stream: UdpStream) -> eyre::Result<()> {
 	let UdpStream { tx, mut rx } = udp_stream;
-	let default_ip_mode = opts.ip_mode.unwrap_or(StackPrefer::V4first);
 
 	let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
@@ -94,8 +92,7 @@ async fn relay_udp_direct(opts: DirectOutboundOpts, udp_stream: UdpStream) -> ey
 	let socket_send = relay_socket.clone();
 	let send_task = tokio::spawn(async move {
 		while let Some(pkt) = rx.recv().await {
-			let ip_mode = default_ip_mode;
-			let target_sa = match resolve_target(&pkt.target, ip_mode).await {
+			let target_sa = match resolve_target(&pkt.target, resolver.as_ref()).await {
 				Ok(sa) => sa,
 				Err(err) => {
 					tracing::warn!(target = %pkt.target, error = %err, "UDP resolve failed");

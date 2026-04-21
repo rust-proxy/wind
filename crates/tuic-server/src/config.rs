@@ -145,6 +145,9 @@ pub struct Config {
 
 	pub experimental: ExperimentalConfig,
 
+	#[serde(default)]
+	pub dns: wind_dns::DnsConfig,
+
 	/// Old configuration fields
 	#[serde(default, rename = "self_sign")]
 	#[deprecated]

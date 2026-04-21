@@ -31,8 +31,9 @@ use wind_base::{
 	resolve::resolve_target,
 };
 use wind_core::{
-	AclRouter, AppContext, Dispatcher, OutboundAction, RouteAction, Router,
+	AclRouter, AppContext, Dispatcher, OutboundAction, RouteAction, Router, SystemResolver,
 	dispatcher::BoxFuture,
+	resolve::Resolver,
 	rule::Rule,
 	types::TargetAddr,
 	utils::{StackPrefer, is_private_ip},
@@ -60,7 +61,7 @@ impl wind_core::AbstractInbound for ServerInbound {
 use crate::{AppContext as TuicAppContext, acl::acl_to_rules, config::OutboundRule};
 
 /// Build an `OutboundAction` from a tuic-server `OutboundRule`.
-fn make_outbound_action(rule: &OutboundRule) -> Arc<dyn OutboundAction> {
+fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc<dyn OutboundAction> {
 	match rule.kind.as_str() {
 		"socks5" => Arc::new(Socks5Action::new(Socks5ActionOpts {
 			addr: rule.addr.clone().unwrap_or_default(),
@@ -68,12 +69,14 @@ fn make_outbound_action(rule: &OutboundRule) -> Arc<dyn OutboundAction> {
 			password: rule.password.clone(),
 			allow_udp: rule.allow_udp,
 		})),
-		_ => Arc::new(DirectOutbound::new(DirectOutboundOpts {
-			ip_mode: rule.ip_mode,
-			bind_ipv4: rule.bind_ipv4,
-			bind_ipv6: rule.bind_ipv6,
-			bind_device: rule.bind_device.clone(),
-		})),
+		_ => Arc::new(DirectOutbound::new(
+			DirectOutboundOpts {
+				bind_ipv4: rule.bind_ipv4,
+				bind_ipv6: rule.bind_ipv6,
+				bind_device: rule.bind_device.clone(),
+			},
+			resolver,
+		)),
 	}
 }
 
@@ -91,13 +94,14 @@ fn make_outbound_action(rule: &OutboundRule) -> Arc<dyn OutboundAction> {
 /// 3. If nothing matched, forward to `"default"` outbound.
 pub struct TuicRouter {
 	ctx: Arc<TuicAppContext>,
+	resolver: Arc<dyn Resolver>,
 	/// Handles all rules (converted-ACL + explicit metacubex); `None` when
 	/// both sources are empty.
 	acl_router: Option<AclRouter>,
 }
 
 impl TuicRouter {
-	pub fn new(ctx: Arc<TuicAppContext>) -> Self {
+	pub fn new(ctx: Arc<TuicAppContext>, resolver: Arc<dyn Resolver>) -> Self {
 		// Convert legacy ACL rules to Metacubex format.
 		let converted = acl_to_rules(&ctx.cfg.acl);
 
@@ -124,7 +128,11 @@ impl TuicRouter {
 			Some(AclRouter::new(all_rules, "default"))
 		};
 
-		Self { ctx, acl_router }
+		Self {
+			ctx,
+			resolver,
+			acl_router,
+		}
 	}
 }
 
@@ -137,10 +145,8 @@ impl Router for TuicRouter {
 
 impl TuicRouter {
 	async fn do_route(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction> {
-		let default_ip_mode = self.ctx.cfg.outbound.default.ip_mode.unwrap_or(StackPrefer::V4first);
-
 		// Resolve to SocketAddr for experimental guards.
-		let resolved = resolve_target(target, default_ip_mode).await?;
+		let resolved = resolve_target(target, self.resolver.as_ref()).await?;
 
 		// --- Experimental guards ---
 		let exp = &self.ctx.cfg.experimental;
@@ -200,6 +206,18 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 
 	let wind_ctx = Arc::new(AppContext::default());
 
+	let default_ip_mode = cfg.outbound.default.ip_mode.unwrap_or(StackPrefer::V4first);
+	let resolver: Arc<dyn Resolver> = match wind_dns::build(&cfg.dns)? {
+		Some(hickory) => {
+			tracing::info!("[dns] using {:?} resolver", cfg.dns.mode);
+			Arc::new(hickory)
+		}
+		None => {
+			tracing::info!("[dns] using system resolver");
+			Arc::new(SystemResolver::new(default_ip_mode))
+		}
+	};
+
 	let inbound = if cfg.backend == "tuiche" {
 		tracing::info!("Initializing wind-tuiche backend (experimental)");
 		let mut builder = TuicheInboundBuilder::new()
@@ -232,15 +250,15 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 	};
 
 	// Build the Dispatcher
-	let router = TuicRouter::new(ctx.clone());
+	let router = TuicRouter::new(ctx.clone(), resolver.clone());
 	let mut dispatcher = Dispatcher::new(router);
 
 	// Register the default outbound handler
-	dispatcher.add_handler("default", make_outbound_action(&cfg.outbound.default));
+	dispatcher.add_handler("default", make_outbound_action(&cfg.outbound.default, resolver.clone()));
 
 	// Register all named outbound handlers
 	for (name, rule) in &cfg.outbound.named {
-		dispatcher.add_handler(name.clone(), make_outbound_action(rule));
+		dispatcher.add_handler(name.clone(), make_outbound_action(rule, resolver.clone()));
 	}
 
 	Ok((inbound, dispatcher))

@@ -3,6 +3,7 @@ pub mod inbound;
 mod interface;
 pub mod io;
 mod outbound;
+pub mod resolve;
 pub mod rule;
 pub mod types;
 
@@ -10,6 +11,7 @@ pub use dispatcher::{AclRouter, Dispatcher, OutboundAction, RouteAction, Router}
 pub use inbound::*;
 pub use interface::*;
 pub use outbound::*;
+pub use resolve::{Resolver, SystemResolver};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub mod log;
