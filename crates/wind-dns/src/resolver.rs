@@ -227,7 +227,8 @@ mod tests {
 
 	#[test]
 	fn build_system_returns_none() {
-		let cfg = DnsConfig::default();
+		let mut cfg = DnsConfig::default();
+		cfg.mode = DnsMode::System;
 		assert!(matches!(cfg.mode, DnsMode::System));
 		let result = build(&cfg).unwrap();
 		assert!(result.is_none());
