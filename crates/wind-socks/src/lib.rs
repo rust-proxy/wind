@@ -4,6 +4,7 @@ use fast_socks5::{ReplyError, server::SocksServerError, util::target_addr::Targe
 use snafu::{IntoError, Snafu};
 use wind_core::types::TargetAddr;
 
+pub mod action;
 pub mod ext;
 pub mod inbound;
 pub mod outbound;

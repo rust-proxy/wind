@@ -4146,7 +4146,6 @@ dependencies = [
  "derive_more",
  "educe",
  "eyre",
- "fast-socks5",
  "figment",
  "figment-json5",
  "humantime",
@@ -4181,7 +4180,9 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wind-acme",
+ "wind-base",
  "wind-core",
+ "wind-socks",
  "wind-tuic",
 ]
 
@@ -4567,6 +4568,17 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "wind-base"
+version = "0.1.1"
+dependencies = [
+ "bytes",
+ "eyre",
+ "tokio",
+ "tracing",
+ "wind-core",
 ]
 
 [[package]]

@@ -5,9 +5,8 @@
 //! * [`TuicRouter`] – implements `wind_core::Router`.  For every incoming
 //!   connection it resolves the destination, applies experimental guards, and
 //!   evaluates the ACL table to pick the right named outbound.
-//! * [`TuicOutboundHandler`] – implements `wind_core::OutboundAction`.  Each
-//!   instance wraps a single [`OutboundRule`] (direct or socks5) and performs
-//!   the actual TCP/UDP relay.
+//! * Outbound handlers from `wind-base` ([`DirectOutbound`]) and `wind-socks`
+//!   ([`Socks5Action`]) perform the actual TCP/UDP relay.
 //! * [`create_inbound`] – factory that builds a `wind_core::Dispatcher` wired
 //!   to a `wind_tuic::TuicInbound` and returns the pair.
 //!
@@ -24,23 +23,21 @@
 //!    `"default"` handler; any other name looks up a named outbound.
 //! 4. **Outbound dispatch** via the `Dispatcher` / `OutboundAction` trait.
 
-use std::{
-	net::{SocketAddr, SocketAddrV4, SocketAddrV6},
-	sync::Arc,
-};
+use std::sync::Arc;
 
-use fast_socks5::client::{Config as Socks5Config, Socks5Stream};
-use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tracing::Instrument;
+use wind_base::{
+	direct::{DirectOutbound, DirectOutboundOpts},
+	resolve::resolve_target,
+};
 use wind_core::{
 	AclRouter, AppContext, Dispatcher, OutboundAction, RouteAction, Router,
 	dispatcher::BoxFuture,
 	rule::Rule,
-	tcp::AbstractTcpStream,
 	types::TargetAddr,
-	udp::{UdpPacket, UdpStream},
 	utils::{StackPrefer, is_private_ip},
 };
+use wind_socks::action::{Socks5Action, Socks5ActionOpts};
 use wind_tuic::{
 	quiche::inbound::{TuicheInbound, TuicheInboundBuilder},
 	quinn::inbound::{TuicInbound, TuicInboundOpts},
@@ -61,6 +58,24 @@ impl wind_core::AbstractInbound for ServerInbound {
 }
 
 use crate::{AppContext as TuicAppContext, acl::acl_to_rules, config::OutboundRule};
+
+/// Build an `OutboundAction` from a tuic-server `OutboundRule`.
+fn make_outbound_action(rule: &OutboundRule) -> Arc<dyn OutboundAction> {
+	match rule.kind.as_str() {
+		"socks5" => Arc::new(Socks5Action::new(Socks5ActionOpts {
+			addr: rule.addr.clone().unwrap_or_default(),
+			username: rule.username.clone(),
+			password: rule.password.clone(),
+			allow_udp: rule.allow_udp,
+		})),
+		_ => Arc::new(DirectOutbound::new(DirectOutboundOpts {
+			ip_mode: rule.ip_mode,
+			bind_ipv4: rule.bind_ipv4,
+			bind_ipv6: rule.bind_ipv6,
+			bind_device: rule.bind_device.clone(),
+		})),
+	}
+}
 
 // ============================================================================
 // TuicRouter – implements wind_core::Router
@@ -148,247 +163,6 @@ impl TuicRouter {
 	}
 }
 
-// ============================================================================
-// TuicOutboundHandler – implements wind_core::OutboundAction
-// ============================================================================
-
-/// Executes a single outbound rule (direct or socks5).
-pub struct TuicOutboundHandler {
-	rule: OutboundRule,
-}
-
-impl TuicOutboundHandler {
-	pub fn new(rule: OutboundRule) -> Self {
-		Self { rule }
-	}
-}
-
-impl OutboundAction for TuicOutboundHandler {
-	fn handle_tcp<'a>(&'a self, target: TargetAddr, stream: Box<dyn AbstractTcpStream>) -> BoxFuture<'a, eyre::Result<()>> {
-		let span = tracing::debug_span!("outbound_tcp", target = %target, kind = %self.rule.kind);
-		Box::pin(self.do_handle_tcp(target, stream).instrument(span))
-	}
-
-	fn handle_udp<'a>(&'a self, udp_stream: UdpStream) -> BoxFuture<'a, eyre::Result<()>> {
-		let span = tracing::debug_span!("outbound_udp", kind = %self.rule.kind);
-		Box::pin(relay_udp(self.rule.clone(), udp_stream).instrument(span))
-	}
-}
-
-impl TuicOutboundHandler {
-	async fn do_handle_tcp(&self, target: TargetAddr, mut stream: Box<dyn AbstractTcpStream>) -> eyre::Result<()> {
-		match self.rule.kind.as_str() {
-			"socks5" => {
-				let socks_addr = self
-					.rule
-					.addr
-					.as_deref()
-					.ok_or_else(|| eyre::eyre!("socks5 outbound missing 'addr'"))?;
-
-				let mut socks_stream = connect_socks5_tcp(socks_addr, &target, &self.rule).await?;
-				if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut socks_stream).await {
-					tracing::debug!(error = %e, "socks5 copy_bidirectional ended");
-				}
-			}
-			_ => {
-				let ip_mode = self.rule.ip_mode.unwrap_or(StackPrefer::V4first);
-				let target_sa = resolve_target(&target, ip_mode).await?;
-				let mut target_stream = connect_direct_tcp(target_sa, &self.rule).await?;
-				if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut target_stream).await {
-					tracing::debug!(error = %e, "direct copy_bidirectional ended");
-				}
-			}
-		}
-		Ok(())
-	}
-}
-
-async fn relay_udp(rule: OutboundRule, udp_stream: UdpStream) -> eyre::Result<()> {
-	let UdpStream { tx, mut rx } = udp_stream;
-	let default_ip_mode = rule.ip_mode.unwrap_or(StackPrefer::V4first);
-
-	// Bind a local UDP socket for direct relaying (reused across packets).
-	let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
-
-	// Task: client → target
-	let socket_send = relay_socket.clone();
-	let rule_send = rule.clone();
-	let send_task = tokio::spawn(async move {
-		while let Some(pkt) = rx.recv().await {
-			let resolved = match resolve_target(&pkt.target, default_ip_mode).await {
-				Ok(sa) => sa,
-				Err(err) => {
-					tracing::warn!(target = %pkt.target, error = %err, "UDP resolve failed");
-					continue;
-				}
-			};
-
-			match rule_send.kind.as_str() {
-				"socks5" => {
-					if !rule_send.allow_udp.unwrap_or(false) {
-						tracing::debug!(target = %resolved, "socks5 outbound disallows UDP, dropping packet");
-						continue;
-					}
-					tracing::warn!(
-						target = %resolved,
-						"UDP-over-SOCKS5 is not implemented; sending directly"
-					);
-					if let Err(err) = socket_send.send_to(&pkt.payload, resolved).await {
-						tracing::warn!(target = %resolved, error = %err, "UDP send failed");
-					}
-				}
-				_ => {
-					let ip_mode = rule_send.ip_mode.unwrap_or(StackPrefer::V4first);
-					let target_sa = match resolve_target(&pkt.target, ip_mode).await {
-						Ok(sa) => sa,
-						Err(err) => {
-							tracing::warn!(
-								target = %pkt.target,
-								?ip_mode,
-								error = %err,
-								"UDP resolve failed"
-							);
-							continue;
-						}
-					};
-					if let Err(err) = socket_send.send_to(&pkt.payload, target_sa).await {
-						tracing::warn!(target = %target_sa, error = %err, "UDP send failed");
-					}
-				}
-			}
-		}
-	});
-
-	// Task: target → client (responses on relay socket)
-	let socket_recv = relay_socket.clone();
-	let recv_task = tokio::spawn(async move {
-		let mut buf = vec![0u8; 65535];
-		loop {
-			match socket_recv.recv_from(&mut buf).await {
-				Ok((len, src_addr)) => {
-					use bytes::Bytes;
-					let payload = Bytes::copy_from_slice(&buf[..len]);
-					let pkt = UdpPacket {
-						source: Some(TargetAddr::from(src_addr)),
-						target: TargetAddr::from(src_addr),
-						payload,
-					};
-					if tx.send(pkt).await.is_err() {
-						break;
-					}
-				}
-				Err(err) => {
-					tracing::warn!(error = %err, "UDP recv error");
-					break;
-				}
-			}
-		}
-	});
-
-	tokio::select! {
-		_ = send_task => {}
-		_ = recv_task => {}
-	}
-
-	Ok(())
-}
-
-// ============================================================================
-// Helpers: resolution
-// ============================================================================
-
-/// Resolve a `TargetAddr` to a single `SocketAddr` respecting the given
-/// IP-stack preference.
-async fn resolve_target(target: &TargetAddr, prefer: StackPrefer) -> eyre::Result<SocketAddr> {
-	match target {
-		TargetAddr::IPv4(ip, port) => Ok(SocketAddr::from((*ip, *port))),
-		TargetAddr::IPv6(ip, port) => Ok(SocketAddr::from((*ip, *port))),
-		TargetAddr::Domain(domain, port) => {
-			let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:{}", domain, port)).await?.collect();
-
-			if addrs.is_empty() {
-				return Err(eyre::eyre!("DNS returned no addresses for {}", domain));
-			}
-
-			pick_addr_by_preference(addrs, prefer)
-				.ok_or_else(|| eyre::eyre!("No address matching ip_mode {:?} for {}", prefer, domain))
-		}
-	}
-}
-
-/// Pick the best address from a resolved list according to `StackPrefer`.
-fn pick_addr_by_preference(addrs: Vec<SocketAddr>, prefer: StackPrefer) -> Option<SocketAddr> {
-	let v4: Vec<SocketAddr> = addrs.iter().copied().filter(|a| a.is_ipv4()).collect();
-	let v6: Vec<SocketAddr> = addrs.iter().copied().filter(|a| a.is_ipv6()).collect();
-
-	match prefer {
-		StackPrefer::V4only => v4.into_iter().next(),
-		StackPrefer::V6only => v6.into_iter().next(),
-		StackPrefer::V4first => v4.into_iter().next().or_else(|| v6.into_iter().next()),
-		StackPrefer::V6first => v6.into_iter().next().or_else(|| v4.into_iter().next()),
-	}
-}
-
-// ============================================================================
-// Helpers: direct TCP connect
-// ============================================================================
-
-/// Open a direct TCP connection to `addr`, optionally binding a local
-/// address/device as specified in `rule`.
-async fn connect_direct_tcp(addr: SocketAddr, rule: &OutboundRule) -> eyre::Result<TcpStream> {
-	let socket = match addr {
-		SocketAddr::V4(_) => TcpSocket::new_v4()?,
-		SocketAddr::V6(_) => TcpSocket::new_v6()?,
-	};
-
-	let bind_addr: Option<SocketAddr> = match addr {
-		SocketAddr::V4(_) => rule.bind_ipv4.map(|ip| SocketAddr::V4(SocketAddrV4::new(ip, 0))),
-		SocketAddr::V6(_) => rule.bind_ipv6.map(|ip| SocketAddr::V6(SocketAddrV6::new(ip, 0, 0, 0))),
-	};
-
-	if let Some(local) = bind_addr {
-		socket.bind(local)?;
-	}
-
-	#[cfg(any(target_os = "linux", target_os = "android"))]
-	if let Some(ref dev) = rule.bind_device {
-		socket.bind_device(Some(dev.as_bytes()))?;
-	}
-
-	Ok(socket.connect(addr).await?)
-}
-
-// ============================================================================
-// Helpers: SOCKS5 TCP connect
-// ============================================================================
-
-/// Connect to `target_addr` through the SOCKS5 proxy described in `rule`.
-async fn connect_socks5_tcp(
-	socks_addr: &str,
-	target_addr: &TargetAddr,
-	rule: &OutboundRule,
-) -> eyre::Result<Socks5Stream<TcpStream>> {
-	let config = Socks5Config::default();
-
-	let (target_host, target_port) = match target_addr {
-		TargetAddr::IPv4(ip, port) => (ip.to_string(), *port),
-		TargetAddr::IPv6(ip, port) => (ip.to_string(), *port),
-		TargetAddr::Domain(domain, port) => (domain.clone(), *port),
-	};
-
-	let stream = match (&rule.username, &rule.password) {
-		(Some(user), Some(pass)) => {
-			Socks5Stream::connect_with_password(socks_addr, target_host, target_port, user.clone(), pass.clone(), config)
-				.await
-				.map_err(|e| eyre::eyre!("SOCKS5 connect failed: {}", e))?
-		}
-		_ => Socks5Stream::connect(socks_addr, target_host, target_port, config)
-			.await
-			.map_err(|e| eyre::eyre!("SOCKS5 connect failed: {}", e))?,
-	};
-
-	Ok(stream)
-}
 
 // ============================================================================
 // Inbound factory
@@ -462,11 +236,11 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 	let mut dispatcher = Dispatcher::new(router);
 
 	// Register the default outbound handler
-	dispatcher.add_handler("default", Arc::new(TuicOutboundHandler::new(cfg.outbound.default.clone())));
+	dispatcher.add_handler("default", make_outbound_action(&cfg.outbound.default));
 
 	// Register all named outbound handlers
 	for (name, rule) in &cfg.outbound.named {
-		dispatcher.add_handler(name.clone(), Arc::new(TuicOutboundHandler::new(rule.clone())));
+		dispatcher.add_handler(name.clone(), make_outbound_action(rule));
 	}
 
 	Ok((inbound, dispatcher))
