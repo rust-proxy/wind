@@ -25,6 +25,7 @@ ENV CC=clang \
     CXX=clang++ \
     AR=llvm-ar \
     RUSTC_WRAPPER="/usr/bin/sccache" \
+    SCCACHE_START_SERVER=0 \
     SCCACHE_DIRECT=true \
     SCCACHE_DIR="/tmp/sccache" \
     CARGO_BUILD_PIPELINING=false
