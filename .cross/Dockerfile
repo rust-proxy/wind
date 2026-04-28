@@ -25,4 +25,9 @@ RUN apt-get update && \
 
 ENV CC=clang \
     CXX=clang++ \
-    AR=llvm-ar
+    AR=llvm-ar \
+    RUSTC_WRAPPER="/usr/bin/sccache" \
+    SCCACHE_DIRECT=true \
+    SCCACHE_SERVER_UDS="/tmp/sccache.sock" \
+    SCCACHE_DIR="/tmp/sccache" \
+    CARGO_BUILD_PIPELINING=false
