@@ -4,11 +4,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 FROM $CROSS_BASE_IMAGE
 
 # Install system deps
-COPY .github/sccache.sh .github/sccache-wrapper.sh /
+COPY .github/sccache.sh /
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       clang llvm curl ca-certificates && \
-    chmod +x /sccache.sh /sccache-wrapper.sh && \
+    chmod +x /sccache.sh && \
     arch=$(uname -m) && \
     case "$arch" in \
       x86_64)  triple="x86_64-unknown-linux-musl" ;; \
@@ -19,14 +19,11 @@ RUN apt-get update && \
     esac && \
     echo "Detected arch=$arch, downloading sccache for $triple" && \
     /sccache.sh "$triple" && \
-    # Keep ca-certificates for GHA cache TLS; purge curl only
+    # Keep ca-certificates for GHA cache TLS
     apt-get purge -y curl && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
 ENV CC=clang \
     CXX=clang++ \
-    AR=llvm-ar \
-    RUSTC_WRAPPER="/sccache-wrapper.sh" \
-    SCCACHE_DIRECT=true \
-    CARGO_BUILD_PIPELINING=false
+    AR=llvm-ar
