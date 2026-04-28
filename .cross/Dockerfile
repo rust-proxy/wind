@@ -3,16 +3,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 FROM $CROSS_BASE_IMAGE
 
-# Install clang/llvm for C compilation (aws-lc-sys GCC memcmp bug workaround)
-# Also install sccache binary for manual cache ops and future use.
-# RUSTC_WRAPPER is deliberately NOT set: inside cross containers with --user,
-# sccache's server mode interferes with rustc's ability to create output
-# directories under /target (which is a Docker volume mount owned by root).
-# Native (non-cross) builds use the host sccache via mozilla-actions/sccache-action.
-COPY .github/sccache.sh /
+# Install system deps
+COPY .github/sccache.sh .github/sccache-wrapper.sh /
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends clang llvm curl ca-certificates && \
-    chmod +x /sccache.sh && \
+    apt-get install -y --no-install-recommends \
+      clang llvm curl ca-certificates && \
+    chmod +x /sccache.sh /sccache-wrapper.sh && \
     arch=$(uname -m) && \
     case "$arch" in \
       x86_64)  triple="x86_64-unknown-linux-musl" ;; \
@@ -23,10 +19,14 @@ RUN apt-get update && \
     esac && \
     echo "Detected arch=$arch, downloading sccache for $triple" && \
     /sccache.sh "$triple" && \
-    apt-get purge -y curl ca-certificates && \
+    # Keep ca-certificates for GHA cache TLS; purge curl only
+    apt-get purge -y curl && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
 ENV CC=clang \
     CXX=clang++ \
-    AR=llvm-ar
+    AR=llvm-ar \
+    RUSTC_WRAPPER="/sccache-wrapper.sh" \
+    SCCACHE_DIRECT=true \
+    CARGO_BUILD_PIPELINING=false
