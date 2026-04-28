@@ -10,7 +10,7 @@ set -euo pipefail
 
 main() {
     local triple="${1}"
-    local version="v0.12.0"
+    local version="v0.14.0"
     local url="https://github.com/mozilla/sccache/releases/download/${version}/sccache-${version}-${triple}.tar.gz"
     local td
 
