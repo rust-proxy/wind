@@ -19,15 +19,10 @@ RUN apt-get update && \
     esac && \
     echo "Detected arch=$arch, downloading sccache for $triple" && \
     /sccache.sh "$triple" && \
-    # Keep ca-certificates for GHA cache TLS
     apt-get purge -y curl && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
 ENV CC=clang \
     CXX=clang++ \
-    AR=llvm-ar \
-    RUSTC_WRAPPER="/usr/bin/sccache" \
-    SCCACHE_DIRECT=true \
-    SCCACHE_DIR="/tmp/sccache" \
-    CARGO_BUILD_PIPELINING=false
+    AR=llvm-ar
