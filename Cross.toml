@@ -1,7 +1,15 @@
+[build]
+# cross mounts host target/ at /target with --user, which may prevent
+# cargo from creating subdirectories. Pre-create them before cargo runs.
+pre-build = [
+  "mkdir -p /target",
+  "chmod 777 /target",
+]
+
 [build.env]
 # GHA cache endpoint is NOT reliably accessible from inside cross Docker
-# containers (missing CA certs, network restrictions). sccache relies on
-# the local disk cache at SCCACHE_DIR=/tmp/sccache instead.
+# containers (missing CA certs). sccache relies on the local disk cache
+# at SCCACHE_DIR=/tmp/sccache instead.
 passthrough = ["RUSTFLAGS", "RUSTC_BOOTSTRAP"]
 
 # Mount host /tmp so sccache's disk cache persists across container runs
