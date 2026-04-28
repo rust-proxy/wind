@@ -3,6 +3,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 FROM $CROSS_BASE_IMAGE
 
+# Install clang/llvm for C compilation (aws-lc-sys GCC memcmp bug workaround)
+# Also install sccache binary for manual cache ops and future use.
+# RUSTC_WRAPPER is deliberately NOT set: inside cross containers with --user,
+# sccache's server mode interferes with rustc's ability to create output
+# directories under /target (which is a Docker volume mount owned by root).
+# Native (non-cross) builds use the host sccache via mozilla-actions/sccache-action.
 COPY .github/sccache.sh /
 RUN apt-get update && \
     apt-get install -y --no-install-recommends clang llvm curl ca-certificates && \
@@ -23,9 +29,4 @@ RUN apt-get update && \
 
 ENV CC=clang \
     CXX=clang++ \
-    AR=llvm-ar \
-    RUSTC_WRAPPER="/usr/bin/sccache" \
-    SCCACHE_START_SERVER=0 \
-    SCCACHE_DIRECT=true \
-    SCCACHE_DIR="/tmp/sccache" \
-    CARGO_BUILD_PIPELINING=false
+    AR=llvm-ar
