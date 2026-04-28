@@ -3,11 +3,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 FROM $CROSS_BASE_IMAGE
 
-# Install system deps (clang/llvm for C compilation, curl for sccache download)
-# then install sccache, clean up to keep image lean
+# Install system deps (clang/llvm for C compilation, curl + ca-certificates for sccache download and GHA cache TLS)
 COPY .github/sccache.sh /
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends clang llvm curl ca-certificates && \
+    apt-get install -y --no-install-recommends \
+      clang llvm curl ca-certificates && \
     chmod +x /sccache.sh && \
     arch=$(uname -m) && \
     case "$arch" in \
@@ -19,7 +19,7 @@ RUN apt-get update && \
     esac && \
     echo "Detected arch=$arch, downloading sccache for $triple" && \
     /sccache.sh "$triple" && \
-    apt-get purge -y curl ca-certificates && \
+    apt-get purge -y curl && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
