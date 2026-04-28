@@ -1,6 +1,7 @@
 [build.env]
-# Pass through GHA cache API env vars so sccache inside the cross
-# container can use GHA cache as its backend (instead of local disk).
+# Pass through GHA cache API env vars so the HOST's sccache server
+# (which the container's sccache client connects to via shared UDS)
+# can use GHA cache as its backend.
 passthrough = [
   "RUSTFLAGS",
   "RUSTC_BOOTSTRAP",
@@ -9,6 +10,10 @@ passthrough = [
   "ACTIONS_RUNTIME_TOKEN",
   "ACTIONS_CACHE_URL",
 ]
+
+# Mount /tmp so the sccache Unix Domain Socket is shared between
+# the host server and the container client.
+volumes = ["/tmp=/tmp"]
 
 # Use clang as the C/C++ compiler to avoid the aws-lc-sys GCC memcmp bug
 # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95189

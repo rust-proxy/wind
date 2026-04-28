@@ -20,9 +20,9 @@ env:
   RUST_LOG: "wind=TRACE"
   RUST_TOOLCHAIN: "stable"
   RUSTC_BOOTSTRAP: "1"
-  # Run cross containers as root so sccache can create /target subdirs
-  CROSS_CONTAINER_UID: "0"
-  CROSS_CONTAINER_GID: "0"
+  # sccache host-client via shared Unix Domain Socket
+  SCCACHE_SERVER_UDS: "/tmp/sccache-server.sock"
+  SCCACHE_IDLE_TIMEOUT: "0"
 
 jobs:
   build:
