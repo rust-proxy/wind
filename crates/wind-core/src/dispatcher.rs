@@ -299,6 +299,69 @@ fn rule_target_to_action(target: &str, rule: &Rule) -> RouteAction {
 }
 
 // ============================================================================
+// Adapter: AbstractOutbound → OutboundAction
+// ============================================================================
+
+use crate::AbstractOutbound;
+
+/// Placeholder type used for the `via` parameter when no outbound chaining
+/// is desired.
+///
+/// Calling `handle_tcp` / `handle_udp` on this type will **panic**.
+/// It must never be used — it only exists to fill the generic `via`
+/// parameter of [`AbstractOutbound`].
+pub struct NoChain;
+
+impl AbstractOutbound for NoChain {
+	async fn handle_tcp(
+		&self,
+		_target_addr: TargetAddr,
+		_stream: impl crate::tcp::AbstractTcpStream,
+		_via: Option<impl AbstractOutbound + Sized + Send>,
+	) -> eyre::Result<()> {
+		unreachable!("NoChain::handle_tcp should never be called")
+	}
+
+	async fn handle_udp(
+		&self,
+		_stream: crate::udp::UdpStream,
+		_via: Option<impl AbstractOutbound + Sized + Send>,
+	) -> eyre::Result<()> {
+		unreachable!("NoChain::handle_udp should never be called")
+	}
+}
+
+/// Adapter that wraps any [`AbstractOutbound`] implementation as an
+/// [`OutboundAction`] (object-safe, store-able in the dispatcher).
+///
+/// The `via` chain parameter is filled with [`NoChain`] (panics if called).
+pub struct OutboundAsAction<O> {
+	pub inner: O,
+}
+
+impl<O: AbstractOutbound + Send + Sync + 'static> OutboundAction for OutboundAsAction<O> {
+	fn handle_tcp<'a>(
+		&'a self,
+		target: TargetAddr,
+		stream: Box<dyn crate::tcp::AbstractTcpStream + 'static>,
+	) -> BoxFuture<'a, eyre::Result<()>> {
+		Box::pin(async move {
+			self.inner
+				.handle_tcp(target, stream, Option::<NoChain>::None)
+				.await
+		})
+	}
+
+	fn handle_udp<'a>(&'a self, stream: crate::udp::UdpStream) -> BoxFuture<'a, eyre::Result<()>> {
+		Box::pin(async move {
+			self.inner
+				.handle_udp(stream, Option::<NoChain>::None)
+				.await
+		})
+	}
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

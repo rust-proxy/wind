@@ -1,0 +1,17 @@
+mode = "Naive"
+
+[socks_opt]
+listen_addr = "127.0.0.1:6666"
+allow_udp = true
+
+[naive_opt]
+server_address = "example.com:443"
+server_name = "example.com"
+username = "user"
+password = "pass"
+quic_enabled = true
+concurrency = 2
+cronet_lib_path = "/usr/lib/libcronet.so.119"
+
+[naive_opt.extra_headers]
+X-Test = "value"
