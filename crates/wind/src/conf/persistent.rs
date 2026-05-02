@@ -1,6 +1,6 @@
-use std::{net::SocketAddr, path::PathBuf};
 #[cfg(feature = "naive")]
 use std::collections::HashMap;
+use std::{net::SocketAddr, path::PathBuf};
 
 use figment::{
 	Figment,
@@ -232,11 +232,21 @@ pub struct NaiveOutboundConfig {
 // Default helpers
 // ============================================================================
 
-fn default_true() -> bool { true }
-fn default_10() -> u64 { 10 }
-fn default_20() -> u64 { 20 }
-fn default_localhost() -> String { "localhost".into() }
-fn default_h3_alpn() -> Vec<String> { vec!["h3".into()] }
+fn default_true() -> bool {
+	true
+}
+fn default_10() -> u64 {
+	10
+}
+fn default_20() -> u64 {
+	20
+}
+fn default_localhost() -> String {
+	"localhost".into()
+}
+fn default_h3_alpn() -> Vec<String> {
+	vec!["h3".into()]
+}
 
 // ============================================================================
 // Config loader

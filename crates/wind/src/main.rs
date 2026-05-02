@@ -3,15 +3,15 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 use clap::Parser as _;
 use tracing::Level;
 use wind_core::{
-	AppContext, info,
+	AppContext,
 	dispatcher::{Dispatcher, OutboundAsAction, Router},
 	inbound::AbstractInbound,
+	info,
 };
-use wind_socks::inbound::SocksInbound;
-use wind_tuic::quinn::outbound::TuicOutbound;
-
 #[cfg(feature = "naive")]
 use wind_naive::NaiveOutbound;
+use wind_socks::inbound::SocksInbound;
+use wind_tuic::quinn::outbound::TuicOutbound;
 
 use crate::conf::runtime::{InboundOpts, InboundRuntime, OutboundOpts, OutboundRuntime};
 
@@ -71,10 +71,7 @@ impl<R: Router> Manager<R> {
 // ============================================================================
 
 mod util;
-use crate::{
-	cli::Cli,
-	conf::persistent::PersistentConfig,
-};
+use crate::{cli::Cli, conf::persistent::PersistentConfig};
 mod cli;
 mod conf;
 mod log;
@@ -155,14 +152,8 @@ async fn main() -> eyre::Result<()> {
 // Boot helpers
 // ============================================================================
 
-async fn build_dispatcher(
-	outbounds: Vec<OutboundRuntime>,
-	ctx: Arc<AppContext>,
-) -> eyre::Result<Dispatcher<DefaultRouter>> {
-	let default_tag = outbounds
-		.first()
-		.map(|o| o.tag.clone())
-		.unwrap_or_else(|| "default".into());
+async fn build_dispatcher(outbounds: Vec<OutboundRuntime>, ctx: Arc<AppContext>) -> eyre::Result<Dispatcher<DefaultRouter>> {
+	let default_tag = outbounds.first().map(|o| o.tag.clone()).unwrap_or_else(|| "default".into());
 
 	let mut disp = Dispatcher::new(DefaultRouter { default: default_tag });
 

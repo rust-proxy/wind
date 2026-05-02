@@ -345,19 +345,11 @@ impl<O: AbstractOutbound + Send + Sync + 'static> OutboundAction for OutboundAsA
 		target: TargetAddr,
 		stream: Box<dyn crate::tcp::AbstractTcpStream + 'static>,
 	) -> BoxFuture<'a, eyre::Result<()>> {
-		Box::pin(async move {
-			self.inner
-				.handle_tcp(target, stream, Option::<NoChain>::None)
-				.await
-		})
+		Box::pin(async move { self.inner.handle_tcp(target, stream, Option::<NoChain>::None).await })
 	}
 
 	fn handle_udp<'a>(&'a self, stream: crate::udp::UdpStream) -> BoxFuture<'a, eyre::Result<()>> {
-		Box::pin(async move {
-			self.inner
-				.handle_udp(stream, Option::<NoChain>::None)
-				.await
-		})
+		Box::pin(async move { self.inner.handle_udp(stream, Option::<NoChain>::None).await })
 	}
 }
 

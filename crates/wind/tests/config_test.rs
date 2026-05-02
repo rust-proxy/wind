@@ -1,12 +1,13 @@
 //! Config parsing tests for the new multi-inbound/outbound config format.
 
-use figment::providers::{Format, Toml as TomlProvider};
-use figment::Figment;
+use figment::{
+	Figment,
+	providers::{Format, Toml as TomlProvider},
+};
 
 #[test]
 fn default_config_has_socks_inbound() {
-	let cfg: wind::conf::persistent::PersistentConfig =
-		wind::conf::persistent::PersistentConfig::default();
+	let cfg: wind::conf::persistent::PersistentConfig = wind::conf::persistent::PersistentConfig::default();
 
 	assert_eq!(cfg.inbounds.len(), 1);
 	assert_eq!(cfg.outbounds.len(), 1);
@@ -45,11 +46,7 @@ outbounds = [{{ type = "tuic", tag = "out", server_addr = "127.0.0.1:9443", uuid
 "#
 	);
 
-	let cfg: wind::conf::persistent::PersistentConfig =
-		Figment::new()
-			.merge(TomlProvider::string(&full))
-			.extract()
-			.unwrap();
+	let cfg: wind::conf::persistent::PersistentConfig = Figment::new().merge(TomlProvider::string(&full)).extract().unwrap();
 
 	assert_eq!(cfg.inbounds.len(), 1);
 	assert_eq!(cfg.outbounds.len(), 1);
@@ -77,11 +74,10 @@ outbounds:
     password: "test_passwd"
 "#;
 
-	let cfg: wind::conf::persistent::PersistentConfig =
-		Figment::new()
-			.merge(figment::providers::Yaml::string(yaml))
-			.extract()
-			.unwrap();
+	let cfg: wind::conf::persistent::PersistentConfig = Figment::new()
+		.merge(figment::providers::Yaml::string(yaml))
+		.extract()
+		.unwrap();
 
 	assert_eq!(cfg.inbounds.len(), 1);
 	assert_eq!(cfg.outbounds.len(), 1);

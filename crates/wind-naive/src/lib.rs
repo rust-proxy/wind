@@ -5,13 +5,17 @@
 //! a NaiveProxy server via the Cronet HTTP/2 or QUIC CONNECT protocol with
 //! padding.
 
-use std::io::{Read, Write};
-use std::sync::Arc;
+use std::{
+	io::{Read, Write},
+	sync::Arc,
+};
 
 use cronet_rs::naive_client::{NaiveClient, NaiveClientConfig, QuicCongestionControl};
 use eyre::Context as _;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::{
+	io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+	sync::mpsc,
+};
 use tracing::Instrument;
 use wind_core::{
 	AbstractOutbound, info,
@@ -137,8 +141,7 @@ impl NaiveOutbound {
 			..Default::default()
 		};
 
-		let client = NaiveClient::new(config)
-			.map_err(|e| eyre::eyre!("Failed to create NaiveClient: {e}"))?;
+		let client = NaiveClient::new(config).map_err(|e| eyre::eyre!("Failed to create NaiveClient: {e}"))?;
 
 		let client = Arc::new(tokio::sync::RwLock::new(client));
 
@@ -185,8 +188,7 @@ impl AbstractOutbound for NaiveOutbound {
 				.map_err(|e| eyre::eyre!("CONNECT to {target_for_dial} failed: {e}"))
 		})
 		.await
-		.context("Spawn blocking for dial failed")?
-		?;
+		.context("Spawn blocking for dial failed")??;
 
 		info!(target: "[NAIVE:TCP]", "CONNECT tunnel established to {target_str}");
 
@@ -194,16 +196,16 @@ impl AbstractOutbound for NaiveOutbound {
 		naive_async_bridge(naive_conn, stream).await
 	}
 
-	async fn handle_udp(
-		&self,
-		udp_stream: UdpStream,
-		_via: Option<impl AbstractOutbound + Sized + Send>,
-	) -> eyre::Result<()> {
+	async fn handle_udp(&self, udp_stream: UdpStream, _via: Option<impl AbstractOutbound + Sized + Send>) -> eyre::Result<()> {
 		let UdpStream { tx: _tx, mut rx } = udp_stream;
 		let client = self.client.clone();
 
 		while let Some(packet) = rx.recv().await {
-			let UdpPacket { source: _, target, payload } = packet;
+			let UdpPacket {
+				source: _,
+				target,
+				payload,
+			} = packet;
 			let target_str = target.to_string();
 			let client = client.clone();
 			let payload_len = payload.len();
@@ -226,11 +228,7 @@ impl AbstractOutbound for NaiveOutbound {
 // ============================================================================
 
 /// Send a single UDP payload through a short-lived CONNECT tunnel.
-async fn udp_tunnel_tx(
-	client: Arc<tokio::sync::RwLock<NaiveClient>>,
-	target: &str,
-	payload: &[u8],
-) -> eyre::Result<()> {
+async fn udp_tunnel_tx(client: Arc<tokio::sync::RwLock<NaiveClient>>, target: &str, payload: &[u8]) -> eyre::Result<()> {
 	let target = target.to_string();
 	let data = payload.to_vec();
 
@@ -243,16 +241,13 @@ async fn udp_tunnel_tx(
 			.map_err(|e| eyre::eyre!("UDP CONNECT tunnel to {target} failed: {e}"))
 	})
 	.await
-	.context("Spawn blocking for UDP dial failed")?
-	?;
+	.context("Spawn blocking for UDP dial failed")??;
 
 	tokio::task::spawn_blocking(move || -> eyre::Result<()> {
 		naive_conn
 			.write_all(&data)
 			.map_err(|e| eyre::eyre!("UDP tunnel write failed: {e}"))?;
-		naive_conn
-			.flush()
-			.map_err(|e| eyre::eyre!("UDP tunnel flush failed: {e}"))?;
+		naive_conn.flush().map_err(|e| eyre::eyre!("UDP tunnel flush failed: {e}"))?;
 		// Drop closes the tunnel.
 		Ok(())
 	})
@@ -367,8 +362,8 @@ async fn naive_async_bridge(
 
 /// Default search paths for `libcronet`.
 const CRONET_SEARCH_PATHS: &[&str] = &[
-	"libcronet.so",              // system LD_LIBRARY_PATH
-	"./libcronet.so",            // CWD
+	"libcronet.so",   // system LD_LIBRARY_PATH
+	"./libcronet.so", // CWD
 	"/usr/local/lib/libcronet.so",
 	"/opt/cronet/libcronet.so",
 ];
@@ -407,9 +402,8 @@ fn load_cronet(path: Option<String>) -> eyre::Result<()> {
 	}
 
 	Err(eyre::eyre!(
-		"Cannot load libcronet. Tried: {}. \
-		 Please install libcronet and set `cronet_lib_path` in config, \
-		 or place libcronet.so in LD_LIBRARY_PATH.",
+		"Cannot load libcronet. Tried: {}. Please install libcronet and set `cronet_lib_path` in config, or place \
+		 libcronet.so in LD_LIBRARY_PATH.",
 		paths.join(", "),
 	))
 }
