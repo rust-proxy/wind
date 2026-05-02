@@ -1,6 +1,4 @@
-#[cfg(feature = "naive")]
-use std::collections::HashMap;
-use std::{net::SocketAddr, path::PathBuf};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
 use figment::{
 	Figment,
@@ -144,7 +142,6 @@ pub enum OutboundConfig {
 	#[serde(rename = "tuic")]
 	Tuic(TuicOutboundConfig),
 
-	#[cfg(feature = "naive")]
 	#[serde(rename = "naive")]
 	Naive(NaiveOutboundConfig),
 }
@@ -190,7 +187,6 @@ pub struct TuicOutboundConfig {
 
 // ── NaiveProxy ───────────────────────────────────────────────────────────
 
-#[cfg(feature = "naive")]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct NaiveOutboundConfig {
 	/// Tag (name) used by the router.

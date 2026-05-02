@@ -52,7 +52,6 @@ pub struct OutboundRuntime {
 
 pub enum OutboundOpts {
 	Tuic(TuicOutboundOpts),
-	#[cfg(feature = "naive")]
 	Naive(wind_naive::NaiveOutboundOpts),
 }
 
@@ -76,7 +75,6 @@ impl OutboundRuntime {
 					}),
 				}
 			}
-			#[cfg(feature = "naive")]
 			OutboundConfig::Naive(n) => OutboundRuntime {
 				tag: n.tag.clone(),
 				opts: OutboundOpts::Naive(wind_naive::NaiveOutboundOpts {

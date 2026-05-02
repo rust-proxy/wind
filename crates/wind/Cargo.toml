@@ -10,7 +10,7 @@ license = "AGPL-3.0-or-later"
 wind-core = { version = "0.1.1", path = "../wind-core"}
 wind-socks = { version = "0.1.1", path = "../wind-socks"}
 wind-tuic = { version = "0.1.1", path = "../wind-tuic", features = ["quinn", "quiche"] }
-wind-naive = { version = "0.1.0", path = "../wind-naive", optional = true }
+wind-naive = { version = "0.1.0", path = "../wind-naive" }
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "net"] }
@@ -37,5 +37,4 @@ educe = { version = "0.6", features = ["Default"] }
 humantime-serde = "1"
 
 [features]
-naive = ["wind-naive"]
 default = []

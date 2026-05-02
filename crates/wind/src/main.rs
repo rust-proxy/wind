@@ -8,7 +8,6 @@ use wind_core::{
 	inbound::AbstractInbound,
 	info,
 };
-#[cfg(feature = "naive")]
 use wind_naive::NaiveOutbound;
 use wind_socks::inbound::SocksInbound;
 use wind_tuic::quinn::outbound::TuicOutbound;
@@ -165,7 +164,6 @@ async fn build_dispatcher(outbounds: Vec<OutboundRuntime>, ctx: Arc<AppContext>)
 				disp.add_handler(&tag, Arc::new(OutboundAsAction { inner: out }));
 				info!(target: "[BOOT]", "outbound '{tag}' [tuic]");
 			}
-			#[cfg(feature = "naive")]
 			OutboundOpts::Naive(opts) => {
 				let out = NaiveOutbound::new(opts).await?;
 				disp.add_handler(&tag, Arc::new(OutboundAsAction { inner: out }));
