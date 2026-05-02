@@ -127,7 +127,10 @@ impl Default for SocksInboundConfig {
 pub enum AuthConfig {
 	#[default]
 	NoAuth,
-	Password { username: String, password: String },
+	Password {
+		username: String,
+		password: String,
+	},
 }
 
 // ============================================================================
