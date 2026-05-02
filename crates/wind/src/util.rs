@@ -13,6 +13,7 @@ use wind_core::types::TargetAddr;
 /// This function will panic if:
 /// - The domain cannot be resolved to an IP address
 /// - No addresses are found for the given domain
+#[allow(dead_code)]
 pub fn target_addr_to_socket_addr(addr: &TargetAddr) -> SocketAddr {
 	match addr {
 		TargetAddr::IPv4(ip, port) => SocketAddr::from((*ip, *port)),

@@ -123,16 +123,11 @@ impl Default for SocksInboundConfig {
 	}
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub enum AuthConfig {
+	#[default]
 	NoAuth,
 	Password { username: String, password: String },
-}
-
-impl Default for AuthConfig {
-	fn default() -> Self {
-		AuthConfig::NoAuth
-	}
 }
 
 // ============================================================================

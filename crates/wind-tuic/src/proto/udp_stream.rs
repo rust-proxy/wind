@@ -160,23 +160,15 @@ impl FragmentReassemblyBuffer {
 			// Create a buffer to hold the reassembled packet
 			let mut total_size = 0;
 			for i in 0..meta.frag_total {
-				if let Some(fragment) = meta.fragments.get(&i).await {
-					total_size += fragment.len();
-				} else {
-					// Missing fragment, this shouldn't happen if we checked properly
-					return None;
-				}
+				let fragment = meta.fragments.get(&i).await?;
+				total_size += fragment.len();
 			}
 			let mut buffer = BytesMut::with_capacity(total_size);
 
 			// Combine fragments in order
 			for i in 0..meta.frag_total {
-				if let Some(fragment) = meta.fragments.get(&i).await {
-					buffer.put_slice(&fragment);
-				} else {
-					// Missing fragment, this shouldn't happen if we checked properly
-					return None;
-				}
+				let fragment = meta.fragments.get(&i).await?;
+				buffer.put_slice(&fragment);
 			}
 
 			// Return the reassembled packet
