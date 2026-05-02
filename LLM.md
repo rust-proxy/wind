@@ -15,7 +15,7 @@ Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL1] [TOOL2]
 | Component | Description |
 |-----------|-------------|
 | `AGENT_NAME` | The name of the AI tool or framework used (e.g., Claude, OpenClaw, Copilot) |
-| `MODEL_VERSION` | The specific model version (e.g., claude-3-opus, gemini-2.5-pro, k2p5) |
+| `MODEL_VERSION` | The specific model version, without provider prefix (e.g., claude-3-opus, gpt-4o, deepseek-v4-flash, gemini-2.5-pro) |
 | `[TOOL1] [TOOL2]` | Optional: Additional specialized analysis tools used (e.g., coccinelle, sparse, smatch, clang-tidy) |
 
 ### Notes
@@ -33,7 +33,7 @@ Assisted-by: Claude:claude-3-opus coccinelle sparse
 
 **Using OpenClaw with no additional tools:**
 ```
-Assisted-by: OpenClaw:k2p5
+Assisted-by: OpenClaw:deepseek-v4-flash
 ```
 
 **Using GitHub Copilot:**
@@ -44,7 +44,7 @@ Assisted-by: Copilot:gpt-4o
 **Multiple AI tools used:**
 ```
 Assisted-by: Claude:claude-3-opus clang-tidy
-Assisted-by: OpenClaw:gemini-3.1-pro-preview
+Assisted-by: OpenClaw:deepseek-v4-flash
 ```
 
 ## Where to Include
