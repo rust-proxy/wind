@@ -3,9 +3,9 @@ name: CI
 on:
   push:
     tags: ["v*"]
-    branches: ["next"]
+    branches: ["main"]
   pull_request:
-    branches: ["next"]
+    branches: ["main"]
   workflow_dispatch:
 
 concurrency:
