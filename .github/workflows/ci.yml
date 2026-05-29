@@ -37,7 +37,7 @@ jobs:
     name: Release
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/next' || startsWith(github.ref, 'refs/tags/v')))
     needs: [build]
-    uses: rust-proxy/workflows/.github/workflows/release-publish.yml@v1.0.12
+    uses: rust-proxy/workflows/.github/workflows/release-publish.yml@main
     with:
       cliff-config: '.github/cliff.toml'
       create-latest-on-push: true
@@ -61,9 +61,6 @@ jobs:
     name: Docker
     needs: [build]
     uses: rust-proxy/workflows/.github/workflows/docker-publish.yml@main
-    # secrets:
-    #   registrys: |
-    #     ${{ secrets.DOCKERHUB_USERNAME }}:$${{ secrets.DOCKERHUB_TOKEN }}@docker.io
     with:
       docker-file: '.github/Dockerfile'
       image-name: 'wind'
