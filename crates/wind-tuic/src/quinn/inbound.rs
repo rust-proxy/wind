@@ -305,62 +305,104 @@ async fn handle_connection<C: InboundCallback>(
 		}
 	});
 
-	loop {
-		tokio::select! {
-			_ = cancel.cancelled() => {
-				connection.conn.close(VarInt::from_u32(0), b"server shutdown");
-				info!("Connection from {} closed by server shutdown", remote_addr);
-				break;
-			}
-			result = connection.conn.accept_uni() => {
-				let recv = match result {
-					Err(e) => {
-						error!("Accept uni error: {:?}", e);
-						break;
+	// Dedicated task for reading datagrams so they don't compete with
+	// stream acceptance (accept_bi / accept_uni) in the same select loop.
+	// Without this, heavy UDP traffic can starve TCP stream acceptance.
+	{
+		let conn = connection.clone();
+		let cb = callback.clone();
+		let dg_cancel = cancel.child_token();
+		tokio::spawn(async move {
+			loop {
+				tokio::select! {
+					_ = dg_cancel.cancelled() => break,
+					result = conn.conn.read_datagram() => {
+						match result {
+							Err(e) => {
+								error!("Read datagram error: {:?}", e);
+								break;
+							}
+							Ok(datagram) => {
+								let c = conn.clone();
+								let cb2 = cb.clone();
+								tokio::spawn(spawn_logged(
+									"Datagram",
+									handle_datagram(c, datagram, cb2),
+								).instrument(tracing::debug_span!("datagram")));
+							}
+						}
 					}
-					Ok(recv) => recv,
-				};
-
-				let conn = connection.clone();
-				let cb = callback.clone();
-				tokio::spawn(spawn_logged(
-					"Uni stream",
-					handle_uni_stream(conn, recv, cb),
-				).instrument(tracing::debug_span!("uni_stream")));
-			}
-			result = connection.conn.accept_bi() => {
-				let (send, recv) = match result {
-					Err(e) => {
-						error!("Accept bi error: {:?}", e);
-						break;
-					}
-					Ok(streams) => streams,
-				};
-
-				let conn = connection.clone();
-				let cb = callback.clone();
-				tokio::spawn(spawn_logged(
-					"Bi stream",
-					handle_bi_stream(conn, send, recv, cb),
-				).instrument(tracing::debug_span!("bi_stream")));
-			}
-			result = connection.conn.read_datagram() => {
-				let datagram = match result {
-					Err(e) => {
-						error!("Read datagram error: {:?}", e);
-						break;
-					}
-					Ok(datagram) => datagram,
-				};
-
-				let conn = connection.clone();
-				let cb = callback.clone();
-				if let Err(e) = handle_datagram(conn, datagram, cb).await {
-					error!("Datagram error: {e:?}");
 				}
 			}
-		}
+		});
 	}
+
+	// Spawn a dedicated uni stream acceptor so it does not compete with
+	// bi stream acceptance in the same select loop.
+	{
+		let conn = connection.clone();
+		let cb = callback.clone();
+		let uni_cancel = cancel.child_token();
+		tokio::spawn(async move {
+			loop {
+				tokio::select! {
+					_ = uni_cancel.cancelled() => break,
+					result = conn.conn.accept_uni() => {
+						let recv = match result {
+							Err(e) => {
+								error!("Accept uni error: {:?}", e);
+								break;
+							}
+							Ok(recv) => recv,
+						};
+
+						let c = conn.clone();
+						let cb2 = cb.clone();
+						tokio::spawn(spawn_logged(
+							"Uni stream",
+							handle_uni_stream(c, recv, cb2),
+						).instrument(tracing::debug_span!("uni_stream")));
+					}
+				}
+			}
+		});
+	}
+
+	// Spawn a dedicated bi stream acceptor.
+	{
+		let conn = connection.clone();
+		let cb = callback.clone();
+		let bi_cancel = cancel.child_token();
+		tokio::spawn(async move {
+			loop {
+				tokio::select! {
+					_ = bi_cancel.cancelled() => break,
+					result = conn.conn.accept_bi() => {
+						let (send, recv) = match result {
+							Err(e) => {
+								error!("Accept bi error: {:?}", e);
+								break;
+							}
+							Ok(streams) => streams,
+						};
+
+						let c = conn.clone();
+						let cb2 = cb.clone();
+						tokio::spawn(spawn_logged(
+							"Bi stream",
+							handle_bi_stream(c, send, recv, cb2),
+						).instrument(tracing::debug_span!("bi_stream")));
+					}
+				}
+			}
+		});
+	}
+
+	// Wait for the parent cancel token – when it fires, the child tokens
+	// above will propagate cancellation to all three acceptor tasks.
+	cancel.cancelled().await;
+	connection.conn.close(VarInt::from_u32(0), b"server shutdown");
+	info!("Connection from {} closed by server shutdown", remote_addr);
 
 	Ok(())
 }
@@ -538,6 +580,16 @@ async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: 
 					Ok(t) => t,
 					Err(_) => wind_core::types::TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
 				};
+
+				tracing::debug!(
+					assoc_id,
+					pkt_id,
+					frag = format_args!("{}/{}", frag_id, frag_total),
+					target = %target_addr,
+					payload_len = payload.len(),
+					"UDP datagram received",
+				);
+
 				handle_udp_packet(
 					&connection,
 					assoc_id,
@@ -551,8 +603,12 @@ async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: 
 				.await?;
 			}
 		}
-		CmdType::Heartbeat => {}
-		_ => {}
+		CmdType::Heartbeat => {
+			tracing::trace!("UDP heartbeat received");
+		}
+		other => {
+			tracing::debug!(command = ?other, "unexpected datagram command");
+		}
 	}
 
 	Ok(())
@@ -595,6 +651,7 @@ async fn handle_udp_packet<C: InboundCallback>(
 	let tuic_stream = get_or_create_session(ctx, assoc_id, callback).await?;
 
 	if frag_total <= 1 {
+		tracing::trace!(assoc_id, pkt_id, target = %target_addr, len = payload.len(), "UDP packet → outbound");
 		tuic_stream
 			.receive_packet(UdpPacket {
 				source: None,
@@ -607,6 +664,7 @@ async fn handle_udp_packet<C: InboundCallback>(
 			.process_fragment(assoc_id, pkt_id, frag_total, frag_id, payload, None, target_addr)
 			.await
 		{
+			tracing::debug!(assoc_id, pkt_id, frag_total, target = %complete.target, len = complete.payload.len(), "UDP packet reassembled → outbound");
 			tuic_stream.receive_packet(complete).await?;
 		}
 	}
