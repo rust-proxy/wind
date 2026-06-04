@@ -37,6 +37,51 @@ async fn spawn_logged(label: &str, fut: impl std::future::Future<Output = eyre::
 	}
 }
 
+/// Wait for the connection to be authenticated. Returns `true` once a UUID is
+/// set; returns `false` if the auth timeout elapses first. Callers that get
+/// `false` must drop the request.
+async fn ensure_authed(ctx: &InboundCtx) -> bool {
+	if ctx.uuid.load().is_some() {
+		return true;
+	}
+	if tokio::time::timeout(ctx.auth_timeout, ctx.auth_notify.notified())
+		.await
+		.is_err()
+	{
+		return false;
+	}
+	ctx.uuid.load().is_some()
+}
+
+/// Drive an `accept`-style call in a loop until the connection errors or
+/// `cancel` fires. Each accepted value is handed to `handle`; the loop
+/// exits on connection error (logged) or cancellation (silent).
+async fn acceptor_loop<A, AccFut, HFut, AccFn, HFn>(
+	cancel: CancellationToken,
+	label: &'static str,
+	mut accept: AccFn,
+	mut handle: HFn,
+) where
+	AccFn: FnMut() -> AccFut,
+	HFn: FnMut(A) -> HFut,
+	AccFut: std::future::Future<Output = Result<A, quinn::ConnectionError>>,
+	HFut: std::future::Future<Output = ()>,
+{
+	loop {
+		let result = tokio::select! {
+			_ = cancel.cancelled() => return,
+			r = accept() => r,
+		};
+		match result {
+			Err(e) => {
+				error!("{label} error: {e:?}");
+				return;
+			}
+			Ok(v) => handle(v).await,
+		}
+	}
+}
+
 struct QuicBidiStream {
 	send: quinn::SendStream,
 	recv: quinn::RecvStream,
@@ -305,104 +350,109 @@ async fn handle_connection<C: InboundCallback>(
 		}
 	});
 
-	// Dedicated task for reading datagrams so they don't compete with
-	// stream acceptance (accept_bi / accept_uni) in the same select loop.
-	// Without this, heavy UDP traffic can starve TCP stream acceptance.
+	// One cancellation token shared by all acceptor tasks. Cancelling it
+	// from the parent stops every acceptor at once; we also fire it after
+	// the parent loop exits so InboundCtx (with its per-connection UDP
+	// session cache) can be dropped instead of leaking until server
+	// shutdown.
+	let acceptor_cancel = cancel.child_token();
+
+	// Datagram acceptor. Pre-auth datagrams are handled inline (serially)
+	// so an unauthenticated peer can't spawn unbounded tasks parked on
+	// `auth_notify`; once authed, each datagram is dispatched in parallel
+	// so a slow outbound queue can't block the read loop.
 	{
 		let conn = connection.clone();
 		let cb = callback.clone();
-		let dg_cancel = cancel.child_token();
+		let dg_cancel = acceptor_cancel.clone();
 		tokio::spawn(async move {
-			loop {
-				tokio::select! {
-					_ = dg_cancel.cancelled() => break,
-					result = conn.conn.read_datagram() => {
-						match result {
-							Err(e) => {
-								error!("Read datagram error: {:?}", e);
-								break;
-							}
-							Ok(datagram) => {
-								let c = conn.clone();
-								let cb2 = cb.clone();
-								tokio::spawn(spawn_logged(
-									"Datagram",
-									handle_datagram(c, datagram, cb2),
-								).instrument(tracing::debug_span!("datagram")));
-							}
+			acceptor_loop(
+				dg_cancel,
+				"Read datagram",
+				|| conn.conn.read_datagram(),
+				|datagram| {
+					let conn = conn.clone();
+					let cb = cb.clone();
+					async move {
+						if conn.uuid.load().is_some() {
+							tokio::spawn(
+								spawn_logged("Datagram", handle_datagram(conn, datagram, cb))
+									.instrument(tracing::debug_span!("datagram")),
+							);
+						} else if let Err(e) = handle_datagram(conn, datagram, cb).await {
+							error!("Datagram error: {e:?}");
 						}
 					}
-				}
-			}
+				},
+			)
+			.await;
 		});
 	}
 
-	// Spawn a dedicated uni stream acceptor so it does not compete with
-	// bi stream acceptance in the same select loop.
+	// Uni stream acceptor.
 	{
 		let conn = connection.clone();
 		let cb = callback.clone();
-		let uni_cancel = cancel.child_token();
+		let uni_cancel = acceptor_cancel.clone();
 		tokio::spawn(async move {
-			loop {
-				tokio::select! {
-					_ = uni_cancel.cancelled() => break,
-					result = conn.conn.accept_uni() => {
-						let recv = match result {
-							Err(e) => {
-								error!("Accept uni error: {:?}", e);
-								break;
-							}
-							Ok(recv) => recv,
-						};
-
-						let c = conn.clone();
-						let cb2 = cb.clone();
-						tokio::spawn(spawn_logged(
-							"Uni stream",
-							handle_uni_stream(c, recv, cb2),
-						).instrument(tracing::debug_span!("uni_stream")));
+			acceptor_loop(
+				uni_cancel,
+				"Accept uni",
+				|| conn.conn.accept_uni(),
+				|recv| {
+					let conn = conn.clone();
+					let cb = cb.clone();
+					async move {
+						tokio::spawn(
+							spawn_logged("Uni stream", handle_uni_stream(conn, recv, cb))
+								.instrument(tracing::debug_span!("uni_stream")),
+						);
 					}
-				}
-			}
+				},
+			)
+			.await;
 		});
 	}
 
-	// Spawn a dedicated bi stream acceptor.
+	// Bi stream acceptor.
 	{
 		let conn = connection.clone();
 		let cb = callback.clone();
-		let bi_cancel = cancel.child_token();
+		let bi_cancel = acceptor_cancel.clone();
 		tokio::spawn(async move {
-			loop {
-				tokio::select! {
-					_ = bi_cancel.cancelled() => break,
-					result = conn.conn.accept_bi() => {
-						let (send, recv) = match result {
-							Err(e) => {
-								error!("Accept bi error: {:?}", e);
-								break;
-							}
-							Ok(streams) => streams,
-						};
-
-						let c = conn.clone();
-						let cb2 = cb.clone();
-						tokio::spawn(spawn_logged(
-							"Bi stream",
-							handle_bi_stream(c, send, recv, cb2),
-						).instrument(tracing::debug_span!("bi_stream")));
+			acceptor_loop(
+				bi_cancel,
+				"Accept bi",
+				|| conn.conn.accept_bi(),
+				|(send, recv)| {
+					let conn = conn.clone();
+					let cb = cb.clone();
+					async move {
+						tokio::spawn(
+							spawn_logged("Bi stream", handle_bi_stream(conn, send, recv, cb))
+								.instrument(tracing::debug_span!("bi_stream")),
+						);
 					}
-				}
-			}
+				},
+			)
+			.await;
 		});
 	}
 
-	// Wait for the parent cancel token – when it fires, the child tokens
-	// above will propagate cancellation to all three acceptor tasks.
-	cancel.cancelled().await;
-	connection.conn.close(VarInt::from_u32(0), b"server shutdown");
-	info!("Connection from {} closed by server shutdown", remote_addr);
+	// Exit on either server shutdown or peer disconnect. Without the
+	// `conn.closed()` arm the handler would block on `cancel` until the
+	// whole server stops, keeping InboundCtx and every UDP bridge task
+	// alive long after the QUIC connection is gone.
+	tokio::select! {
+		_ = cancel.cancelled() => {
+			connection.conn.close(VarInt::from_u32(0), b"server shutdown");
+			info!("Connection from {} closed by server shutdown", remote_addr);
+		}
+		_ = connection.conn.closed() => {
+			info!("Connection from {} closed", remote_addr);
+		}
+	}
+	acceptor_cancel.cancel();
 
 	Ok(())
 }
@@ -429,58 +479,71 @@ async fn handle_uni_stream<C: InboundCallback>(
 				handle_auth(&ctx, uuid, token).await?;
 			}
 		}
-		CmdType::Packet => {
-			let mut cmd_body = [0u8; 8];
-			recv.read_exact(&mut cmd_body)
-				.await
-				.map_err(|e| eyre::eyre!("Failed to read packet command: {}", e))?;
-			let cmd = crate::proto::decode_command(CmdType::Packet, &mut &cmd_body[..], "uni stream")?;
-			let Command::Packet {
-				assoc_id,
-				pkt_id,
-				frag_total,
-				frag_id,
-				size,
-			} = cmd
-			else {
-				unreachable!("decode_command(Packet, ..) must return Command::Packet");
-			};
-
-			// Read address (capped at ~258 bytes).
-			let addr = read_address_exact(&mut recv)
-				.await
-				.wrap_err("Failed to read uni stream packet address")?;
-
-			// Payload bounded by u16 size (≤ 65535).
-			let mut payload = vec![0u8; size as usize];
-			if size > 0 {
-				recv.read_exact(&mut payload)
-					.await
-					.map_err(|e| eyre::eyre!("Failed to read packet payload: {}", e))?;
+		cmd_type => {
+			if !ensure_authed(&ctx).await {
+				warn!(
+					command = ?cmd_type,
+					"Uni stream rejected: not authenticated within {:?}",
+					ctx.auth_timeout
+				);
+				return Ok(());
 			}
-			let payload = bytes::Bytes::from(payload);
 
-			let target_addr = match crate::proto::address_to_target(addr) {
-				Ok(t) => t,
-				Err(_) => wind_core::types::TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
-			};
-			handle_udp_packet(&ctx, assoc_id, pkt_id, frag_total, frag_id, target_addr, payload, &callback).await?;
-		}
-		CmdType::Dissociate => {
-			let mut body = [0u8; 2];
-			recv.read_exact(&mut body)
-				.await
-				.map_err(|e| eyre::eyre!("Failed to read dissociate body: {}", e))?;
-			let cmd = crate::proto::decode_command(CmdType::Dissociate, &mut &body[..], "uni stream")?;
-			if let Command::Dissociate { assoc_id } = cmd {
-				handle_dissociate(&ctx, assoc_id).await?;
+			match cmd_type {
+				CmdType::Packet => {
+					let mut cmd_body = [0u8; 8];
+					recv.read_exact(&mut cmd_body)
+						.await
+						.map_err(|e| eyre::eyre!("Failed to read packet command: {}", e))?;
+					let cmd = crate::proto::decode_command(CmdType::Packet, &mut &cmd_body[..], "uni stream")?;
+					let Command::Packet {
+						assoc_id,
+						pkt_id,
+						frag_total,
+						frag_id,
+						size,
+					} = cmd
+					else {
+						unreachable!("decode_command(Packet, ..) must return Command::Packet");
+					};
+
+					// Read address (capped at ~258 bytes).
+					let addr = read_address_exact(&mut recv)
+						.await
+						.wrap_err("Failed to read uni stream packet address")?;
+
+					// Payload bounded by u16 size (≤ 65535).
+					let mut payload = vec![0u8; size as usize];
+					if size > 0 {
+						recv.read_exact(&mut payload)
+							.await
+							.map_err(|e| eyre::eyre!("Failed to read packet payload: {}", e))?;
+					}
+					let payload = bytes::Bytes::from(payload);
+
+					let target_addr = match crate::proto::address_to_target(addr) {
+						Ok(t) => t,
+						Err(_) => wind_core::types::TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
+					};
+					handle_udp_packet(&ctx, assoc_id, pkt_id, frag_total, frag_id, target_addr, payload, &callback).await?;
+				}
+				CmdType::Dissociate => {
+					let mut body = [0u8; 2];
+					recv.read_exact(&mut body)
+						.await
+						.map_err(|e| eyre::eyre!("Failed to read dissociate body: {}", e))?;
+					let cmd = crate::proto::decode_command(CmdType::Dissociate, &mut &body[..], "uni stream")?;
+					if let Command::Dissociate { assoc_id } = cmd {
+						handle_dissociate(&ctx, assoc_id).await?;
+					}
+				}
+				CmdType::Heartbeat => {
+					tracing::trace!("Received heartbeat from {:?}", ctx.uuid.load());
+				}
+				other => {
+					warn!("Unexpected command on uni stream: {:?}", other);
+				}
 			}
-		}
-		CmdType::Heartbeat => {
-			info!("Received heartbeat from {:?}", ctx.uuid.load());
-		}
-		other => {
-			warn!("Unexpected command on uni stream: {:?}", other);
 		}
 	}
 
@@ -493,20 +556,9 @@ async fn handle_bi_stream<C: InboundCallback>(
 	mut recv: quinn::RecvStream,
 	callback: C,
 ) -> eyre::Result<()> {
-	{
-		if connection.uuid.load().is_none() {
-			match tokio::time::timeout(connection.auth_timeout, connection.auth_notify.notified()).await {
-				Ok(()) => {}
-				Err(_) => {
-					warn!("Bi stream rejected: auth timeout ({:?})", connection.auth_timeout);
-					return Ok(());
-				}
-			}
-			if connection.uuid.load().is_none() {
-				warn!("Unauthenticated bi stream attempt");
-				return Ok(());
-			}
-		}
+	if !ensure_authed(&connection).await {
+		warn!("Bi stream rejected: not authenticated within {:?}", connection.auth_timeout);
+		return Ok(());
 	}
 
 	let mut header_buf = [0u8; 2];
@@ -542,19 +594,9 @@ async fn handle_bi_stream<C: InboundCallback>(
 }
 
 async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: bytes::Bytes, callback: C) -> eyre::Result<()> {
-	{
-		if connection.uuid.load().is_none() {
-			match tokio::time::timeout(connection.auth_timeout, connection.auth_notify.notified()).await {
-				Ok(()) => {}
-				Err(_) => {
-					warn!("Datagram rejected: auth timeout ({:?})", connection.auth_timeout);
-					return Ok(());
-				}
-			}
-			if connection.uuid.load().is_none() {
-				return Ok(());
-			}
-		}
+	if !ensure_authed(&connection).await {
+		warn!("Datagram rejected: not authenticated within {:?}", connection.auth_timeout);
+		return Ok(());
 	}
 
 	let mut buf = data;
@@ -574,6 +616,9 @@ async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: 
 			} = cmd
 			{
 				let addr = crate::proto::decode_address(&mut buf, "datagram packet")?;
+				if buf.len() < size as usize {
+					return Err(eyre::eyre!("datagram payload truncated: need {}, have {}", size, buf.len()));
+				}
 				let payload = buf.split_to(size as usize);
 
 				let target_addr = match crate::proto::address_to_target(addr) {
@@ -648,9 +693,14 @@ async fn handle_udp_packet<C: InboundCallback>(
 	payload: bytes::Bytes,
 	callback: &C,
 ) -> eyre::Result<()> {
+	if frag_total == 0 {
+		tracing::debug!(assoc_id, pkt_id, "dropping packet with frag_total=0");
+		return Ok(());
+	}
+
 	let tuic_stream = get_or_create_session(ctx, assoc_id, callback).await?;
 
-	if frag_total <= 1 {
+	if frag_total == 1 {
 		tracing::trace!(assoc_id, pkt_id, target = %target_addr, len = payload.len(), "UDP packet → outbound");
 		tuic_stream
 			.receive_packet(UdpPacket {
@@ -751,24 +801,32 @@ async fn read_address_exact(recv: &mut quinn::RecvStream) -> eyre::Result<crate:
 	match type_byte[0] {
 		0xFF => Ok(crate::proto::Address::None),
 		0x01 => {
-			let mut rest = [0u8; 6];
-			recv.read_exact(&mut rest)
+			let mut ip_bytes = [0u8; 4];
+			recv.read_exact(&mut ip_bytes)
 				.await
 				.map_err(|e| eyre::eyre!("Failed to read IPv4 address: {}", e))?;
-			let mut ip_bytes = [0u8; 4];
-			ip_bytes.copy_from_slice(&rest[0..4]);
-			let port = u16::from_be_bytes([rest[4], rest[5]]);
-			Ok(crate::proto::Address::IPv4(std::net::Ipv4Addr::from(ip_bytes), port))
+			let mut port_buf = [0u8; 2];
+			recv.read_exact(&mut port_buf)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read IPv4 port: {}", e))?;
+			Ok(crate::proto::Address::IPv4(
+				std::net::Ipv4Addr::from(ip_bytes),
+				u16::from_be_bytes(port_buf),
+			))
 		}
 		0x02 => {
-			let mut rest = [0u8; 18];
-			recv.read_exact(&mut rest)
+			let mut ip_bytes = [0u8; 16];
+			recv.read_exact(&mut ip_bytes)
 				.await
 				.map_err(|e| eyre::eyre!("Failed to read IPv6 address: {}", e))?;
-			let mut ip_bytes = [0u8; 16];
-			ip_bytes.copy_from_slice(&rest[0..16]);
-			let port = u16::from_be_bytes([rest[16], rest[17]]);
-			Ok(crate::proto::Address::IPv6(std::net::Ipv6Addr::from(ip_bytes), port))
+			let mut port_buf = [0u8; 2];
+			recv.read_exact(&mut port_buf)
+				.await
+				.map_err(|e| eyre::eyre!("Failed to read IPv6 port: {}", e))?;
+			Ok(crate::proto::Address::IPv6(
+				std::net::Ipv6Addr::from(ip_bytes),
+				u16::from_be_bytes(port_buf),
+			))
 		}
 		0x00 => {
 			// AddressType::Domain — 1-byte length + <length> bytes + 2-byte port
