@@ -91,13 +91,31 @@ fn parse_udp_request_sync(data: &[u8]) -> Result<(u8, SocksTargetAddr, &[u8]), S
 }
 
 pub async fn serve_udp(socket: std::net::UdpSocket, stream: UdpStream) -> std::io::Result<()> {
+	serve_udp_with_client(socket, stream, None).await
+}
+
+/// Serve the SOCKS5 UDP relay socket.
+///
+/// `expected_client_ip`, when supplied, is the client IP learned from the
+/// associated TCP control connection (per RFC 1928 §6 the server SHOULD only
+/// accept UDP from this address). When `None`, the first packet's source IP
+/// is latched in instead; either way, subsequent packets from a different IP
+/// are dropped and logged.
+pub async fn serve_udp_with_client(
+	socket: std::net::UdpSocket,
+	stream: UdpStream,
+	expected_client_ip: Option<std::net::IpAddr>,
+) -> std::io::Result<()> {
 	let socket = Arc::new(UdpSocket::from_std(socket)?);
 	let UdpStream { tx, mut rx } = stream;
 
+	// Expected client (IP+port). Sentinel port==0 means "not yet observed".
 	let source_addr = Arc::new(ArcSwap::new(Arc::new(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))));
+	let expected_ip = Arc::new(ArcSwap::new(Arc::new(expected_client_ip)));
 
 	let socket_rx = socket.clone();
 	let source_addr_rx = source_addr.clone();
+	let expected_ip_rx = expected_ip.clone();
 
 	let mut rx_buf = vec![0u8; 65536];
 
@@ -105,6 +123,36 @@ pub async fn serve_udp(socket: std::net::UdpSocket, stream: UdpStream) -> std::i
 		loop {
 			match socket_rx.recv_from(&mut rx_buf).await {
 				Ok((len, addr)) => {
+					// Enforce RFC 1928 §6: drop datagrams whose source does not
+					// match the expected client. The expected client is either
+					// supplied by the caller (from the TCP control connection) or
+					// latched in on the first observed packet.
+					let current = **source_addr_rx.load();
+					match **expected_ip_rx.load() {
+						Some(ip) => {
+							if addr.ip() != ip {
+								wind_core::warn!(
+									target: "[UDP]",
+									"Dropping UDP datagram from unexpected source {} (expected client IP {})",
+									addr, ip
+								);
+								continue;
+							}
+						}
+						None => {
+							if current.port() == 0 {
+								// First packet — latch in this client.
+								expected_ip_rx.store(Arc::new(Some(addr.ip())));
+							} else if addr.ip() != current.ip() {
+								wind_core::warn!(
+									target: "[UDP]",
+									"Dropping UDP datagram from unexpected source {} (latched client IP {})",
+									addr, current.ip()
+								);
+								continue;
+							}
+						}
+					}
 					source_addr_rx.store(Arc::new(addr));
 					let packet_data = &rx_buf[..len];
 
@@ -139,7 +187,15 @@ pub async fn serve_udp(socket: std::net::UdpSocket, stream: UdpStream) -> std::i
 				continue; // No client yet
 			}
 
-			if let Ok(mut packet_with_header) = new_udp_header(current_client) {
+			// RFC 1928 §7: the reply's ATYP/DST.ADDR/DST.PORT MUST identify the
+			// REMOTE host that sent the data, not the client. Prefer the packet's
+			// recorded source; fall back to its target if the source is unknown.
+			let reply_origin = match &packet.source {
+				Some(src) => target_addr_to_socket(src),
+				None => target_addr_to_socket(&packet.target),
+			};
+
+			if let Ok(mut packet_with_header) = new_udp_header(reply_origin) {
 				packet_with_header.extend_from_slice(&packet.payload);
 				if let Err(e) = socket.send_to(&packet_with_header, current_client).await {
 					wind_core::warn!(target: "[UDP]", "Error sending to client: {}", e);
@@ -154,4 +210,16 @@ pub async fn serve_udp(socket: std::net::UdpSocket, stream: UdpStream) -> std::i
 	}
 
 	Ok(())
+}
+
+/// Best-effort conversion from `TargetAddr` to `SocketAddr` for use as the
+/// reply origin in the SOCKS5 UDP response header. Domain targets are reported
+/// as `0.0.0.0:port` because RFC 1928 has no codepoint for "host", but most
+/// clients ignore the origin host field anyway.
+fn target_addr_to_socket(t: &TargetAddr) -> SocketAddr {
+	match t {
+		TargetAddr::IPv4(ip, port) => SocketAddr::new((*ip).into(), *port),
+		TargetAddr::IPv6(ip, port) => SocketAddr::new((*ip).into(), *port),
+		TargetAddr::Domain(_, port) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), *port),
+	}
 }

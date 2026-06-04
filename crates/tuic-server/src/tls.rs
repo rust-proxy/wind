@@ -109,15 +109,62 @@ async fn load_cert_chain(cert_path: &Path) -> eyre::Result<Vec<CertificateDer<'s
 async fn load_priv_key(key_path: &Path) -> eyre::Result<PrivateKeyDer<'static>> {
 	let data = tokio::fs::read(key_path).await.context("Failed to read private key")?;
 
-	if let Ok(Some(key)) = rustls_pemfile::private_key(&mut data.as_slice()).context("Malformed PEM private key") {
+	if data.is_empty() {
+		return Err(eyre::eyre!("Empty private key file: {}", key_path.display()));
+	}
+
+	// 1. Prefer PEM — `rustls_pemfile::private_key` dispatches between PKCS1
+	//    (-----BEGIN RSA PRIVATE KEY-----), SEC1 (-----BEGIN EC PRIVATE KEY-----)
+	//    and PKCS8 (-----BEGIN PRIVATE KEY-----).
+	if let Some(key) = rustls_pemfile::private_key(&mut data.as_slice()).context("Malformed PEM private key")? {
 		return Ok(key);
 	}
 
-	if data.is_empty() {
-		return Err(eyre::eyre!("Empty private key file"));
+	// 2. Not PEM. Previously the loader unconditionally wrapped any non-empty
+	//    blob as PKCS8 DER, so a random/binary file produced an opaque rustls
+	//    error far from the point of failure. Now we do a structural check
+	//    first: every accepted DER key encoding (PKCS8 PrivateKeyInfo, PKCS1
+	//    RSAPrivateKey, SEC1 ECPrivateKey) starts with an ASN.1 SEQUENCE
+	//    (tag 0x30) whose declared length covers the rest of the file. That
+	//    rejects text/garbage/truncated files cheaply while letting any valid
+	//    DER through to rustls for real parsing later.
+	if !looks_like_der_sequence(&data) {
+		return Err(eyre::eyre!(
+			"Private key at {} is neither a recognized PEM (PKCS1/SEC1/PKCS8) key nor a valid DER ASN.1 SEQUENCE — \
+			 refusing to load arbitrary bytes as a PKCS8 key",
+			key_path.display()
+		));
 	}
 
 	Ok(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(data)))
+}
+
+/// Cheap structural check: does `data` start with an ASN.1 SEQUENCE whose
+/// declared length is consistent with the buffer size? Accepts DER inputs that
+/// have at most a few trailing bytes (some keystores append a newline).
+fn looks_like_der_sequence(data: &[u8]) -> bool {
+	if data.len() < 2 || data[0] != 0x30 {
+		return false;
+	}
+	let (declared_len, header_len) = match data[1] {
+		// Short form: length fits in the low 7 bits.
+		b @ 0..=0x7f => (b as usize, 2),
+		// Long form: low 7 bits of byte 1 give the number of length octets.
+		0x81 if data.len() >= 3 => (data[2] as usize, 3),
+		0x82 if data.len() >= 4 => (u16::from_be_bytes([data[2], data[3]]) as usize, 4),
+		0x83 if data.len() >= 5 => {
+			let len = ((data[2] as usize) << 16) | ((data[3] as usize) << 8) | data[4] as usize;
+			(len, 5)
+		}
+		0x84 if data.len() >= 6 => {
+			let len = u32::from_be_bytes([data[2], data[3], data[4], data[5]]) as usize;
+			(len, 6)
+		}
+		_ => return false,
+	};
+	let body = data.len().saturating_sub(header_len);
+	// Allow up to 8 trailing bytes of slack (newline, NUL padding).
+	declared_len <= body && body.saturating_sub(declared_len) <= 8
 }
 
 /// Check if a domain name is valid for ACME certificate issuance

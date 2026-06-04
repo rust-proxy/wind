@@ -62,7 +62,7 @@ impl Default for PersistentConfig {
 				heartbeat_secs: 10,
 				gc_interval_secs: 20,
 				gc_lifetime_secs: 20,
-				skip_cert_verify: true,
+				skip_cert_verify: false,
 				alpn: vec!["h3".into()],
 			})],
 		}
@@ -178,7 +178,12 @@ pub struct TuicOutboundConfig {
 	#[serde(default = "default_20")]
 	pub gc_lifetime_secs: u64,
 
-	#[serde(default = "default_true")]
+	/// Skip server certificate verification.
+	///
+	/// **WARNING**: This disables TLS authentication entirely and allows trivial
+	/// MITM of the upstream relay. Defaults to `false` (verification enabled);
+	/// must be set explicitly to opt out.
+	#[serde(default)]
 	pub skip_cert_verify: bool,
 
 	#[serde(default = "default_h3_alpn")]

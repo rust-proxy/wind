@@ -137,6 +137,23 @@ impl UdpSession {
 				Err(IoError::other(format!("invalid source address: {src_addr}")))?;
 			}
 		} else {
+			// First-packet race: previously the UDP associate socket was
+			// `connect()`-bound to whoever sent the first datagram, with no
+			// authentication. Any off-path attacker that could send a UDP
+			// packet to the relay's bound port before the legitimate client
+			// did would permanently own the association. We now require the
+			// source IP to match the TCP control connection's peer IP before
+			// latching it in.
+			if src_addr.ip() != self.ctrl_addr.ip() {
+				warn!(
+					"[socks5] [{ctrl_addr}] [associate] [{assoc_id:#06x}] dropping initial UDP packet from \
+					 unexpected source {src_addr} (expected client IP {ctrl_ip})",
+					ctrl_addr = self.ctrl_addr,
+					assoc_id = self.assoc_id,
+					ctrl_ip = self.ctrl_addr.ip(),
+				);
+				return Err(Error::WrongPacketSource);
+			}
 			self.socket.connect(src_addr).await?;
 		}
 

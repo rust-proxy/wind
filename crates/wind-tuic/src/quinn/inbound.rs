@@ -9,7 +9,7 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use eyre::{Context, ContextCompat};
+use eyre::Context;
 use moka::future::Cache;
 use quinn::{Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime, TransportConfig, VarInt};
 use rustls::{
@@ -197,8 +197,27 @@ impl TuicInbound {
 		crypto.alpn_protocols = self.opts.alpn.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 
 		if self.opts.zero_rtt {
-			crypto.max_early_data_size = u32::MAX;
-			crypto.send_half_rtt_data = true;
+			// 0-RTT is enabled at the TLS level so resumption handshakes are fast, but
+			// TUIC has no application-layer replay protection (Connect/Packet commands
+			// arriving as 0-RTT data are intrinsically replayable). We therefore:
+			//   * cap `max_early_data_size` so a single TLS context cannot be used to
+			//     replay an unbounded volume of application data, and
+			//   * keep `send_half_rtt_data = false` so the server does not emit data
+			//     before the client's Finished is verified.
+			//
+			// Operators wanting strict replay resistance should leave `zero_rtt`
+			// disabled until application-layer nonce/anti-replay is implemented.
+			warn!(
+				"zero_rtt=true: 0-RTT early data is accepted (cap {} B). \
+				 TUIC has no application-layer replay protection — \
+				 Connect/Packet commands sent as 0-RTT can be replayed.",
+				16 * 1024
+			);
+			crypto.max_early_data_size = 16 * 1024;
+			crypto.send_half_rtt_data = false;
+		} else {
+			crypto.max_early_data_size = 0;
+			crypto.send_half_rtt_data = false;
 		}
 
 		let mut config = ServerConfig::with_crypto(Arc::new(
@@ -660,19 +679,35 @@ async fn handle_datagram<C: InboundCallback>(connection: Arc<InboundCtx>, data: 
 }
 
 async fn handle_auth(connection: &InboundCtx, uuid: Uuid, token: [u8; 32]) -> eyre::Result<()> {
-	let password = connection
-		.users
-		.get(&uuid)
-		.with_context(|| format!("Unknown user: {}", uuid))?;
+	// Look the user up, but never short-circuit on an unknown UUID — that would
+	// give an attacker both a timing oracle (skipped keying-material export) and
+	// an error-message oracle that reveals whether a UUID exists. Instead, always
+	// run the export against either the real password or a fixed dummy, and
+	// always run a constant-time comparison; both failure paths return the same
+	// generic error.
+	const DUMMY_PASSWORD: &[u8] = b"\x00\x00\x00\x00\x00\x00\x00\x00";
+	let (password_bytes, user_known) = match connection.users.get(&uuid) {
+		Some(pw) => (pw.as_bytes(), true),
+		None => (DUMMY_PASSWORD, false),
+	};
 
 	let mut expected_token = [0u8; 32];
-	connection
+	let export_ok = connection
 		.conn
-		.export_keying_material(&mut expected_token, uuid.as_bytes(), password.as_bytes())
-		.map_err(|_| eyre::eyre!("Failed to export keying material"))?;
+		.export_keying_material(&mut expected_token, uuid.as_bytes(), password_bytes)
+		.is_ok();
 
-	if token != expected_token {
-		return Err(eyre::eyre!("Invalid authentication token"));
+	// Constant-time comparison: never short-circuit on first differing byte.
+	let mut diff: u8 = 0;
+	for (a, b) in token.iter().zip(expected_token.iter()) {
+		diff |= a ^ b;
+	}
+	let token_ok = diff == 0;
+
+	if !(user_known && export_ok && token_ok) {
+		// Single generic error for "unknown user", "bad token", and
+		// "export failed" — do not leak which one triggered.
+		return Err(eyre::eyre!("Invalid authentication"));
 	}
 
 	connection.uuid.store(Some(Arc::new(uuid)));
