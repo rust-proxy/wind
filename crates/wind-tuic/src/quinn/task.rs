@@ -4,7 +4,8 @@ use bytes::Bytes;
 use crossfire::{AsyncRx, spsc};
 use quinn::{RecvStream, SendStream};
 use tokio_util::sync::CancellationToken;
-use wind_core::{AppContext, info, warn};
+use tracing::{Instrument as _, info, warn};
+use wind_core::AppContext;
 
 use crate::Error;
 
@@ -35,31 +36,34 @@ where
 {
 	let (tx, rx) = spsc::bounded_async(SPSC_BUFFER_SIZE);
 
-	ctx.tasks.spawn(async move {
-		loop {
-			tokio::select! {
-				res = accept_fn(connection.clone()) => {
-					let item = match res {
-						Err(e) => {
-							warn!("Connection error in {} handler: {e:?}", name);
+	ctx.tasks.spawn(
+		async move {
+			loop {
+				tokio::select! {
+					res = accept_fn(connection.clone()) => {
+						let item = match res {
+							Err(e) => {
+								warn!("Connection error in {} handler: {e:?}", name);
+								break;
+							}
+							Ok(item) => item,
+						};
+
+						info!("Accepted new {}", name);
+						if let Err(e) = tx.send_timeout(item, Duration::from_secs(1)).await {
+							warn!("{} channel send failed (receiver dropped or timeout): {e:?}", name);
 							break;
 						}
-						Ok(item) => item,
-					};
-
-					info!("Accepted new {}", name);
-					if let Err(e) = tx.send_timeout(item, Duration::from_secs(1)).await {
-						warn!("{} channel send failed (receiver dropped or timeout): {e:?}", name);
+					}
+					_ = cancel_token.cancelled() => {
+						info!("Cancellation requested for {} task", name);
 						break;
 					}
 				}
-				_ = cancel_token.cancelled() => {
-					info!("Cancellation requested for {} task", name);
-					break;
-				}
 			}
 		}
-	});
+		.in_current_span(),
+	);
 
 	rx
 }

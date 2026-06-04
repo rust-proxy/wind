@@ -40,11 +40,11 @@ aws-lc-rs = { version = "*", optional = true, default-features = false }
 criterion = "0.4"
 fast-socks5 = "1.0.0-rc.0"
 eyre = "0.6"
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
 uuid = { version = "1", features = ["v4"] }
-tracing = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt"] }
 
 

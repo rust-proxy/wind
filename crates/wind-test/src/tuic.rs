@@ -10,6 +10,7 @@ use std::{net::SocketAddr, sync::Arc};
 use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::net::UdpSocket;
+use tracing::Instrument as _;
 #[cfg(test)]
 use wind_core::AppContext;
 use wind_core::{
@@ -47,40 +48,46 @@ impl InboundCallback for DirectCallback {
 		let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
 		let send_socket = relay_socket.clone();
-		let recv_handle = tokio::spawn(async move {
-			while let Some(packet) = rx.recv().await {
-				let target_addr = match packet.target {
-					TargetAddr::IPv4(ip, port) => SocketAddr::new(std::net::IpAddr::V4(ip), port),
-					TargetAddr::IPv6(ip, port) => SocketAddr::new(std::net::IpAddr::V6(ip), port),
-					TargetAddr::Domain(..) => continue,
-				};
-				let _ = send_socket.send_to(&packet.payload, target_addr).await;
-			}
-		});
-
-		tokio::spawn(async move {
-			let mut buf = vec![0u8; 65536];
-			#[allow(clippy::while_let_loop)]
-			loop {
-				match relay_socket.recv_from(&mut buf).await {
-					Ok((n, peer)) => {
-						let source = match peer {
-							SocketAddr::V4(a) => TargetAddr::IPv4(*a.ip(), a.port()),
-							SocketAddr::V6(a) => TargetAddr::IPv6(*a.ip(), a.port()),
-						};
-						let packet = UdpPacket {
-							source: Some(source.clone()),
-							target: source,
-							payload: Bytes::copy_from_slice(&buf[..n]),
-						};
-						if tx.send(packet).await.is_err() {
-							break;
-						}
-					}
-					Err(_) => break,
+		let recv_handle = tokio::spawn(
+			async move {
+				while let Some(packet) = rx.recv().await {
+					let target_addr = match packet.target {
+						TargetAddr::IPv4(ip, port) => SocketAddr::new(std::net::IpAddr::V4(ip), port),
+						TargetAddr::IPv6(ip, port) => SocketAddr::new(std::net::IpAddr::V6(ip), port),
+						TargetAddr::Domain(..) => continue,
+					};
+					let _ = send_socket.send_to(&packet.payload, target_addr).await;
 				}
 			}
-		});
+			.in_current_span(),
+		);
+
+		tokio::spawn(
+			async move {
+				let mut buf = vec![0u8; 65536];
+				#[allow(clippy::while_let_loop)]
+				loop {
+					match relay_socket.recv_from(&mut buf).await {
+						Ok((n, peer)) => {
+							let source = match peer {
+								SocketAddr::V4(a) => TargetAddr::IPv4(*a.ip(), a.port()),
+								SocketAddr::V6(a) => TargetAddr::IPv6(*a.ip(), a.port()),
+							};
+							let packet = UdpPacket {
+								source: Some(source.clone()),
+								target: source,
+								payload: Bytes::copy_from_slice(&buf[..n]),
+							};
+							if tx.send(packet).await.is_err() {
+								break;
+							}
+						}
+						Err(_) => break,
+					}
+				}
+			}
+			.in_current_span(),
+		);
 
 		recv_handle.await?;
 		Ok(())
@@ -155,9 +162,12 @@ mod tests {
 
 		let server = TuicInbound::new(ctx.clone(), opts);
 		let callback = Arc::new(DirectCallback);
-		tokio::spawn(async move {
-			let _ = server.listen(callback.as_ref()).await;
-		});
+		tokio::spawn(
+			async move {
+				let _ = server.listen(callback.as_ref()).await;
+			}
+			.in_current_span(),
+		);
 
 		// Allow the server time to bind and begin accepting
 		tokio::time::sleep(Duration::from_millis(300)).await;
@@ -180,9 +190,12 @@ mod tests {
 		};
 		let client: std::sync::Arc<TuicOutbound> = std::sync::Arc::new(TuicOutbound::new(ctx.clone(), opts).await?);
 		let poll_client = client.clone();
-		tokio::spawn(async move {
-			let _ = poll_client.start_poll().await;
-		});
+		tokio::spawn(
+			async move {
+				let _ = poll_client.start_poll().await;
+			}
+			.in_current_span(),
+		);
 		tokio::time::sleep(Duration::from_millis(100)).await;
 		Ok(client)
 	}
@@ -366,34 +379,43 @@ mod tests {
 	/// state-change events operators care about.
 	///
 	/// PR2 demoted both call sites to `tracing::Level::DEBUG`. This test
-	/// installs a process-global `tracing` subscriber via `log_capture`
-	/// (`tracing-test` was tried but its scoped thread-local dispatcher
-	/// silently misses events emitted from `tokio::spawn`-ed tasks that
-	/// don't use `Instrument::in_current_span`, which is the entire UDP
-	/// send loop), drives a real UDP roundtrip through tuic-client →
-	/// tuic-server with a payload large enough to force ~28 fragments,
-	/// then `logs_assert`s that no `INFO` line contains either forbidden
-	/// format string while at least one `DEBUG` line does (proving
+	/// installs a tiny global `tracing-subscriber` `fmt` layer pointed at a
+	/// process-wide `Vec<u8>` (see `log_capture` below). Spawned tasks across
+	/// `wind-tuic`, `wind-socks`, `wind-naive`, and this file's own helpers
+	/// are wrapped with `Instrument::in_current_span` so the captured buffer
+	/// sees events from deeply-nested `tokio::spawn` chains. A 32 KiB UDP
+	/// payload forces ~28 fragments at the 1200-byte default datagram size;
+	/// the assertion then confirms no `INFO` line contains either forbidden
+	/// format string and that at least one `DEBUG` line does (proving
 	/// fragmentation ran and the capture pipeline is alive).
+	///
+	/// `tracing-test` was the natural choice here but in 0.2.6 its
+	/// MockWriter scopes captured events more aggressively than its
+	/// `EnvFilter` directive suggests — events fired with a custom string
+	/// `target:` (e.g. `"udp"`, `"tuic_out"`) silently never reach the
+	/// buffer even with `udp=trace` in the filter. The minimal wrapper
+	/// below sidesteps that.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn test_pr2_fragmented_udp_emits_no_info_log_noise() {
 		log_capture::install();
 		let baseline = log_capture::snapshot_len();
-
 		// (1) Spin up a UDP echo server on loopback.
 		let echo = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let echo_addr = echo.local_addr().unwrap();
-		tokio::spawn(async move {
-			let mut buf = vec![0u8; 65536];
-			loop {
-				match echo.recv_from(&mut buf).await {
-					Ok((n, from)) => {
-						let _ = echo.send_to(&buf[..n], from).await;
+		tokio::spawn(
+			async move {
+				let mut buf = vec![0u8; 65536];
+				loop {
+					match echo.recv_from(&mut buf).await {
+						Ok((n, from)) => {
+							let _ = echo.send_to(&buf[..n], from).await;
+						}
+						Err(_) => break,
 					}
-					Err(_) => break,
 				}
 			}
-		});
+			.in_current_span(),
+		);
 
 		// (2) Bring up the TUIC server + client.
 		let setup = setup_tuic_server().await.expect("setup tuic server");
@@ -409,9 +431,12 @@ mod tests {
 			rx: rx_at_client,
 		};
 		let client_for_udp = client.clone();
-		tokio::spawn(async move {
-			let _ = client_for_udp.handle_udp(stream_for_client, None::<TuicOutbound>).await;
-		});
+		tokio::spawn(
+			async move {
+				let _ = client_for_udp.handle_udp(stream_for_client, None::<TuicOutbound>).await;
+			}
+			.in_current_span(),
+		);
 
 		// (4) Push a 32 KiB UDP packet that MUST fragment.
 		let payload: Bytes = (0u8..=255).cycle().take(32 * 1024).collect::<Vec<u8>>().into();
@@ -437,9 +462,8 @@ mod tests {
 		// (6) Give spawned sender tasks a moment to flush any pending logs.
 		tokio::time::sleep(Duration::from_millis(50)).await;
 
-		// (7) Inspect the captured log lines. The fmt subscriber writes each
-		// event as e.g. `2026-…  INFO target: message`, so substring checks on
-		// the level + message together pin down the regression.
+		// (7) Inspect the captured log lines. Pre-formatted lines include the
+		// level prefix; substring checks pin down the regression precisely.
 		log_capture::assert_since(baseline, |lines| {
 			for forbidden in ["Fragmentation params", "Sending fragment "] {
 				if let Some(bad) = lines.iter().find(|l| l.contains(" INFO ") && l.contains(forbidden)) {
@@ -469,15 +493,8 @@ mod tests {
 // ============================================================================
 // Tracing capture (test-only). Tiny wrapper around `tracing-subscriber`'s
 // `fmt` layer with a `MakeWriter` pointing at a process-global `Vec<u8>`.
-//
-// `tracing-test` would be the obvious off-the-shelf choice but it scopes its
-// dispatcher per-test via `set_default` (thread-local). Events emitted from
-// futures handed to `tokio::spawn` without explicit
-// `Instrument::in_current_span` don't inherit that dispatcher, so the entire
-// UDP send loop is silently uncaptured. A process-global subscriber sidesteps
-// the issue entirely; the `baseline`/`since` helpers below restore per-test
-// isolation.
 // ============================================================================
+
 #[cfg(test)]
 mod log_capture {
 	use std::{
@@ -512,7 +529,7 @@ mod log_capture {
 	}
 
 	/// Idempotently install the global subscriber. First caller wins; later
-	/// calls (including from other tests) are silent no-ops.
+	/// calls are silent no-ops.
 	pub fn install() {
 		INSTALLED.get_or_init(|| {
 			let _ = tracing::subscriber::set_global_default(

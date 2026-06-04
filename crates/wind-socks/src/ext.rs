@@ -13,8 +13,7 @@ use tokio::{
 	io::{AsyncRead, AsyncWrite},
 	try_join,
 };
-use tracing::debug;
-use wind_core::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::Error;
 

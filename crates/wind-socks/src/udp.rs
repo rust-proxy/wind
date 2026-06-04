@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use fast_socks5::{new_udp_header, util::target_addr::TargetAddr as SocksTargetAddr};
 use tokio::net::UdpSocket;
 use tokio_util::bytes::Bytes;
+use tracing::warn;
 use wind_core::{
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
@@ -139,8 +140,8 @@ pub async fn serve_udp_with_client(
 						Some(ip) => {
 							let expected = unmap_v4_mapped(ip);
 							if observed_ip != expected {
-								wind_core::warn!(
-									target: "[UDP]",
+								warn!(
+									target: "udp",
 									"Dropping UDP datagram from unexpected source {} (expected client IP {})",
 									addr, ip
 								);
@@ -152,8 +153,8 @@ pub async fn serve_udp_with_client(
 								// First packet — latch in this client.
 								expected_ip_rx.store(Arc::new(Some(observed_ip)));
 							} else if observed_ip != unmap_v4_mapped(current.ip()) {
-								wind_core::warn!(
-									target: "[UDP]",
+								warn!(
+									target: "udp",
 									"Dropping UDP datagram from unexpected source {} (latched client IP {})",
 									addr, current.ip()
 								);
@@ -176,12 +177,12 @@ pub async fn serve_udp_with_client(
 							}
 						}
 						Err(e) => {
-							wind_core::warn!(target: "[UDP]", "Failed to parse SOCKS5 UDP header: {}", e);
+							warn!(target: "udp", "Failed to parse SOCKS5 UDP header: {}", e);
 						}
 					}
 				}
 				Err(e) => {
-					wind_core::warn!(target: "[UDP]", "Error receiving from socket: {}", e);
+					warn!(target: "udp", "Error receiving from socket: {}", e);
 					break;
 				}
 			}
@@ -206,7 +207,7 @@ pub async fn serve_udp_with_client(
 			if let Ok(mut packet_with_header) = new_udp_header(reply_origin) {
 				packet_with_header.extend_from_slice(&packet.payload);
 				if let Err(e) = socket.send_to(&packet_with_header, current_client).await {
-					wind_core::warn!(target: "[UDP]", "Error sending to client: {}", e);
+					warn!(target: "udp", "Error sending to client: {}", e);
 				}
 			}
 		}

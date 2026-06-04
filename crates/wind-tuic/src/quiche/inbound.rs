@@ -3,11 +3,9 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::net::UdpSocket;
+use tracing::{info, warn};
 use uuid::Uuid;
-use wind_core::{
-	inbound::{AbstractInbound, InboundCallback},
-	info, warn,
-};
+use wind_core::inbound::{AbstractInbound, InboundCallback};
 
 use crate::{Result, quiche::utils::ConnectionOpts};
 

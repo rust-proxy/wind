@@ -98,7 +98,7 @@ impl FragmentReassemblyBuffer {
 
 		if frag_total == 0 || frag_id >= frag_total {
 			tracing::warn!(
-				target: "[UDP]",
+				target: "udp",
 				assoc_id,
 				pkt_id,
 				frag_total,
@@ -144,7 +144,7 @@ impl FragmentReassemblyBuffer {
 			// per-(assoc_id, pkt_id) sub-cache.
 			if meta.value().frag_total != frag_total {
 				tracing::warn!(
-					target: "[UDP]",
+					target: "udp",
 					assoc_id,
 					pkt_id,
 					expected_frag_total = meta.value().frag_total,
@@ -195,7 +195,7 @@ impl FragmentReassemblyBuffer {
 			init_time().elapsed() - Duration::from_secs(meta.last_updated.load(Ordering::Relaxed))
 				>= Duration::from_millis(FRAGMENT_TIMEOUT_MS)
 		}) {
-			wind_core::warn!(target: "[UDP]", "Failed to register fragment cleanup predicate: {:?}", e);
+			tracing::warn!(target: "udp", "Failed to register fragment cleanup predicate: {:?}", e);
 			return;
 		}
 		self.fragments.run_pending_tasks().await;
@@ -331,7 +331,7 @@ impl UdpStream {
 		}
 
 		tracing::debug!(
-			target: "[UDP]",
+			target: "udp",
 			"Fragmentation params: payload={}, first_frag_overhead={}, subsequent_frag_overhead={}, max_datagram={}, first_frag_max={}, subsequent_frag_max={}",
 			payload_len,
 			first_frag_header_overhead,
@@ -420,14 +420,14 @@ impl UdpStream {
 			let datagram_size = combined_payload.len();
 			let max_allowed = self.connection.max_datagram_size().unwrap_or(1200);
 			if datagram_size > max_allowed {
-				wind_core::warn!(
-					target: "[UDP]",
+				tracing::warn!(
+					target: "udp",
 					"Fragment too large: {} bytes > {} bytes max (frag {}/{})",
 					datagram_size, max_allowed, frag_id + 1, frag_total,
 				);
 			} else {
 				tracing::debug!(
-					target: "[UDP]",
+					target: "udp",
 					"Sending fragment {}/{}: {} bytes",
 					frag_id + 1, frag_total, datagram_size,
 				);
