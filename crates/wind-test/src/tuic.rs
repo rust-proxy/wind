@@ -378,27 +378,29 @@ mod tests {
 	/// (allocation + formatting + I/O per packet) and obscured the genuine
 	/// state-change events operators care about.
 	///
-	/// PR2 demoted both call sites to `tracing::Level::DEBUG`. This test
-	/// installs a tiny global `tracing-subscriber` `fmt` layer pointed at a
-	/// process-wide `Vec<u8>` (see `log_capture` below). Spawned tasks across
-	/// `wind-tuic`, `wind-socks`, `wind-naive`, and this file's own helpers
-	/// are wrapped with `Instrument::in_current_span` so the captured buffer
-	/// sees events from deeply-nested `tokio::spawn` chains. A 32 KiB UDP
-	/// payload forces ~28 fragments at the 1200-byte default datagram size;
-	/// the assertion then confirms no `INFO` line contains either forbidden
-	/// format string and that at least one `DEBUG` line does (proving
-	/// fragmentation ran and the capture pipeline is alive).
+	/// PR2 demoted both call sites to `tracing::Level::DEBUG`. The test uses
+	/// `#[tracing_test::traced_test]` to install a global subscriber that
+	/// captures every event into a process-wide buffer, scoped per-test via
+	/// the test's own span (the macro enters a span named after the function;
+	/// `logs_assert` filters captured lines by ` {span_name}:`). Spawned
+	/// tasks across `wind-tuic`, `wind-socks`, `wind-naive`, and this file's
+	/// own helpers are wrapped with `Instrument::in_current_span` so the
+	/// captured buffer sees events from deeply-nested `tokio::spawn` chains.
+	/// A 32 KiB UDP payload forces ~28 fragments at the 1200-byte default
+	/// datagram size; the assertion then confirms no `INFO` line contains
+	/// either forbidden format string and that at least one `DEBUG` line
+	/// does (proving fragmentation ran and the capture pipeline is alive).
 	///
-	/// `tracing-test` was the natural choice here but in 0.2.6 its
-	/// MockWriter scopes captured events more aggressively than its
-	/// `EnvFilter` directive suggests — events fired with a custom string
-	/// `target:` (e.g. `"udp"`, `"tuic_out"`) silently never reach the
-	/// buffer even with `udp=trace` in the filter. The minimal wrapper
-	/// below sidesteps that.
+	/// Note on the `no-env-filter` feature: the `#[traced_test]` macro
+	/// silently ignores its attribute arguments and hardcodes the EnvFilter
+	/// directive to `<test_crate>=trace` (here `wind_test=trace`), which
+	/// would reject every event whose target is an identifier-style string
+	/// like `"udp"` or `"tuic_out"`. Enabling `tracing-test/no-env-filter`
+	/// in `Cargo.toml` switches the directive to plain `trace`, matching
+	/// every event regardless of target.
+	#[tracing_test::traced_test]
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn test_pr2_fragmented_udp_emits_no_info_log_noise() {
-		log_capture::install();
-		let baseline = log_capture::snapshot_len();
 		// (1) Spin up a UDP echo server on loopback.
 		let echo = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let echo_addr = echo.local_addr().unwrap();
@@ -462,9 +464,12 @@ mod tests {
 		// (6) Give spawned sender tasks a moment to flush any pending logs.
 		tokio::time::sleep(Duration::from_millis(50)).await;
 
-		// (7) Inspect the captured log lines. Pre-formatted lines include the
-		// level prefix; substring checks pin down the regression precisely.
-		log_capture::assert_since(baseline, |lines| {
+		// (7) Inspect the captured log lines. `tracing-test`'s `logs_assert`
+		// filters captured lines by ` {span_name}:` (the test function name);
+		// spawned tasks instrumented with `.in_current_span()` keep the
+		// test's span as the current span, so their pre-formatted lines DO
+		// include `test_pr2_..._noise:` and pass the filter.
+		logs_assert(|lines: &[&str]| {
 			for forbidden in ["Fragmentation params", "Sending fragment "] {
 				if let Some(bad) = lines.iter().find(|l| l.contains(" INFO ") && l.contains(forbidden)) {
 					return Err(format!(
@@ -487,78 +492,5 @@ mod tests {
 			}
 			Ok(())
 		});
-	}
-}
-
-// ============================================================================
-// Tracing capture (test-only). Tiny wrapper around `tracing-subscriber`'s
-// `fmt` layer with a `MakeWriter` pointing at a process-global `Vec<u8>`.
-// ============================================================================
-
-#[cfg(test)]
-mod log_capture {
-	use std::{
-		io,
-		sync::{Mutex, MutexGuard, OnceLock},
-	};
-
-	static BUF: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
-	static INSTALLED: OnceLock<()> = OnceLock::new();
-
-	fn buf() -> MutexGuard<'static, Vec<u8>> {
-		BUF.get_or_init(|| Mutex::new(Vec::with_capacity(64 * 1024))).lock().unwrap()
-	}
-
-	struct GlobalWriter;
-	impl io::Write for GlobalWriter {
-		fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-			buf().extend_from_slice(b);
-			Ok(b.len())
-		}
-
-		fn flush(&mut self) -> io::Result<()> {
-			Ok(())
-		}
-	}
-	impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GlobalWriter {
-		type Writer = GlobalWriter;
-
-		fn make_writer(&self) -> Self::Writer {
-			GlobalWriter
-		}
-	}
-
-	/// Idempotently install the global subscriber. First caller wins; later
-	/// calls are silent no-ops.
-	pub fn install() {
-		INSTALLED.get_or_init(|| {
-			let _ = tracing::subscriber::set_global_default(
-				tracing_subscriber::fmt()
-					.with_writer(GlobalWriter)
-					.with_ansi(false)
-					.with_max_level(tracing::Level::TRACE)
-					.finish(),
-			);
-		});
-	}
-
-	/// Byte offset into the buffer at the moment of call — pass to
-	/// `assert_since` to scope an assertion to events emitted afterwards.
-	pub fn snapshot_len() -> usize {
-		buf().len()
-	}
-
-	/// Apply `check` to every line emitted on or after byte `since`. Panics
-	/// with the error string if `check` returns `Err`.
-	pub fn assert_since(since: usize, check: impl FnOnce(&[&str]) -> Result<(), String>) {
-		let snapshot = {
-			let g = buf();
-			g[since.min(g.len())..].to_vec()
-		};
-		let text = String::from_utf8_lossy(&snapshot);
-		let lines: Vec<&str> = text.lines().collect();
-		if let Err(e) = check(&lines) {
-			panic!("log_capture::assert_since failed: {e}");
-		}
 	}
 }

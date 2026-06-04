@@ -4798,7 +4798,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
+ "tracing-test",
  "uuid",
  "wind-core",
  "wind-socks",

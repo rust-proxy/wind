@@ -45,7 +45,10 @@ tracing = { version = "0.1", default-features = false, features = ["attributes"]
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
 uuid = { version = "1", features = ["v4"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt"] }
+# `no-env-filter` is required: the macro silently ignores its `default_filter`
+# argument and otherwise locks the filter to `<test_crate>=trace`, which would
+# reject every `target: "udp"` / `"tuic_out"` event the test wants to inspect.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 
 
 [[bench]]
