@@ -10,7 +10,7 @@ use std::{net::SocketAddr, sync::Arc};
 use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::net::UdpSocket;
-use tracing::Instrument as _;
+use tracing::{Instrument as _, warn};
 #[cfg(test)]
 use wind_core::AppContext;
 use wind_core::{
@@ -54,9 +54,32 @@ impl InboundCallback for DirectCallback {
 					let target_addr = match packet.target {
 						TargetAddr::IPv4(ip, port) => SocketAddr::new(std::net::IpAddr::V4(ip), port),
 						TargetAddr::IPv6(ip, port) => SocketAddr::new(std::net::IpAddr::V6(ip), port),
-						TargetAddr::Domain(..) => continue,
+						TargetAddr::Domain(..) => {
+							warn!(
+								target: "wind_test::direct_cb",
+								target_addr = "domain (unresolved)",
+								payload_len = packet.payload.len(),
+								"DirectCallback drops UDP packet with unresolved domain target",
+							);
+							continue;
+						}
 					};
-					let _ = send_socket.send_to(&packet.payload, target_addr).await;
+					// Don't `let _ = ...` the result. On macOS, payloads larger
+					// than `net.inet.udp.maxdgram` (default 9216) fail
+					// `send_to` with EMSGSIZE — silently dropping that turns
+					// the test into a 15-second timeout 1000 lines downstream.
+					// At least warn so the next person reading CI logs has a
+					// fighting chance.
+					if let Err(e) = send_socket.send_to(&packet.payload, target_addr).await {
+						warn!(
+							target: "wind_test::direct_cb",
+							%target_addr,
+							payload_len = packet.payload.len(),
+							error_kind = ?e.kind(),
+							error = %e,
+							"DirectCallback send_to failed; UDP packet dropped",
+						);
+					}
 				}
 			}
 			.in_current_span(),
@@ -65,7 +88,6 @@ impl InboundCallback for DirectCallback {
 		tokio::spawn(
 			async move {
 				let mut buf = vec![0u8; 65536];
-				#[allow(clippy::while_let_loop)]
 				loop {
 					match relay_socket.recv_from(&mut buf).await {
 						Ok((n, peer)) => {
@@ -79,10 +101,23 @@ impl InboundCallback for DirectCallback {
 								payload: Bytes::copy_from_slice(&buf[..n]),
 							};
 							if tx.send(packet).await.is_err() {
+								// Upstream channel closed — the only legitimate
+								// shutdown signal. Quiet break.
 								break;
 							}
 						}
-						Err(_) => break,
+						Err(e) => {
+							// Recv errors are rare (mostly socket closure /
+							// cancellation). Make the cause visible instead of
+							// swallowing it.
+							warn!(
+								target: "wind_test::direct_cb",
+								error_kind = ?e.kind(),
+								error = %e,
+								"DirectCallback relay socket recv_from failed; closing reply task",
+							);
+							break;
+						}
 					}
 				}
 			}
