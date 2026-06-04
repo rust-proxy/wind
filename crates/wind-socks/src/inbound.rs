@@ -85,7 +85,7 @@ impl SocksInbound {
 async fn handle_income(
 	opts: Arc<SocksInboundOpt>,
 	stream: TcpStream,
-	_client_addr: SocketAddr,
+	client_addr: SocketAddr,
 	cb: impl InboundCallback,
 ) -> Result<(), Error> {
 	let proto = match &opts.auth {
@@ -114,7 +114,26 @@ async fn handle_income(
 			cb.handle_tcpstream(target_addr, inner).await.context(CallbackSnafu)?;
 		}
 		Socks5Command::UDPAssociate if opts.allow_udp => {
-			let reply_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+			// RFC 1928 §6: the reply IP in BND.ADDR must be reachable by the
+			// client. Previously hardcoded to 127.0.0.1, which broke any
+			// non-loopback client. Prefer the operator-supplied `public_addr`;
+			// otherwise fall back to the local TCP listen address (still
+			// reachable for same-host clients) and log a warning.
+			let reply_ip = match opts.public_addr {
+				Some(ip) => ip,
+				None => {
+					wind_core::warn!(
+						target: "[IN] HANDLER",
+						"SOCKS5 UDPAssociate from {} without `public_addr` configured; \
+						 falling back to listen-IP {}. Remote clients will not be able \
+						 to reach the UDP relay.",
+						client_addr,
+						opts.listen_addr.ip(),
+					);
+					opts.listen_addr.ip()
+				}
+			};
+			let expected_client_ip = client_addr.ip();
 			crate::ext::run_udp_proxy(proto, &target_addr, None, reply_ip, move |inbound| async move {
 				let (tx_to_out, rx_from_in) = mpsc::channel(100);
 				let (tx_to_in, rx_from_out) = mpsc::channel(100);
@@ -136,7 +155,9 @@ async fn handle_income(
 					}
 				});
 
-				crate::udp::serve_udp(inbound.into(), serve_stream).await.context(IoSnafu)
+				crate::udp::serve_udp_with_client(inbound.into(), serve_stream, Some(expected_client_ip))
+					.await
+					.context(IoSnafu)
 			})
 			.await?;
 		}

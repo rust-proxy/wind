@@ -4775,6 +4775,7 @@ name = "wind-socks"
 version = "0.1.1"
 dependencies = [
  "arc-swap",
+ "bytes",
  "eyre",
  "fast-socks5",
  "futures-util",

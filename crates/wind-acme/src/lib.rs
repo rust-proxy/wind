@@ -14,7 +14,7 @@ use rustls::server::ResolvesServerCert;
 use rustls_acme::{AcmeConfig, UseChallenge::Http01, caches::DirCache};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Check if a domain name is valid for ACME certificate issuance.
 pub fn is_valid_domain(hostname: &str) -> bool {
@@ -76,40 +76,80 @@ pub async fn start_acme(
 	let resolver = default_config.cert_resolver.clone();
 
 	let axum_cancel: ArcSwapOption<CancellationToken> = None.into();
+	let hostname = hostname.to_string();
 
-	// Drive the ACME state machine in background
+	// Drive the ACME state machine in background. Previously this task was
+	// fire-and-forget: a stream that ended (the rustls-acme state machine
+	// returning None) or an error storm would simply spin down with no signal
+	// to the rest of the server, leaving TLS pinned to whatever cached cert
+	// was last loaded until process restart. We now:
+	//   * propagate `cancel` so shutdown is graceful,
+	//   * track consecutive errors and escalate to error! when they cluster,
+	//   * log a loud message when the loop exits so operators see it.
 	tokio::spawn(async move {
+		let mut consecutive_errors: u32 = 0;
+		let mut total_errors: u64 = 0;
 		loop {
-			match state.next().await {
-				Some(Ok(event)) => match event {
-					// Requesting certificate for the first time or renewing
-					rustls_acme::EventOk::AccountCacheStore => {
-						info!("ACME event: AccountCacheStore");
-					}
-					rustls_acme::EventOk::ValidationChallenge(challenge) => {
-						info!("ACME event: ValidationChallenge for {}", challenge.url);
-						let child = Arc::new(cancel.child_token());
-						axum_cancel.swap(Some(child.clone())).inspect(|v| v.cancel());
-						let http01_service = state.http01_challenge_tower_service();
-						let axum_app =
-							Router::new().route_service("/.well-known/acme-challenge/{challenge_token}", http01_service);
-						if let Err(e) = spawn_axum(child.child_token(), axum_app).await {
-							error!("Failed to start ACME HTTP-01 challenge server: {:?}", e);
+			tokio::select! {
+				biased;
+				_ = cancel.cancelled() => {
+					info!("ACME: cancellation requested for domain {hostname}, shutting down state machine");
+					axum_cancel.swap(None).inspect(|v| v.cancel());
+					break;
+				}
+				event = state.next() => match event {
+					Some(Ok(event)) => {
+						consecutive_errors = 0;
+						match event {
+							// Requesting certificate for the first time or renewing
+							rustls_acme::EventOk::AccountCacheStore => {
+								info!("ACME event: AccountCacheStore");
+							}
+							rustls_acme::EventOk::ValidationChallenge(challenge) => {
+								info!("ACME event: ValidationChallenge for {}", challenge.url);
+								let child = Arc::new(cancel.child_token());
+								axum_cancel.swap(Some(child.clone())).inspect(|v| v.cancel());
+								let http01_service = state.http01_challenge_tower_service();
+								let axum_app =
+									Router::new().route_service("/.well-known/acme-challenge/{challenge_token}", http01_service);
+								if let Err(e) = spawn_axum(child.child_token(), axum_app).await {
+									error!("Failed to start ACME HTTP-01 challenge server: {:?}", e);
+								}
+							}
+							rustls_acme::EventOk::DeployedNewCert(_) => {
+								info!("ACME event: DeployedNewCert");
+								axum_cancel.swap(None).inspect(|v| v.cancel());
+							}
+							rustls_acme::EventOk::DeployedCachedCert(_) => {
+								info!("ACME event: DeployedCachedCert");
+							}
+							_ => info!("ACME event: {:?}", event),
 						}
 					}
-					rustls_acme::EventOk::DeployedNewCert(_) => {
-						info!("ACME event: DeployedNewCert");
+					Some(Err(e)) => {
+						consecutive_errors = consecutive_errors.saturating_add(1);
+						total_errors = total_errors.saturating_add(1);
+						if consecutive_errors >= 3 {
+							error!(
+								"ACME error (#{consecutive_errors} in a row, {total_errors} total) for {hostname}: {e:?} \
+								 — cached certificate (if any) will continue to be served"
+							);
+						} else {
+							warn!("ACME error for {hostname}: {e:?}");
+						}
+					}
+					None => {
+						error!(
+							"ACME state machine stream ended for {hostname} ({total_errors} errors total). \
+							 No further renewals will be attempted until the process is restarted."
+						);
 						axum_cancel.swap(None).inspect(|v| v.cancel());
+						break;
 					}
-					rustls_acme::EventOk::DeployedCachedCert(_) => {
-						info!("ACME event: DeployedCachedCert");
-					}
-					_ => info!("ACME event: {:?}", event),
-				},
-				Some(Err(e)) => error!("ACME error: {:?}", e),
-				None => break,
+				}
 			}
 		}
+		info!("ACME background task for {hostname} exited");
 	});
 
 	Ok(resolver)

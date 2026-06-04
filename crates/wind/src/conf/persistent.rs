@@ -62,7 +62,7 @@ impl Default for PersistentConfig {
 				heartbeat_secs: 10,
 				gc_interval_secs: 20,
 				gc_lifetime_secs: 20,
-				skip_cert_verify: true,
+				skip_cert_verify: false,
 				alpn: vec!["h3".into()],
 			})],
 		}
@@ -178,7 +178,12 @@ pub struct TuicOutboundConfig {
 	#[serde(default = "default_20")]
 	pub gc_lifetime_secs: u64,
 
-	#[serde(default = "default_true")]
+	/// Skip server certificate verification.
+	///
+	/// **WARNING**: This disables TLS authentication entirely and allows
+	/// trivial MITM of the upstream relay. Defaults to `false` (verification
+	/// enabled); must be set explicitly to opt out.
+	#[serde(default)]
 	pub skip_cert_verify: bool,
 
 	#[serde(default = "default_h3_alpn")]
@@ -298,5 +303,61 @@ impl PersistentConfig {
 
 		figment = figment.merge(Env::prefixed("WIND_"));
 		Ok(figment.extract()?)
+	}
+}
+
+// ============================================================================
+// PR1 regression tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The default `PersistentConfig` MUST NOT silently disable TLS certificate
+	/// verification. Pre-PR1 the default was `true`, which gave any user that
+	/// relied on the bundled defaults a fully MITM-able outbound. The fix is
+	/// a one-character change to the default literal; this test pins it.
+	#[test]
+	fn default_skip_cert_verify_is_false() {
+		let cfg = PersistentConfig::default();
+		let OutboundConfig::Tuic(tuic) = cfg.outbounds.first().expect("default has a tuic outbound") else {
+			panic!("default outbound is not the TUIC variant");
+		};
+		assert!(
+			!tuic.skip_cert_verify,
+			"default skip_cert_verify must be false — TLS cert verification MUST be on by default"
+		);
+	}
+
+	/// Default ALPN is the historically-shipped `["h3"]` list; emptying it
+	/// should require explicit configuration.
+	#[test]
+	fn default_alpn_is_h3() {
+		let cfg = PersistentConfig::default();
+		let OutboundConfig::Tuic(tuic) = cfg.outbounds.first().unwrap() else {
+			unreachable!()
+		};
+		assert_eq!(tuic.alpn, vec![String::from("h3")]);
+	}
+
+	/// Omitting `skip_cert_verify` in a config file MUST deserialize to
+	/// `false`, matching the documented default. Previously the field used
+	/// `#[serde(default = "default_true")]`, which silently flipped the bit
+	/// back to `true` even when the operator had removed it.
+	#[test]
+	fn omitted_skip_cert_verify_deserializes_false() {
+		let yaml = r#"
+type: tuic
+tag: t
+server_addr: "127.0.0.1:9443"
+uuid: "c1e6dbe2-f417-4890-994c-9ee15b926597"
+password: "p"
+"#;
+		let parsed: OutboundConfig = serde_yaml::from_str(yaml).expect("parse YAML outbound");
+		let OutboundConfig::Tuic(t) = parsed else {
+			panic!("expected tuic")
+		};
+		assert!(!t.skip_cert_verify, "omitted field must default to false");
 	}
 }
