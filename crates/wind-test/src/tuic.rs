@@ -440,8 +440,20 @@ mod tests {
 			.in_current_span(),
 		);
 
-		// (4) Push a 32 KiB UDP packet that MUST fragment.
-		let payload: Bytes = (0u8..=255).cycle().take(32 * 1024).collect::<Vec<u8>>().into();
+		// (4) Push a UDP packet that MUST fragment.
+		//
+		// macOS's default `net.inet.udp.maxdgram = 9216` limits one UDP
+		// `send_to` to 9 KiB. The DirectCallback's UDP relay socket forwards
+		// the reassembled payload as a single datagram to the echo server,
+		// so a 32 KiB payload silently fails with EMSGSIZE on darwin and the
+		// echo never roundtrips back — observed in CI. Cap at 9 KiB on
+		// macOS; on every other platform keep the 32 KiB stress size so the
+		// test still exercises a deep fragmentation count (~24 frags vs ~7).
+		// At 9 KiB with the default 1414-byte QUIC datagram size we still
+		// produce ~7 fragments, which is enough to verify the demoted-log
+		// invariant.
+		let payload_size = if cfg!(target_os = "macos") { 9 * 1024 } else { 32 * 1024 };
+		let payload: Bytes = (0u8..=255).cycle().take(payload_size).collect::<Vec<u8>>().into();
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
 		tx_to_client
 			.send(UdpPacket {
