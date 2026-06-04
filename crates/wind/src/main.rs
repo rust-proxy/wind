@@ -1,12 +1,11 @@
 use std::{ops::Deref, sync::Arc, time::Duration};
 
 use clap::Parser as _;
-use tracing::Level;
+use tracing::{Level, info};
 use wind_core::{
 	AppContext,
 	dispatcher::{Dispatcher, OutboundAsAction, Router},
 	inbound::AbstractInbound,
-	info,
 };
 use wind_naive::NaiveOutbound;
 use wind_socks::inbound::SocksInbound;
@@ -83,7 +82,7 @@ mod log;
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
 	log::init_log(Level::TRACE)?;
-	info!(target: "[MAIN]", "Wind starting");
+	info!(target: "wind_main", "Wind starting");
 	let cli = match Cli::try_parse() {
 		Ok(v) => v,
 		Err(err) => {
@@ -123,7 +122,7 @@ async fn main() -> eyre::Result<()> {
 	}
 
 	let persistent_config = PersistentConfig::load(cli.config, cli.config_dir)?;
-	info!(target: "[MAIN]", "Configuration loaded successfully");
+	info!(target: "wind_main", "Configuration loaded successfully");
 
 	let runtime_config = conf::runtime::Config::from_persist(persistent_config);
 	let ctx = Arc::new(AppContext::default());
@@ -138,12 +137,12 @@ async fn main() -> eyre::Result<()> {
 	}
 
 	tokio::signal::ctrl_c().await?;
-	info!(target: "[MAIN]", "Ctrl-C received, shutting down");
+	info!(target: "wind_main", "Ctrl-C received, shutting down");
 	ctx.token.cancel();
 	ctx.tasks.close();
 	tokio::time::timeout(Duration::from_secs(10), ctx.tasks.wait()).await?;
 
-	info!(target: "[MAIN]", "Shutdown complete");
+	info!(target: "wind_main", "Shutdown complete");
 	Ok(())
 }
 
@@ -162,12 +161,12 @@ async fn build_dispatcher(outbounds: Vec<OutboundRuntime>, ctx: Arc<AppContext>)
 			OutboundOpts::Tuic(opts) => {
 				let out = TuicOutbound::new(ctx.clone(), opts).await?;
 				disp.add_handler(&tag, Arc::new(OutboundAsAction { inner: out }));
-				info!(target: "[BOOT]", "outbound '{tag}' [tuic]");
+				info!(target: "wind_boot", "outbound '{tag}' [tuic]");
 			}
 			OutboundOpts::Naive(opts) => {
 				let out = NaiveOutbound::new(opts).await?;
 				disp.add_handler(&tag, Arc::new(OutboundAsAction { inner: out }));
-				info!(target: "[BOOT]", "outbound '{tag}' [naive]");
+				info!(target: "wind_boot", "outbound '{tag}' [naive]");
 			}
 		}
 	}
@@ -198,7 +197,7 @@ async fn start_inbound(
 				eyre::Ok(())
 			});
 
-			info!(target: "[BOOT]", "inbound '{tag}' [socks] ({addr})");
+			info!(target: "wind_boot", "inbound '{tag}' [socks] ({addr})");
 		}
 	}
 

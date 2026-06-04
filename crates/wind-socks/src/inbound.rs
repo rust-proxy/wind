@@ -10,7 +10,8 @@ use tokio::{
 	sync::mpsc,
 };
 use tokio_util::sync::CancellationToken;
-use wind_core::{AbstractInbound, InboundCallback, error, info, types::TargetAddr, udp::UdpStream};
+use tracing::{Instrument as _, error, info, warn};
+use wind_core::{AbstractInbound, InboundCallback, types::TargetAddr, udp::UdpStream};
 
 use crate::{CallbackSnafu, Error, IoSnafu, SocksSnafu};
 
@@ -47,7 +48,7 @@ impl AbstractInbound for SocksInbound {
 		loop {
 			tokio::select! {
 				_ = self.cancel.cancelled() => {
-					info!(target: "[IN] REACTOR", "Cancellation received, shutting down");
+					info!(target: "socks_in_reactor", "Cancellation received, shutting down");
 					break;
 				}
 				res = listener.accept() => {
@@ -61,11 +62,14 @@ impl AbstractInbound for SocksInbound {
 
 					let opts = self.opts.clone();
 					let cb = cb.clone();
-					tokio::spawn(async move {
-						if let Err(err) = handle_income(opts, stream, client_addr, cb).await {
-							error!(target: "[IN] HANDLER" , "{:}", err);
+					tokio::spawn(
+						async move {
+							if let Err(err) = handle_income(opts, stream, client_addr, cb).await {
+								error!(target: "socks_in_handler" , "{:}", err);
+							}
 						}
-					});
+						.in_current_span(),
+					);
 				}
 			};
 		}
@@ -122,8 +126,8 @@ async fn handle_income(
 			let reply_ip = match opts.public_addr {
 				Some(ip) => ip,
 				None => {
-					wind_core::warn!(
-						target: "[IN] HANDLER",
+					warn!(
+						target: "socks_in_handler",
 						"SOCKS5 UDPAssociate from {} without `public_addr` configured; \
 						 falling back to listen-IP {}. Remote clients will not be able \
 						 to reach the UDP relay.",
@@ -149,11 +153,14 @@ async fn handle_income(
 				};
 
 				let cb = cb.clone();
-				tokio::spawn(async move {
-					if let Err(e) = cb.handle_udpstream(udp_stream).await {
-						error!(target: "[IN] HANDLER", "UDP association error: {}", e);
+				tokio::spawn(
+					async move {
+						if let Err(e) = cb.handle_udpstream(udp_stream).await {
+							error!(target: "socks_in_handler", "UDP association error: {}", e);
+						}
 					}
-				});
+					.in_current_span(),
+				);
 
 				crate::udp::serve_udp_with_client(inbound.into(), serve_stream, Some(expected_client_ip))
 					.await

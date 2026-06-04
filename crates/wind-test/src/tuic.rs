@@ -10,6 +10,7 @@ use std::{net::SocketAddr, sync::Arc};
 use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::net::UdpSocket;
+use tracing::{Instrument as _, warn};
 #[cfg(test)]
 use wind_core::AppContext;
 use wind_core::{
@@ -47,40 +48,81 @@ impl InboundCallback for DirectCallback {
 		let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
 		let send_socket = relay_socket.clone();
-		let recv_handle = tokio::spawn(async move {
-			while let Some(packet) = rx.recv().await {
-				let target_addr = match packet.target {
-					TargetAddr::IPv4(ip, port) => SocketAddr::new(std::net::IpAddr::V4(ip), port),
-					TargetAddr::IPv6(ip, port) => SocketAddr::new(std::net::IpAddr::V6(ip), port),
-					TargetAddr::Domain(..) => continue,
-				};
-				let _ = send_socket.send_to(&packet.payload, target_addr).await;
+		let recv_handle = tokio::spawn(
+			async move {
+				while let Some(packet) = rx.recv().await {
+					let target_addr = match packet.target {
+						TargetAddr::IPv4(ip, port) => SocketAddr::new(std::net::IpAddr::V4(ip), port),
+						TargetAddr::IPv6(ip, port) => SocketAddr::new(std::net::IpAddr::V6(ip), port),
+						TargetAddr::Domain(..) => {
+							warn!(
+								target: "wind_test::direct_cb",
+								target_addr = "domain (unresolved)",
+								payload_len = packet.payload.len(),
+								"DirectCallback drops UDP packet with unresolved domain target",
+							);
+							continue;
+						}
+					};
+					// Don't `let _ = ...` the result. On macOS, payloads larger
+					// than `net.inet.udp.maxdgram` (default 9216) fail
+					// `send_to` with EMSGSIZE — silently dropping that turns
+					// the test into a 15-second timeout 1000 lines downstream.
+					// At least warn so the next person reading CI logs has a
+					// fighting chance.
+					if let Err(e) = send_socket.send_to(&packet.payload, target_addr).await {
+						warn!(
+							target: "wind_test::direct_cb",
+							%target_addr,
+							payload_len = packet.payload.len(),
+							error_kind = ?e.kind(),
+							error = %e,
+							"DirectCallback send_to failed; UDP packet dropped",
+						);
+					}
+				}
 			}
-		});
+			.in_current_span(),
+		);
 
-		tokio::spawn(async move {
-			let mut buf = vec![0u8; 65536];
-			#[allow(clippy::while_let_loop)]
-			loop {
-				match relay_socket.recv_from(&mut buf).await {
-					Ok((n, peer)) => {
-						let source = match peer {
-							SocketAddr::V4(a) => TargetAddr::IPv4(*a.ip(), a.port()),
-							SocketAddr::V6(a) => TargetAddr::IPv6(*a.ip(), a.port()),
-						};
-						let packet = UdpPacket {
-							source: Some(source.clone()),
-							target: source,
-							payload: Bytes::copy_from_slice(&buf[..n]),
-						};
-						if tx.send(packet).await.is_err() {
+		tokio::spawn(
+			async move {
+				let mut buf = vec![0u8; 65536];
+				loop {
+					match relay_socket.recv_from(&mut buf).await {
+						Ok((n, peer)) => {
+							let source = match peer {
+								SocketAddr::V4(a) => TargetAddr::IPv4(*a.ip(), a.port()),
+								SocketAddr::V6(a) => TargetAddr::IPv6(*a.ip(), a.port()),
+							};
+							let packet = UdpPacket {
+								source: Some(source.clone()),
+								target: source,
+								payload: Bytes::copy_from_slice(&buf[..n]),
+							};
+							if tx.send(packet).await.is_err() {
+								// Upstream channel closed — the only legitimate
+								// shutdown signal. Quiet break.
+								break;
+							}
+						}
+						Err(e) => {
+							// Recv errors are rare (mostly socket closure /
+							// cancellation). Make the cause visible instead of
+							// swallowing it.
+							warn!(
+								target: "wind_test::direct_cb",
+								error_kind = ?e.kind(),
+								error = %e,
+								"DirectCallback relay socket recv_from failed; closing reply task",
+							);
 							break;
 						}
 					}
-					Err(_) => break,
 				}
 			}
-		});
+			.in_current_span(),
+		);
 
 		recv_handle.await?;
 		Ok(())
@@ -155,9 +197,12 @@ mod tests {
 
 		let server = TuicInbound::new(ctx.clone(), opts);
 		let callback = Arc::new(DirectCallback);
-		tokio::spawn(async move {
-			let _ = server.listen(callback.as_ref()).await;
-		});
+		tokio::spawn(
+			async move {
+				let _ = server.listen(callback.as_ref()).await;
+			}
+			.in_current_span(),
+		);
 
 		// Allow the server time to bind and begin accepting
 		tokio::time::sleep(Duration::from_millis(300)).await;
@@ -180,9 +225,12 @@ mod tests {
 		};
 		let client: std::sync::Arc<TuicOutbound> = std::sync::Arc::new(TuicOutbound::new(ctx.clone(), opts).await?);
 		let poll_client = client.clone();
-		tokio::spawn(async move {
-			let _ = poll_client.start_poll().await;
-		});
+		tokio::spawn(
+			async move {
+				let _ = poll_client.start_poll().await;
+			}
+			.in_current_span(),
+		);
 		tokio::time::sleep(Duration::from_millis(100)).await;
 		Ok(client)
 	}
@@ -350,5 +398,146 @@ mod tests {
 		assert!(read_result.is_ok(), "Large payload read timed out");
 		assert!(read_result.unwrap().is_ok(), "read_exact failed for large payload");
 		assert_eq!(received, payload, "Large payload echo must match");
+	}
+
+	// =========================================================================
+	// PR2 verification: per-fragment INFO-level logs must stay demoted
+	// =========================================================================
+
+	/// PR2 regression test for log-level noise on the UDP fragmentation path.
+	///
+	/// Before PR2 `crates/wind-tuic/src/proto/udp_stream.rs` emitted
+	/// `"Fragmentation params: ..."` once per fragmented send and
+	/// `"Sending fragment N/M: K bytes"` once per fragment, both at
+	/// `tracing::Level::INFO`. On a busy UDP path this was extremely noisy
+	/// (allocation + formatting + I/O per packet) and obscured the genuine
+	/// state-change events operators care about.
+	///
+	/// PR2 demoted both call sites to `tracing::Level::DEBUG`. The test uses
+	/// `#[tracing_test::traced_test]` to install a global subscriber that
+	/// captures every event into a process-wide buffer, scoped per-test via
+	/// the test's own span (the macro enters a span named after the function;
+	/// `logs_assert` filters captured lines by ` {span_name}:`). Spawned
+	/// tasks across `wind-tuic`, `wind-socks`, `wind-naive`, and this file's
+	/// own helpers are wrapped with `Instrument::in_current_span` so the
+	/// captured buffer sees events from deeply-nested `tokio::spawn` chains.
+	/// A 32 KiB UDP payload forces ~28 fragments at the 1200-byte default
+	/// datagram size; the assertion then confirms no `INFO` line contains
+	/// either forbidden format string and that at least one `DEBUG` line
+	/// does (proving fragmentation ran and the capture pipeline is alive).
+	///
+	/// Note on the `no-env-filter` feature: the `#[traced_test]` macro
+	/// silently ignores its attribute arguments and hardcodes the EnvFilter
+	/// directive to `<test_crate>=trace` (here `wind_test=trace`), which
+	/// would reject every event whose target is an identifier-style string
+	/// like `"udp"` or `"tuic_out"`. Enabling `tracing-test/no-env-filter`
+	/// in `Cargo.toml` switches the directive to plain `trace`, matching
+	/// every event regardless of target.
+	#[tracing_test::traced_test]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn test_pr2_fragmented_udp_emits_no_info_log_noise() {
+		// (1) Spin up a UDP echo server on loopback.
+		let echo = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let echo_addr = echo.local_addr().unwrap();
+		tokio::spawn(
+			async move {
+				let mut buf = vec![0u8; 65536];
+				loop {
+					match echo.recv_from(&mut buf).await {
+						Ok((n, from)) => {
+							let _ = echo.send_to(&buf[..n], from).await;
+						}
+						Err(_) => break,
+					}
+				}
+			}
+			.in_current_span(),
+		);
+
+		// (2) Bring up the TUIC server + client.
+		let setup = setup_tuic_server().await.expect("setup tuic server");
+		let client = connect_tuic_client(&setup).await.expect("connect tuic client");
+
+		// (3) Build a wind-core UdpStream pair: the test owns one side, the
+		// TUIC outbound owns the other.
+		let (tx_to_client, rx_at_client) = tokio::sync::mpsc::channel::<UdpPacket>(32);
+		let (tx_to_test, mut rx_at_test) = tokio::sync::mpsc::channel::<UdpPacket>(32);
+
+		let stream_for_client = UdpStream {
+			tx: tx_to_test,
+			rx: rx_at_client,
+		};
+		let client_for_udp = client.clone();
+		tokio::spawn(
+			async move {
+				let _ = client_for_udp.handle_udp(stream_for_client, None::<TuicOutbound>).await;
+			}
+			.in_current_span(),
+		);
+
+		// (4) Push a UDP packet that MUST fragment.
+		//
+		// macOS's default `net.inet.udp.maxdgram = 9216` limits one UDP
+		// `send_to` to 9 KiB. The DirectCallback's UDP relay socket forwards
+		// the reassembled payload as a single datagram to the echo server,
+		// so a 32 KiB payload silently fails with EMSGSIZE on darwin and the
+		// echo never roundtrips back — observed in CI. Cap at 9 KiB on
+		// macOS; on every other platform keep the 32 KiB stress size so the
+		// test still exercises a deep fragmentation count (~24 frags vs ~7).
+		// At 9 KiB with the default 1414-byte QUIC datagram size we still
+		// produce ~7 fragments, which is enough to verify the demoted-log
+		// invariant.
+		let payload_size = if cfg!(target_os = "macos") { 9 * 1024 } else { 32 * 1024 };
+		let payload: Bytes = (0u8..=255).cycle().take(payload_size).collect::<Vec<u8>>().into();
+		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
+		tx_to_client
+			.send(UdpPacket {
+				source: None,
+				target: target.clone(),
+				payload: payload.clone(),
+			})
+			.await
+			.expect("send UDP packet into TUIC outbound");
+
+		// (5) Drain the reassembled echo so we know fragmentation actually ran
+		// on both sides before we examine logs.
+		let echoed = tokio::time::timeout(Duration::from_secs(15), rx_at_test.recv())
+			.await
+			.expect("echo timed out — fragmentation roundtrip did not complete in time")
+			.expect("upstream channel closed before echo arrived");
+		assert_eq!(echoed.payload.len(), payload.len(), "echoed payload length mismatch");
+		assert_eq!(echoed.payload, payload, "echoed payload bytes mismatch");
+
+		// (6) Give spawned sender tasks a moment to flush any pending logs.
+		tokio::time::sleep(Duration::from_millis(50)).await;
+
+		// (7) Inspect the captured log lines. `tracing-test`'s `logs_assert`
+		// filters captured lines by ` {span_name}:` (the test function name);
+		// spawned tasks instrumented with `.in_current_span()` keep the
+		// test's span as the current span, so their pre-formatted lines DO
+		// include `test_pr2_..._noise:` and pass the filter.
+		logs_assert(|lines: &[&str]| {
+			for forbidden in ["Fragmentation params", "Sending fragment "] {
+				if let Some(bad) = lines.iter().find(|l| l.contains(" INFO ") && l.contains(forbidden)) {
+					return Err(format!(
+						"PR2 demoted log '{forbidden}' is back at INFO level — found: {bad:?}"
+					));
+				}
+			}
+			if !lines.iter().any(|l| l.contains(" INFO ")) {
+				return Err("sanity: no INFO events captured during the roundtrip".into());
+			}
+			let debug_hits = lines
+				.iter()
+				.filter(|l| l.contains(" DEBUG "))
+				.filter(|l| l.contains("Sending fragment ") || l.contains("Fragmentation params"))
+				.count();
+			if debug_hits == 0 {
+				return Err(
+					"sanity: no DEBUG fragment events captured — fragmentation didn't run or the capture is broken".into(),
+				);
+			}
+			Ok(())
+		});
 	}
 }

@@ -14,8 +14,6 @@ pub use outbound::*;
 pub use resolve::{Resolver, SystemResolver};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-pub mod log;
-
 pub mod tcp;
 pub mod udp;
 pub mod utils;

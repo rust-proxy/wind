@@ -4,7 +4,7 @@ use rustls::{
 	crypto::CryptoProvider,
 	pki_types::{CertificateDer, ServerName, UnixTime},
 };
-use wind_core::warn;
+use tracing::warn;
 
 use crate::{Error, quinn::outbound::TuicOutboundOpts};
 
@@ -16,7 +16,7 @@ pub(crate) fn tls_config(_servername: &str, opts: &TuicOutboundOpts) -> Result<r
 	let arc_crypto_provider = CryptoProvider::get_default().expect("Unable to find default crypto provider");
 	let mut config = if opts.skip_cert_verify {
 		warn!(
-			target: "[TLS]",
+			target: "tls",
 			"skip_cert_verify=true: server certificate verification is DISABLED. \
 			 This is insecure and allows trivial MITM of the upstream relay."
 		);

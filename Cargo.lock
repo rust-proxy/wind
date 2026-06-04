@@ -734,12 +734,6 @@ dependencies = [
 
 [[package]]
 name = "const-str"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0664d2867b4a32697dfe655557f5c3b187e9b605b38612a748e5ec99811d160"
-
-[[package]]
-name = "const-str"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18f12cc9948ed9604230cdddc7c86e270f9401ccbe3c2e98a4378c5e7632212f"
@@ -4675,7 +4669,7 @@ version = "0.1.1"
 dependencies = [
  "clap 4.6.1",
  "clap_derive",
- "const-str 1.1.0",
+ "const-str",
  "educe",
  "eyre",
  "figment",
@@ -4726,7 +4720,6 @@ name = "wind-core"
 version = "0.1.1"
 dependencies = [
  "bytes",
- "const-str 0.7.1",
  "eyre",
  "futures",
  "ipnet",
@@ -4804,6 +4797,8 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tracing",
+ "tracing-test",
  "uuid",
  "wind-core",
  "wind-socks",

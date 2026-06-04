@@ -68,7 +68,24 @@ impl FragmentReassemblyBuffer {
 		}
 	}
 
-	/// Add a fragment to the buffer
+	/// Add a fragment to the buffer.
+	///
+	/// `frag_total` and `frag_id` arrive straight from the wire and are
+	/// fully attacker-controlled. We validate them up front:
+	///
+	/// * `frag_total == 0` — meaningless ("packet split into zero pieces"). The
+	///   old code would insert a zero-capacity sub-cache and trip the
+	///   "entry_count == frag_total" check immediately with an empty payload
+	///   set, which `reassemble_packet` then turned into a zero-byte packet.
+	///   Reject up front.
+	/// * `frag_id >= frag_total` — out of range; would poison the
+	///   per-(assoc_id, pkt_id) sub-cache by storing under a key the reassembly
+	///   walk never reads, permanently blocking the genuine packet from
+	///   completing. Reject.
+	/// * `frag_total` disagreement with the first fragment we've seen for this
+	///   (assoc_id, pkt_id) — also rejected, otherwise an attacker could
+	///   over-declare `frag_total = 255` on a forged packet and pin a 255-entry
+	///   sub-cache against a victim's stream.
 	async fn add_fragment(&self, info: FragmentInfo, payload: Bytes) -> Option<UdpPacket> {
 		let FragmentInfo {
 			assoc_id,
@@ -78,6 +95,19 @@ impl FragmentReassemblyBuffer {
 			source,
 			target,
 		} = info;
+
+		if frag_total == 0 || frag_id >= frag_total {
+			tracing::warn!(
+				target: "udp",
+				assoc_id,
+				pkt_id,
+				frag_total,
+				frag_id,
+				"Dropping fragment with invalid frag fields (frag_total == 0 or frag_id >= frag_total)",
+			);
+			return None;
+		}
+
 		let key = (assoc_id, pkt_id);
 
 		// Check if this is a placeholder address (used for non-first fragments)
@@ -107,6 +137,23 @@ impl FragmentReassemblyBuffer {
 					}
 				})
 				.await;
+
+			// Reject fragments whose `frag_total` disagrees with the packet
+			// that's already being assembled. Without this check, a forged
+			// packet with a different frag_total wedges (or grows) the
+			// per-(assoc_id, pkt_id) sub-cache.
+			if meta.value().frag_total != frag_total {
+				tracing::warn!(
+					target: "udp",
+					assoc_id,
+					pkt_id,
+					expected_frag_total = meta.value().frag_total,
+					got_frag_total = frag_total,
+					frag_id,
+					"Dropping fragment with mismatched frag_total for an existing reassembly",
+				);
+				return None;
+			}
 
 			// If this is the first fragment (frag_id == 0) and it has a real address,
 			// update the target address in case we received other fragments first with
@@ -148,7 +195,7 @@ impl FragmentReassemblyBuffer {
 			init_time().elapsed() - Duration::from_secs(meta.last_updated.load(Ordering::Relaxed))
 				>= Duration::from_millis(FRAGMENT_TIMEOUT_MS)
 		}) {
-			wind_core::warn!(target: "[UDP]", "Failed to register fragment cleanup predicate: {:?}", e);
+			tracing::warn!(target: "udp", "Failed to register fragment cleanup predicate: {:?}", e);
 			return;
 		}
 		self.fragments.run_pending_tasks().await;
@@ -224,22 +271,23 @@ impl UdpStream {
 
 		// Calculate header overhead for single packet sending
 		// Header (2 bytes) + Command (8 bytes) + Address
-		let header_overhead = 10 + addr_size; // If payload fits within the MTU, send as a single packet
-		// TODO handle the case datagram not supported
-		if payload_len <= self.connection.max_datagram_size().unwrap_or(1200) - header_overhead {
-			// Send UDP data with association ID
+		let header_overhead = 10 + addr_size;
+		// `saturating_sub` so that a transiently tiny `max_datagram_size`
+		// (well below the 10+addr_size header overhead) cannot underflow into
+		// `usize::MAX` and let an arbitrarily large payload sneak through the
+		// single-datagram branch (where it would then exceed
+		// `send_datagram`'s size limit).
+		let max_datagram_size = self.connection.max_datagram_size().unwrap_or(1200);
+		let single_dg_payload_max = max_datagram_size.saturating_sub(header_overhead);
+		if payload_len <= single_dg_payload_max {
+			// Allocate the packet id atomically — `load` then `fetch_add` is
+			// racy: two concurrent send_packet calls could read the same id
+			// and emit two datagrams with identical (assoc_id, pkt_id), which
+			// collides with the receiver's fragment-reassembly state.
+			let pkt_id = self.next_pkt_id.fetch_add(1, Ordering::Relaxed);
 			self.connection
-				.send_udp(
-					self.assoc_id,
-					self.next_pkt_id.load(Ordering::Relaxed),
-					&packet.target,
-					packet.payload,
-					true,
-				)
+				.send_udp(self.assoc_id, pkt_id, &packet.target, packet.payload, true)
 				.await?;
-
-			// Increment packet ID for next packet
-			self.next_pkt_id.fetch_add(1, Ordering::Relaxed);
 			return Ok(());
 		}
 
@@ -266,8 +314,32 @@ impl UdpStream {
 		let first_frag_max_payload = max_datagram_size.saturating_sub(first_frag_header_overhead);
 		let subsequent_frag_max_payload = max_datagram_size.saturating_sub(subsequent_frag_header_overhead);
 
-		wind_core::info!(target: "[UDP]", "Fragmentation params: payload={}, first_frag_overhead={}, subsequent_frag_overhead={}, max_datagram={}, first_frag_max={}, subsequent_frag_max={}",
-			payload_len, first_frag_header_overhead, subsequent_frag_header_overhead, max_datagram_size, first_frag_max_payload, subsequent_frag_max_payload);
+		// Guard against pathological `max_datagram_size` values where the
+		// header overhead consumes the entire datagram. In that case both
+		// `saturating_sub`s yield 0 and `div_ceil(0)` would panic; refuse the
+		// send instead. This was previously reachable both by an adversarial
+		// peer advertising a tiny max_datagram_size and by an unusually long
+		// domain target that inflated the first-fragment overhead past the
+		// datagram size.
+		if first_frag_max_payload == 0 || subsequent_frag_max_payload == 0 {
+			return Err(eyre::eyre!(
+				"max_datagram_size ({}) is too small for header overhead ({} first / {} subsequent) — cannot fragment",
+				max_datagram_size,
+				first_frag_header_overhead,
+				subsequent_frag_header_overhead,
+			));
+		}
+
+		tracing::debug!(
+			target: "udp",
+			"Fragmentation params: payload={}, first_frag_overhead={}, subsequent_frag_overhead={}, max_datagram={}, first_frag_max={}, subsequent_frag_max={}",
+			payload_len,
+			first_frag_header_overhead,
+			subsequent_frag_header_overhead,
+			max_datagram_size,
+			first_frag_max_payload,
+			subsequent_frag_max_payload,
+		);
 
 		// Calculate number of fragments needed
 		// First fragment can hold first_frag_max_payload bytes
@@ -341,14 +413,24 @@ impl UdpStream {
 			buf.put_slice(&fragment_payload);
 			let combined_payload = buf.freeze();
 
-			// Debug: Log the actual datagram size
+			// Per-packet diagnostics are kept at `trace`/`debug` — emitting at
+			// `info` for every fragment on a busy UDP path was expensive
+			// (string formatting + I/O cost per packet), and the size is
+			// recoverable from the warn-level error if it ever overflows.
 			let datagram_size = combined_payload.len();
 			let max_allowed = self.connection.max_datagram_size().unwrap_or(1200);
 			if datagram_size > max_allowed {
-				wind_core::warn!(target: "[UDP]", "Fragment too large: {} bytes > {} bytes max (frag {}/{})", 
-					datagram_size, max_allowed, frag_id + 1, frag_total);
+				tracing::warn!(
+					target: "udp",
+					"Fragment too large: {} bytes > {} bytes max (frag {}/{})",
+					datagram_size, max_allowed, frag_id + 1, frag_total,
+				);
 			} else {
-				wind_core::info!(target: "[UDP]", "Sending fragment {}/{}: {} bytes", frag_id + 1, frag_total, datagram_size);
+				tracing::debug!(
+					target: "udp",
+					"Sending fragment {}/{}: {} bytes",
+					frag_id + 1, frag_total, datagram_size,
+				);
 			}
 
 			// Send using datagram
@@ -759,5 +841,121 @@ mod tests {
 
 		// Normal subtraction would panic in debug mode or wrap in release
 		// This test verifies the implementation advice from SPEC.md Section 8.7
+	}
+
+	// ----------------------------------------------------------------------
+	// PR2 regression tests
+	// ----------------------------------------------------------------------
+
+	/// `frag_total == 0` and `frag_id >= frag_total` are both forbidden by
+	/// the spec, but are attacker-controlled on the wire. The buffer must
+	/// drop such fragments instead of producing a zero-byte "reassembled"
+	/// packet or poisoning the per-pkt sub-cache.
+	#[test_log::test(tokio::test)]
+	async fn test_add_fragment_rejects_zero_total() {
+		let buffer = FragmentReassemblyBuffer::new();
+		let target = TargetAddr::IPv4(Ipv4Addr::new(127, 0, 0, 1), 8080);
+
+		let res = buffer
+			.add_fragment(
+				FragmentInfo {
+					assoc_id: 1,
+					pkt_id: 1,
+					frag_total: 0,
+					frag_id: 0,
+					source: None,
+					target,
+				},
+				Bytes::from_static(b"x"),
+			)
+			.await;
+		assert!(res.is_none(), "frag_total=0 must be dropped");
+		buffer.fragments.run_pending_tasks().await;
+		assert_eq!(buffer.fragments.entry_count(), 0, "frag_total=0 must not insert an entry");
+	}
+
+	#[test_log::test(tokio::test)]
+	async fn test_add_fragment_rejects_out_of_range_frag_id() {
+		let buffer = FragmentReassemblyBuffer::new();
+		let target = TargetAddr::IPv4(Ipv4Addr::new(127, 0, 0, 1), 8080);
+
+		let res = buffer
+			.add_fragment(
+				FragmentInfo {
+					assoc_id: 1,
+					pkt_id: 1,
+					frag_total: 3,
+					frag_id: 7, // > frag_total
+					source: None,
+					target,
+				},
+				Bytes::from_static(b"x"),
+			)
+			.await;
+		assert!(res.is_none(), "frag_id >= frag_total must be dropped");
+		buffer.fragments.run_pending_tasks().await;
+		assert_eq!(
+			buffer.fragments.entry_count(),
+			0,
+			"out-of-range frag_id must not insert an entry"
+		);
+	}
+
+	/// Once a reassembly slot is open with `frag_total = N`, fragments
+	/// claiming a different `frag_total` for the same (assoc_id, pkt_id)
+	/// must be rejected, otherwise an attacker can over-declare to grow
+	/// the per-packet sub-cache or block completion entirely.
+	#[test_log::test(tokio::test)]
+	async fn test_add_fragment_rejects_mismatched_frag_total() {
+		let buffer = FragmentReassemblyBuffer::new();
+		let target = TargetAddr::IPv4(Ipv4Addr::new(127, 0, 0, 1), 8080);
+
+		// First legitimate fragment opens the slot at frag_total=2.
+		let _ = buffer
+			.add_fragment(
+				FragmentInfo {
+					assoc_id: 1,
+					pkt_id: 1,
+					frag_total: 2,
+					frag_id: 0,
+					source: None,
+					target: target.clone(),
+				},
+				Bytes::from_static(b"AA"),
+			)
+			.await;
+
+		// Forged fragment claiming frag_total=255 — must be dropped.
+		let res = buffer
+			.add_fragment(
+				FragmentInfo {
+					assoc_id: 1,
+					pkt_id: 1,
+					frag_total: 255,
+					frag_id: 200,
+					source: None,
+					target: target.clone(),
+				},
+				Bytes::from_static(b"X"),
+			)
+			.await;
+		assert!(res.is_none(), "mismatched frag_total must be dropped");
+
+		// The legitimate completion path still works after the forged drop.
+		let completed = buffer
+			.add_fragment(
+				FragmentInfo {
+					assoc_id: 1,
+					pkt_id: 1,
+					frag_total: 2,
+					frag_id: 1,
+					source: None,
+					target,
+				},
+				Bytes::from_static(b"BB"),
+			)
+			.await;
+		let packet = completed.expect("legitimate completion must still succeed");
+		assert_eq!(&packet.payload[..], b"AABB");
 	}
 }

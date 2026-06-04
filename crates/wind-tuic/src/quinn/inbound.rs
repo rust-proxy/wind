@@ -21,12 +21,11 @@ use tokio::{
 	sync::{Notify, mpsc},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
+use tracing::{Instrument, error, info, warn};
 use uuid::Uuid;
 use wind_core::{
-	AbstractInbound, AppContext, InboundCallback, error, info,
+	AbstractInbound, AppContext, InboundCallback,
 	udp::{UdpPacket, UdpStream as CoreUdpStream},
-	warn,
 };
 
 use crate::proto::{CmdType, Command};
@@ -355,18 +354,21 @@ async fn handle_connection<C: InboundCallback>(
 	// Spawn authentication timeout task.
 	let conn_auth = connection.clone();
 	let auth_cancel = cancel.clone();
-	tokio::spawn(async move {
-		tokio::select! {
-			_ = tokio::time::sleep(auth_timeout) => {
-				if conn_auth.uuid.load().is_none() {
-					warn!("Connection from {} authentication timeout", remote_addr);
-					conn_auth.conn.close(VarInt::from_u32(0), b"auth timeout");
+	tokio::spawn(
+		async move {
+			tokio::select! {
+				_ = tokio::time::sleep(auth_timeout) => {
+					if conn_auth.uuid.load().is_none() {
+						warn!("Connection from {} authentication timeout", remote_addr);
+						conn_auth.conn.close(VarInt::from_u32(0), b"auth timeout");
+					}
 				}
+				_ = auth_cancel.cancelled() => {}
+				_ = conn_auth.conn.closed() => {}
 			}
-			_ = auth_cancel.cancelled() => {}
-			_ = conn_auth.conn.closed() => {}
 		}
-	});
+		.in_current_span(),
+	);
 
 	// One cancellation token shared by all acceptor tasks. Cancelling it
 	// from the parent stops every acceptor at once; we also fire it after
@@ -383,28 +385,31 @@ async fn handle_connection<C: InboundCallback>(
 		let conn = connection.clone();
 		let cb = callback.clone();
 		let dg_cancel = acceptor_cancel.clone();
-		tokio::spawn(async move {
-			acceptor_loop(
-				dg_cancel,
-				"Read datagram",
-				|| conn.conn.read_datagram(),
-				|datagram| {
-					let conn = conn.clone();
-					let cb = cb.clone();
-					async move {
-						if conn.uuid.load().is_some() {
-							tokio::spawn(
-								spawn_logged("Datagram", handle_datagram(conn, datagram, cb))
-									.instrument(tracing::debug_span!("datagram")),
-							);
-						} else if let Err(e) = handle_datagram(conn, datagram, cb).await {
-							error!("Datagram error: {e:?}");
+		tokio::spawn(
+			async move {
+				acceptor_loop(
+					dg_cancel,
+					"Read datagram",
+					|| conn.conn.read_datagram(),
+					|datagram| {
+						let conn = conn.clone();
+						let cb = cb.clone();
+						async move {
+							if conn.uuid.load().is_some() {
+								tokio::spawn(
+									spawn_logged("Datagram", handle_datagram(conn, datagram, cb))
+										.instrument(tracing::debug_span!("datagram")),
+								);
+							} else if let Err(e) = handle_datagram(conn, datagram, cb).await {
+								error!("Datagram error: {e:?}");
+							}
 						}
-					}
-				},
-			)
-			.await;
-		});
+					},
+				)
+				.await;
+			}
+			.in_current_span(),
+		);
 	}
 
 	// Uni stream acceptor.
@@ -412,24 +417,27 @@ async fn handle_connection<C: InboundCallback>(
 		let conn = connection.clone();
 		let cb = callback.clone();
 		let uni_cancel = acceptor_cancel.clone();
-		tokio::spawn(async move {
-			acceptor_loop(
-				uni_cancel,
-				"Accept uni",
-				|| conn.conn.accept_uni(),
-				|recv| {
-					let conn = conn.clone();
-					let cb = cb.clone();
-					async move {
-						tokio::spawn(
-							spawn_logged("Uni stream", handle_uni_stream(conn, recv, cb))
-								.instrument(tracing::debug_span!("uni_stream")),
-						);
-					}
-				},
-			)
-			.await;
-		});
+		tokio::spawn(
+			async move {
+				acceptor_loop(
+					uni_cancel,
+					"Accept uni",
+					|| conn.conn.accept_uni(),
+					|recv| {
+						let conn = conn.clone();
+						let cb = cb.clone();
+						async move {
+							tokio::spawn(
+								spawn_logged("Uni stream", handle_uni_stream(conn, recv, cb))
+									.instrument(tracing::debug_span!("uni_stream")),
+							);
+						}
+					},
+				)
+				.await;
+			}
+			.in_current_span(),
+		);
 	}
 
 	// Bi stream acceptor.
@@ -437,24 +445,27 @@ async fn handle_connection<C: InboundCallback>(
 		let conn = connection.clone();
 		let cb = callback.clone();
 		let bi_cancel = acceptor_cancel.clone();
-		tokio::spawn(async move {
-			acceptor_loop(
-				bi_cancel,
-				"Accept bi",
-				|| conn.conn.accept_bi(),
-				|(send, recv)| {
-					let conn = conn.clone();
-					let cb = cb.clone();
-					async move {
-						tokio::spawn(
-							spawn_logged("Bi stream", handle_bi_stream(conn, send, recv, cb))
-								.instrument(tracing::debug_span!("bi_stream")),
-						);
-					}
-				},
-			)
-			.await;
-		});
+		tokio::spawn(
+			async move {
+				acceptor_loop(
+					bi_cancel,
+					"Accept bi",
+					|| conn.conn.accept_bi(),
+					|(send, recv)| {
+						let conn = conn.clone();
+						let cb = cb.clone();
+						async move {
+							tokio::spawn(
+								spawn_logged("Bi stream", handle_bi_stream(conn, send, recv, cb))
+									.instrument(tracing::debug_span!("bi_stream")),
+							);
+						}
+					},
+				)
+				.await;
+			}
+			.in_current_span(),
+		);
 	}
 
 	// Exit on either server shutdown or peer disconnect. Without the
@@ -787,36 +798,45 @@ async fn get_or_create_session<C: InboundCallback>(
 			};
 
 			// Bridge reassembled packets from quinn -> outbound with backpressure.
-			tokio::spawn(async move {
-				while let Ok(packet) = reassembled_rx.recv().await {
-					match tokio::time::timeout(Duration::from_secs(5), to_outbound_tx.send(packet)).await {
-						Ok(Ok(())) => {}
-						Ok(Err(mpsc::error::SendError(_))) => break,
-						Err(_) => {
-							warn!("UDP outbound queue full (assoc {}), dropping packet after 5s", assoc_id);
+			tokio::spawn(
+				async move {
+					while let Ok(packet) = reassembled_rx.recv().await {
+						match tokio::time::timeout(Duration::from_secs(5), to_outbound_tx.send(packet)).await {
+							Ok(Ok(())) => {}
+							Ok(Err(mpsc::error::SendError(_))) => break,
+							Err(_) => {
+								warn!("UDP outbound queue full (assoc {}), dropping packet after 5s", assoc_id);
+							}
 						}
 					}
 				}
-			});
+				.in_current_span(),
+			);
 
 			{
 				let response_stream = tuic_stream.clone();
-				tokio::spawn(async move {
-					while let Some(packet) = from_outbound_rx.recv().await {
-						if let Err(e) = response_stream.send_packet(packet).await {
-							warn!("Failed to send UDP response (assoc {}): {}", assoc_id, e);
-							break;
+				tokio::spawn(
+					async move {
+						while let Some(packet) = from_outbound_rx.recv().await {
+							if let Err(e) = response_stream.send_packet(packet).await {
+								warn!("Failed to send UDP response (assoc {}): {}", assoc_id, e);
+								break;
+							}
 						}
 					}
-				});
+					.in_current_span(),
+				);
 			}
 
 			{
-				tokio::spawn(async move {
-					if let Err(e) = cb.handle_udpstream(outbound_stream).await {
-						error!("UDP stream handler error (assoc {}): {}", assoc_id, e);
+				tokio::spawn(
+					async move {
+						if let Err(e) = cb.handle_udpstream(outbound_stream).await {
+							error!("UDP stream handler error (assoc {}): {}", assoc_id, e);
+						}
 					}
-				});
+					.in_current_span(),
+				);
 			}
 
 			UdpSession { tuic_stream }

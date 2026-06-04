@@ -9,8 +9,9 @@ use quinn::TokioRuntime;
 use quinn_congestions::bbr::BbrConfig;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
+use tracing::{Instrument as _, info, warn};
 use uuid::Uuid;
-use wind_core::{AbstractOutbound, AppContext, info, tcp::AbstractTcpStream, types::TargetAddr, warn};
+use wind_core::{AbstractOutbound, AppContext, tcp::AbstractTcpStream, types::TargetAddr};
 
 use crate::{
 	Error,
@@ -54,7 +55,7 @@ impl TuicOutbound {
 			#[cfg(feature = "ring")]
 			let _ = rustls::crypto::ring::default_provider().install_default();
 		}
-		info!(target: "[OUT]", "Creating a new outbound");
+		info!(target: "tuic_out", "Creating a new outbound");
 		let client_config = {
 			let tls_config = super::tls::tls_config(&server_name, &opts)?;
 
@@ -111,34 +112,34 @@ impl TuicOutbound {
 			.handle_incoming(self.ctx.clone(), cancel_token.clone())
 			.await?;
 
-		self.ctx.tasks.spawn(async move {
+		let poll_task = async move {
 			let mut hb_failures = 0;
 			hb_interval.tick().await;
 
 			loop {
 				tokio::select! {
 					_ = cancel_token.cancelled() => {
-						info!(target: "[OUT]", "Heartbeat poll cancelled");
+						info!(target: "tuic_out", "Heartbeat poll cancelled");
 						return Ok(());
 					}
 					_ = hb_interval.tick() => {
 						if let Err(e) = connection.send_heartbeat().await {
 							hb_failures += 1;
-							info!(target: "[OUT]", "Heartbeat failed ({}/{}): {}", hb_failures, HEARTBEAT_MAX_FAILURES, e);
+							info!(target: "tuic_out", "Heartbeat failed ({}/{}): {}", hb_failures, HEARTBEAT_MAX_FAILURES, e);
 
 							if hb_failures >= HEARTBEAT_MAX_FAILURES {
 								return Err(eyre::eyre!("Too many heartbeat failures ({}/{})", hb_failures, HEARTBEAT_MAX_FAILURES));
 							}
 						} else if hb_failures > 0 {
-							info!(target: "[OUT]", "Heartbeat succeeded after {} failures", hb_failures);
+							info!(target: "tuic_out", "Heartbeat succeeded after {} failures", hb_failures);
 							hb_failures = 0;
 						}
 					}
 					Ok(_) = bi_rx.recv() => {
-						warn!(target: "[OUT]", "Received bi-directional stream on Outbound");
+						warn!(target: "tuic_out", "Received bi-directional stream on Outbound");
 					}
 					Ok(mut buf) = datagram_rx.recv() => {
-						info!(target: "[OUT]", "Received datagram: {} bytes", buf.len());
+						info!(target: "tuic_out", "Received datagram: {} bytes", buf.len());
 						// Process the received datagram
 						use bytes::Buf;
 
@@ -146,7 +147,7 @@ impl TuicOutbound {
 						let header = match crate::proto::decode_header(&mut buf, "datagram") {
 							Ok(h) => h,
 							Err(e) => {
-								warn!(target: "[OUT]", "Failed to decode header: {}", e);
+								warn!(target: "tuic_out", "Failed to decode header: {}", e);
 								continue;
 							}
 						};
@@ -154,7 +155,7 @@ impl TuicOutbound {
 						let cmd = match crate::proto::decode_command(header.command, &mut buf, "datagram") {
 							Ok(c) => c,
 							Err(e) => {
-								warn!(target: "[OUT]", "Failed to decode command: {}", e);
+								warn!(target: "tuic_out", "Failed to decode command: {}", e);
 								continue;
 							}
 						};
@@ -171,13 +172,25 @@ impl TuicOutbound {
 							let addr = match crate::proto::decode_address(&mut buf, "UDP packet") {
 								Ok(a) => a,
 								Err(e) => {
-									warn!(target: "[OUT]", "Failed to decode address: {}", e);
+									warn!(target: "tuic_out", "Failed to decode address: {}", e);
 									continue;
 								}
 							};
 
-							// Extract payload
-							let payload = buf.copy_to_bytes(size as usize);
+							// Extract payload. `size` is attacker-controlled (it comes straight
+							// from the wire); `copy_to_bytes` panics when `size > buf.remaining()`,
+							// so a malicious peer could crash the outbound poll task by
+							// over-declaring it. Validate first and bail out cleanly instead.
+							let size = size as usize;
+							if buf.remaining() < size {
+								warn!(
+									target: "tuic_out",
+									"Packet command claims {} bytes of payload but only {} remain — dropping",
+									size, buf.remaining()
+								);
+								continue;
+							}
+							let payload = buf.copy_to_bytes(size);
 
 							// Convert address to TargetAddr and handle logging
 							let (target, has_address) = match crate::proto::address_to_target(addr) {
@@ -188,10 +201,10 @@ impl TuicOutbound {
 							};
 
 							if has_address {
-								info!(target: "[OUT]", "Received UDP packet: assoc={:#06x}, pkt={}, frag={}/{}, size={}, target={}",
+								info!(target: "tuic_out", "Received UDP packet: assoc={:#06x}, pkt={}, frag={}/{}, size={}, target={}",
 									assoc_id, pkt_id, frag_id + 1, frag_total, size, target);
 							} else {
-								info!(target: "[OUT]", "Received UDP fragment: assoc={:#06x}, pkt={}, frag={}/{}, size={} (no address - non-first fragment)",
+								info!(target: "tuic_out", "Received UDP fragment: assoc={:#06x}, pkt={}, frag={}/{}, size={} (no address - non-first fragment)",
 									assoc_id, pkt_id, frag_id + 1, frag_total, size);
 							}
 
@@ -208,23 +221,24 @@ impl TuicOutbound {
 								};
 
 							if let Some(packet) = complete_packet
-                                && let Err(e) = tuic_udp_stream.receive_packet(packet).await {
-									warn!(target: "[OUT]", "Failed to send packet to UDP session {:#06x}: {}", assoc_id, e);
+								&& let Err(e) = tuic_udp_stream.receive_packet(packet).await {
+									warn!(target: "tuic_out", "Failed to send packet to UDP session {:#06x}: {}", assoc_id, e);
 								}
 						} else {
-								warn!(target: "[OUT]", "Received UDP packet for unknown association {:#06x}", assoc_id);
+								warn!(target: "tuic_out", "Received UDP packet for unknown association {:#06x}", assoc_id);
 							}
 						} else {
-							warn!(target: "[OUT]", "Received non-Packet command in datagram: {:?}", cmd);
+							warn!(target: "tuic_out", "Received non-Packet command in datagram: {:?}", cmd);
 						}
 					}
 
 					Ok(_recv) = uni_rx.recv() => {
-						info!(target: "[OUT]", "Received uni-directional stream");
+						info!(target: "tuic_out", "Received uni-directional stream");
 					}
 				}
 			}
-		});
+		};
+		self.ctx.tasks.spawn(poll_task.in_current_span());
 
 		Ok(())
 	}
@@ -253,7 +267,7 @@ impl AbstractOutbound for TuicOutbound {
 		let cancel = self.token.child_token();
 		// Generate a new UDP association ID
 		let assoc_id = self.udp_assoc_counter.fetch_add(1, Ordering::SeqCst);
-		info!(target: "[OUT]", "Creating new UDP association: {:#06x}", assoc_id);
+		info!(target: "tuic_out", "Creating new UDP association: {:#06x}", assoc_id);
 
 		let connection = self.connection.clone();
 		let (receive_tx, receive_rx) = crossfire::mpmc::bounded_async(256);
@@ -267,35 +281,35 @@ impl AbstractOutbound for TuicOutbound {
 		let mut client_rx = client_stream.rx;
 		let client_tx = client_stream.tx;
 
-		self.ctx.tasks.spawn(async move {
+		let udp_task = async move {
 			loop {
 				tokio::select! {
 					_ = cancel_stream.cancelled() => {
-						info!(target: "[OUT]", "UDP stream sender for association {:#06x} cancelled", assoc_id);
+						info!(target: "tuic_out", "UDP stream sender for association {:#06x} cancelled", assoc_id);
 						break;
 					}
 
 					result = receive_rx.recv() => {
 						let packet = match result {
 							Err(e) => {
-								warn!(target: "[OUT]", "Error receiving packet from channel for association {:#06x}: {}", assoc_id, e);
+								warn!(target: "tuic_out", "Error receiving packet from channel for association {:#06x}: {}", assoc_id, e);
 								break;
 							}
 							Ok(packet) => packet,
 						};
 
 						if let Err(e) = client_tx.send(packet).await {
-							warn!(target: "[OUT]", "Failed to send UDP packet to local socket (assoc {:#06x}): {:?}", assoc_id, e);
+							warn!(target: "tuic_out", "Failed to send UDP packet to local socket (assoc {:#06x}): {:?}", assoc_id, e);
 							break;
 						} else {
-							info!(target: "[OUT]", "Received UDP packet forward to local (assoc {:#06x})", assoc_id);
+							info!(target: "tuic_out", "Received UDP packet forward to local (assoc {:#06x})", assoc_id);
 						}
 					}
 					// send queue
 					packet = client_rx.recv() => {
 						let packet = match packet {
 							None => {
-								warn!(target: "[OUT]", "Error receiving packet from channel for association {:#06x}: channel closed", assoc_id);
+								warn!(target: "tuic_out", "Error receiving packet from channel for association {:#06x}: channel closed", assoc_id);
 								break;
 							}
 							Some(packet) => packet,
@@ -304,9 +318,9 @@ impl AbstractOutbound for TuicOutbound {
 						// Send packet to remote via UDP stream
 						let payload_len = packet.payload.len();
 						if let Err(e) = tuic_stream.send_packet(packet).await {
-							warn!(target: "[OUT]", "Failed to send UDP packet to remote (assoc {:#06x}): {}", assoc_id, e);
+							warn!(target: "tuic_out", "Failed to send UDP packet to remote (assoc {:#06x}): {}", assoc_id, e);
 						} else {
-							info!(target: "[OUT]", "Sent UDP packet to remote ({} bytes, assoc {:#06x})", payload_len, assoc_id);
+							info!(target: "tuic_out", "Sent UDP packet to remote ({} bytes, assoc {:#06x})", payload_len, assoc_id);
 						}
 					}
 					_ = gc_interval.tick() => {
@@ -316,13 +330,14 @@ impl AbstractOutbound for TuicOutbound {
 				}
 			}
 			eyre::Ok(())
-		});
+		};
+		self.ctx.tasks.spawn(udp_task.in_current_span());
 
 		let cancel_healthy = self.ctx.token.clone();
 		loop {
 			tokio::select! {
 				_ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
-					info!(target: "[OUT]", "UDP handler for association {:#06x} active", assoc_id);
+					info!(target: "tuic_out", "UDP handler for association {:#06x} active", assoc_id);
 				}
 
 				_ = cancel_healthy.cancelled() => break,
@@ -331,7 +346,7 @@ impl AbstractOutbound for TuicOutbound {
 
 		// Clean up the UDP association before exiting
 		if let Err(err) = self.connection.drop_udp(assoc_id).await {
-			info!(target: "[OUT]", "Error dropping UDP association {:#06x}: {}", assoc_id, err);
+			info!(target: "tuic_out", "Error dropping UDP association {:#06x}: {}", assoc_id, err);
 		}
 
 		Ok(())

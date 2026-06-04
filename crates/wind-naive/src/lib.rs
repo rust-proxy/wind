@@ -16,9 +16,9 @@ use tokio::{
 	io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
 	sync::mpsc,
 };
-use tracing::Instrument;
+use tracing::{Instrument, info};
 use wind_core::{
-	AbstractOutbound, info,
+	AbstractOutbound,
 	tcp::AbstractTcpStream,
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
@@ -154,7 +154,7 @@ impl NaiveOutbound {
 		.await
 		.context("Spawn blocking for engine start failed")??;
 
-		info!(target: "[NAIVE]", "NaiveOutbound started, server={}", opts.server_address);
+		info!(target: "naive", "NaiveOutbound started, server={}", opts.server_address);
 
 		Ok(Self { client })
 	}
@@ -174,7 +174,7 @@ impl AbstractOutbound for NaiveOutbound {
 		let target_str = target_addr.to_string();
 		let client = self.client.clone();
 
-		info!(target: "[NAIVE:TCP]", "connecting to {target_str}");
+		info!(target: "naive_tcp", "connecting to {target_str}");
 
 		// Dial a CONNECT tunnel via the Cronet engine.
 		//
@@ -190,7 +190,7 @@ impl AbstractOutbound for NaiveOutbound {
 		.await
 		.context("Spawn blocking for dial failed")??;
 
-		info!(target: "[NAIVE:TCP]", "CONNECT tunnel established to {target_str}");
+		info!(target: "naive_tcp", "CONNECT tunnel established to {target_str}");
 
 		// Bridge the blocking NaiveConn to the async stream.
 		naive_async_bridge(naive_conn, stream).await
@@ -210,13 +210,16 @@ impl AbstractOutbound for NaiveOutbound {
 			let client = client.clone();
 			let payload_len = payload.len();
 
-			tokio::spawn(async move {
-				if let Err(e) = udp_tunnel_tx(client, &target_str, &payload).await {
-					tracing::warn!(target = %target_str, error = %e, "[NAIVE:UDP] tunnel failed");
-				} else {
-					info!(target = %target_str, bytes = payload_len, "[NAIVE:UDP] sent {payload_len} bytes via tunnel");
+			tokio::spawn(
+				async move {
+					if let Err(e) = udp_tunnel_tx(client, &target_str, &payload).await {
+						tracing::warn!(target = %target_str, error = %e, "[NAIVE:UDP] tunnel failed");
+					} else {
+						info!(target = %target_str, bytes = payload_len, "[NAIVE:UDP] sent {payload_len} bytes via tunnel");
+					}
 				}
-			});
+				.in_current_span(),
+			);
 		}
 
 		Ok(())
@@ -387,7 +390,7 @@ fn load_cronet(path: Option<String>) -> eyre::Result<()> {
 	for lib_path in &paths {
 		match unsafe { load_library(lib_path) } {
 			Ok(()) => {
-				info!(target: "[NAIVE]", "Loaded libcronet from {lib_path}");
+				info!(target: "naive", "Loaded libcronet from {lib_path}");
 				return Ok(());
 			}
 			Err(e) => {
@@ -396,7 +399,7 @@ fn load_cronet(path: Option<String>) -> eyre::Result<()> {
 				if msg.contains("already loaded") {
 					return Ok(());
 				}
-				tracing::debug!(target: "[NAIVE]", "libcronet not found at {lib_path}: {msg}");
+				tracing::debug!(target: "naive", "libcronet not found at {lib_path}: {msg}");
 			}
 		}
 	}
