@@ -127,10 +127,18 @@ pub async fn serve_udp_with_client(
 					// match the expected client. The expected client is either
 					// supplied by the caller (from the TCP control connection) or
 					// latched in on the first observed packet.
+					//
+					// The relay socket may be bound as IPv6 dual-stack (the
+					// default in `ext::udp_bind_random_port`), in which case an
+					// IPv4 client's source IP arrives as `::ffff:V4`. Normalise
+					// both sides to IPv4 before comparing so the check does not
+					// fail spuriously on V4-mapped V6 addresses.
 					let current = **source_addr_rx.load();
+					let observed_ip = unmap_v4_mapped(addr.ip());
 					match **expected_ip_rx.load() {
 						Some(ip) => {
-							if addr.ip() != ip {
+							let expected = unmap_v4_mapped(ip);
+							if observed_ip != expected {
 								wind_core::warn!(
 									target: "[UDP]",
 									"Dropping UDP datagram from unexpected source {} (expected client IP {})",
@@ -142,8 +150,8 @@ pub async fn serve_udp_with_client(
 						None => {
 							if current.port() == 0 {
 								// First packet — latch in this client.
-								expected_ip_rx.store(Arc::new(Some(addr.ip())));
-							} else if addr.ip() != current.ip() {
+								expected_ip_rx.store(Arc::new(Some(observed_ip)));
+							} else if observed_ip != unmap_v4_mapped(current.ip()) {
 								wind_core::warn!(
 									target: "[UDP]",
 									"Dropping UDP datagram from unexpected source {} (latched client IP {})",
@@ -221,5 +229,18 @@ fn target_addr_to_socket(t: &TargetAddr) -> SocketAddr {
 		TargetAddr::IPv4(ip, port) => SocketAddr::new((*ip).into(), *port),
 		TargetAddr::IPv6(ip, port) => SocketAddr::new((*ip).into(), *port),
 		TargetAddr::Domain(_, port) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), *port),
+	}
+}
+
+/// Unwrap an IPv4-mapped IPv6 address (`::ffff:V4`) back to IPv4 so that
+/// dual-stack relay sockets compare addresses on equal footing with caller-
+/// supplied IPv4 expectations.
+fn unmap_v4_mapped(ip: std::net::IpAddr) -> std::net::IpAddr {
+	match ip {
+		std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+			Some(v4) => std::net::IpAddr::V4(v4),
+			None => std::net::IpAddr::V6(v6),
+		},
+		v4 => v4,
 	}
 }

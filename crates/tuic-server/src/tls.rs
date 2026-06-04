@@ -120,18 +120,18 @@ async fn load_priv_key(key_path: &Path) -> eyre::Result<PrivateKeyDer<'static>> 
 		return Ok(key);
 	}
 
-	// 2. Not PEM. Previously the loader unconditionally wrapped any non-empty
-	//    blob as PKCS8 DER, so a random/binary file produced an opaque rustls
-	//    error far from the point of failure. Now we do a structural check
-	//    first: every accepted DER key encoding (PKCS8 PrivateKeyInfo, PKCS1
-	//    RSAPrivateKey, SEC1 ECPrivateKey) starts with an ASN.1 SEQUENCE
-	//    (tag 0x30) whose declared length covers the rest of the file. That
-	//    rejects text/garbage/truncated files cheaply while letting any valid
-	//    DER through to rustls for real parsing later.
+	// 2. Not PEM. Previously the loader unconditionally wrapped any non-empty blob
+	//    as PKCS8 DER, so a random/binary file produced an opaque rustls error far
+	//    from the point of failure. Now we do a structural check first: every
+	//    accepted DER key encoding (PKCS8 PrivateKeyInfo, PKCS1 RSAPrivateKey, SEC1
+	//    ECPrivateKey) starts with an ASN.1 SEQUENCE (tag 0x30) whose declared
+	//    length covers the rest of the file. That rejects text/garbage/truncated
+	//    files cheaply while letting any valid DER through to rustls for real
+	//    parsing later.
 	if !looks_like_der_sequence(&data) {
 		return Err(eyre::eyre!(
-			"Private key at {} is neither a recognized PEM (PKCS1/SEC1/PKCS8) key nor a valid DER ASN.1 SEQUENCE — \
-			 refusing to load arbitrary bytes as a PKCS8 key",
+			"Private key at {} is neither a recognized PEM (PKCS1/SEC1/PKCS8) key nor a valid DER ASN.1 SEQUENCE — refusing \
+			 to load arbitrary bytes as a PKCS8 key",
 			key_path.display()
 		));
 	}
@@ -347,6 +347,92 @@ mod tests {
 
 		let resolver_result = CertResolver::new(cert_file.path(), key_file.path(), Duration::from_secs(10)).await;
 		assert!(resolver_result.is_err());
+	}
+
+	// --- PR1: private-key loader hardening regression tests ----------------
+
+	#[tokio::test]
+	async fn test_load_priv_key_rejects_empty_file() {
+		let (_, key_file) = create_temp_cert_file(b"", b"").await;
+		let err = load_priv_key(key_file.path()).await.expect_err("empty file must error");
+		let msg = format!("{err:#}");
+		assert!(
+			msg.contains("Empty private key"),
+			"expected explicit empty-file error, got: {msg}"
+		);
+	}
+
+	#[tokio::test]
+	async fn test_load_priv_key_rejects_random_bytes() {
+		// 256 bytes of non-DER, non-PEM nonsense (first byte = 0xFF, not 0x30
+		// SEQUENCE). Previously this was silently wrapped as PKCS8 and failed later
+		// inside rustls with an opaque error far from the load site.
+		let mut garbage = vec![0u8; 256];
+		for (i, b) in garbage.iter_mut().enumerate() {
+			*b = (i as u8).wrapping_mul(31).wrapping_add(0x80);
+		}
+		let (_, key_file) = create_temp_cert_file(b"", &garbage).await;
+		let err = load_priv_key(key_file.path())
+			.await
+			.expect_err("random bytes must be rejected");
+		let msg = format!("{err:#}");
+		assert!(
+			msg.contains("neither a recognized PEM"),
+			"expected structural-rejection error, got: {msg}"
+		);
+	}
+
+	#[tokio::test]
+	async fn test_load_priv_key_rejects_text() {
+		// Looks like HTML / a log file / etc. — must NOT be wrapped as PKCS8.
+		let html = b"<html><body>not a private key, just an HTTP error page</body></html>";
+		let (_, key_file) = create_temp_cert_file(b"", html).await;
+		let err = load_priv_key(key_file.path())
+			.await
+			.expect_err("HTML content must be rejected");
+		let msg = format!("{err:#}");
+		assert!(
+			msg.contains("neither a recognized PEM"),
+			"expected structural-rejection error, got: {msg}"
+		);
+	}
+
+	#[tokio::test]
+	async fn test_load_priv_key_rejects_der_with_bogus_length() {
+		// Starts with 0x30 (SEQUENCE) but the declared long-form length far
+		// exceeds the buffer size: byte 1 = 0x82 means "next 2 bytes are the
+		// length", followed by 0xFF 0xFF (= 65535) but only ~10 bytes follow.
+		let bogus = vec![0x30, 0x82, 0xff, 0xff, 0x02, 0x01, 0x00, 0x03, 0x04, 0x05, 0x06];
+		let (_, key_file) = create_temp_cert_file(b"", &bogus).await;
+		let err = load_priv_key(key_file.path())
+			.await
+			.expect_err("DER with bogus length must be rejected");
+		let msg = format!("{err:#}");
+		assert!(
+			msg.contains("neither a recognized PEM"),
+			"expected structural-rejection error, got: {msg}"
+		);
+	}
+
+	#[test]
+	fn test_looks_like_der_sequence() {
+		// Too short.
+		assert!(!looks_like_der_sequence(&[]));
+		assert!(!looks_like_der_sequence(&[0x30]));
+		// Wrong tag.
+		assert!(!looks_like_der_sequence(&[0xff, 0x00]));
+		// Short-form, correct length.
+		assert!(looks_like_der_sequence(&[0x30, 0x03, 0x01, 0x02, 0x03]));
+		// Short-form, body smaller than declared.
+		assert!(!looks_like_der_sequence(&[0x30, 0x10, 0x01, 0x02]));
+		// Long-form 0x82, two-byte length.
+		let mut buf = vec![0x30, 0x82, 0x00, 0x05];
+		buf.extend_from_slice(&[1, 2, 3, 4, 5]);
+		assert!(looks_like_der_sequence(&buf));
+		// Long-form 0x82, declared length massively larger than buffer.
+		assert!(!looks_like_der_sequence(&[0x30, 0x82, 0xff, 0xff, 0x01]));
+		// Tolerate one trailing newline byte (some keystores append \n).
+		assert!(looks_like_der_sequence(&[0x30, 0x03, 0x01, 0x02, 0x03, b'\n']));
 	}
 
 	#[test]

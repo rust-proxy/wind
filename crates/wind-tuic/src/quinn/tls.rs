@@ -90,3 +90,79 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 		self.0.signature_verification_algorithms.supported_schemes()
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PR1 regression tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+	use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+	use uuid::Uuid;
+
+	use super::*;
+	use crate::quinn::outbound::TuicOutboundOpts;
+
+	fn install_provider() {
+		// Idempotent — install_default returns Err once the global is set.
+		#[cfg(feature = "aws-lc-rs")]
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		#[cfg(feature = "ring")]
+		let _ = rustls::crypto::ring::default_provider().install_default();
+	}
+
+	fn opts_with(alpn: Vec<String>) -> TuicOutboundOpts {
+		TuicOutboundOpts {
+			peer_addr: "127.0.0.1:9443".parse::<SocketAddr>().unwrap(),
+			sni: "localhost".into(),
+			auth: (Uuid::nil(), Arc::<[u8]>::from(&[][..])),
+			zero_rtt_handshake: false,
+			heartbeat: Duration::from_secs(10),
+			gc_interval: Duration::from_secs(10),
+			gc_lifetime: Duration::from_secs(10),
+			// Use the skip-verify path so the test does not depend on a working
+			// platform-verifier (which may not have access to the system trust
+			// store in restricted CI environments). The ALPN logic is shared
+			// between both branches.
+			skip_cert_verify: true,
+			alpn,
+		}
+	}
+
+	#[test]
+	fn alpn_honours_caller_supplied_list() {
+		install_provider();
+		let opts = opts_with(vec!["tuic".into(), "h3".into()]);
+		let cfg = tls_config("localhost", &opts).expect("tls_config must succeed");
+		assert_eq!(
+			cfg.alpn_protocols,
+			vec![b"tuic".to_vec(), b"h3".to_vec()],
+			"ALPN list must be taken from opts.alpn verbatim"
+		);
+	}
+
+	#[test]
+	fn alpn_falls_back_to_h3_when_empty() {
+		install_provider();
+		let opts = opts_with(Vec::new());
+		let cfg = tls_config("localhost", &opts).expect("tls_config must succeed");
+		assert_eq!(
+			cfg.alpn_protocols,
+			vec![b"h3".to_vec()],
+			"empty opts.alpn must fall back to a single h3 entry"
+		);
+	}
+
+	#[test]
+	fn alpn_does_not_silently_inject_h3_when_caller_specified_something_else() {
+		install_provider();
+		let opts = opts_with(vec!["my-protocol".into()]);
+		let cfg = tls_config("localhost", &opts).expect("tls_config must succeed");
+		assert_eq!(cfg.alpn_protocols, vec![b"my-protocol".to_vec()]);
+		assert!(
+			!cfg.alpn_protocols.contains(&b"h3".to_vec()),
+			"hardcoded \"h3\" must no longer override the caller's ALPN choice"
+		);
+	}
+}

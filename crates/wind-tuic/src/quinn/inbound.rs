@@ -202,14 +202,13 @@ impl TuicInbound {
 			// arriving as 0-RTT data are intrinsically replayable). We therefore:
 			//   * cap `max_early_data_size` so a single TLS context cannot be used to
 			//     replay an unbounded volume of application data, and
-			//   * keep `send_half_rtt_data = false` so the server does not emit data
-			//     before the client's Finished is verified.
+			//   * keep `send_half_rtt_data = false` so the server does not emit data before
+			//     the client's Finished is verified.
 			//
 			// Operators wanting strict replay resistance should leave `zero_rtt`
 			// disabled until application-layer nonce/anti-replay is implemented.
 			warn!(
-				"zero_rtt=true: 0-RTT early data is accepted (cap {} B). \
-				 TUIC has no application-layer replay protection — \
+				"zero_rtt=true: 0-RTT early data is accepted (cap {} B). TUIC has no application-layer replay protection — \
 				 Connect/Packet commands sent as 0-RTT can be replayed.",
 				16 * 1024
 			);
