@@ -351,4 +351,243 @@ mod tests {
 		assert!(read_result.unwrap().is_ok(), "read_exact failed for large payload");
 		assert_eq!(received, payload, "Large payload echo must match");
 	}
+
+	// =========================================================================
+	// PR2 verification: per-fragment INFO-level logs must stay demoted
+	// =========================================================================
+
+	/// PR2 regression test for log-level noise on the UDP fragmentation path.
+	///
+	/// Before PR2 `crates/wind-tuic/src/proto/udp_stream.rs` emitted
+	/// `"Fragmentation params: ..."` once per fragmented send and
+	/// `"Sending fragment N/M: K bytes"` once per fragment, both at
+	/// `tracing::Level::INFO`. On a busy UDP path this was extremely noisy
+	/// (allocation + formatting + I/O per packet) and obscured the genuine
+	/// state-change events operators care about.
+	///
+	/// PR2 demoted both call sites to `tracing::Level::DEBUG`. This test:
+	///
+	///  1. Installs a global tracing subscriber that buffers every event whose
+	///     level is `INFO` or coarser into a process-wide vector (other tests
+	///     do not install a subscriber, so this is the only one in play, but
+	///     even if they did the assertions below are existence-checks against
+	///     specific format strings that don't appear elsewhere in the
+	///     workspace, so cross-test bleed is harmless).
+	///  2. Drives a real UDP roundtrip through tuic-client → tuic-server with a
+	///     payload large enough to FORCE fragmentation (~32 KiB → ~28 fragments
+	///     at the 1200-byte default datagram size).
+	///  3. Asserts no captured `INFO` event contains either of the demoted
+	///     format-string prefixes.
+	///
+	/// If somebody re-promotes one of those call sites to `info!`, this test
+	/// fails with the offending captured line.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn test_pr2_fragmented_udp_emits_no_info_log_noise() {
+		// (1) Install the capturing subscriber — process-wide, idempotent.
+		log_capture::install();
+
+		// (2) Spin up a UDP echo server on loopback.
+		let echo = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let echo_addr = echo.local_addr().unwrap();
+		tokio::spawn(async move {
+			let mut buf = vec![0u8; 65536];
+			loop {
+				match echo.recv_from(&mut buf).await {
+					Ok((n, from)) => {
+						let _ = echo.send_to(&buf[..n], from).await;
+					}
+					Err(_) => break,
+				}
+			}
+		});
+
+		// (3) Bring up the TUIC server + client.
+		let setup = setup_tuic_server().await.expect("setup tuic server");
+		let client = connect_tuic_client(&setup).await.expect("connect tuic client");
+
+		// (4) Build a wind-core UdpStream pair: the test owns one side, the
+		// TUIC outbound owns the other.
+		let (tx_to_client, rx_at_client) = tokio::sync::mpsc::channel::<UdpPacket>(32);
+		let (tx_to_test, mut rx_at_test) = tokio::sync::mpsc::channel::<UdpPacket>(32);
+
+		let stream_for_client = UdpStream {
+			tx: tx_to_test,
+			rx: rx_at_client,
+		};
+		let client_for_udp = client.clone();
+		tokio::spawn(async move {
+			let _ = client_for_udp.handle_udp(stream_for_client, None::<TuicOutbound>).await;
+		});
+
+		// Snapshot the captured-log buffer count BEFORE we generate traffic so
+		// we only assert on events the test itself caused.
+		let baseline = log_capture::snapshot_len();
+
+		// (5) Push a 32 KiB UDP packet that MUST fragment.
+		let payload: Bytes = (0u8..=255).cycle().take(32 * 1024).collect::<Vec<u8>>().into();
+		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
+		tx_to_client
+			.send(UdpPacket {
+				source: None,
+				target: target.clone(),
+				payload: payload.clone(),
+			})
+			.await
+			.expect("send UDP packet into TUIC outbound");
+
+		// (6) Drain the reassembled echo so we know fragmentation actually ran
+		// on both sides before we examine logs.
+		let recv_result = tokio::time::timeout(Duration::from_secs(15), rx_at_test.recv()).await;
+		let echoed = recv_result
+			.expect("echo timed out — fragmentation roundtrip did not complete in time")
+			.expect("upstream channel closed before echo arrived");
+		assert_eq!(echoed.payload.len(), payload.len(), "echoed payload length mismatch");
+		assert_eq!(echoed.payload, payload, "echoed payload bytes mismatch");
+
+		// (7) Give the sender side a moment to flush any pending log events
+		// from the spawned task pool.
+		tokio::time::sleep(Duration::from_millis(50)).await;
+
+		// (8) Inspect every INFO-level event captured AFTER the baseline.
+		let captured = log_capture::since(baseline);
+		let info_events: Vec<&log_capture::Captured> = captured.iter().filter(|e| e.level == tracing::Level::INFO).collect();
+		assert!(
+			!info_events.is_empty(),
+			"sanity check: at least some INFO events should fire during the UDP roundtrip"
+		);
+
+		// The two format-string fragments below come from
+		// `crates/wind-tuic/src/proto/udp_stream.rs`. Both call sites were
+		// demoted to `debug!` in PR2; either of them appearing at INFO again
+		// is a regression.
+		for forbidden in ["Fragmentation params", "Sending fragment "] {
+			let hit = info_events.iter().find(|e| e.message.contains(forbidden));
+			assert!(
+				hit.is_none(),
+				"PR2 demoted log '{forbidden}' is back at INFO level — found: {:?}",
+				hit.unwrap().message,
+			);
+		}
+
+		// Belt and braces: assert these strings appear AT ALL in the captured
+		// buffer at level DEBUG — proving fragmentation actually ran and our
+		// capture didn't simply drop everything. The capture layer filters at
+		// TRACE so DEBUG events ARE recorded.
+		let debug_hits = captured
+			.iter()
+			.filter(|e| e.level <= tracing::Level::DEBUG)
+			.filter(|e| e.message.contains("Sending fragment ") || e.message.contains("Fragmentation params"))
+			.count();
+		assert!(
+			debug_hits > 0,
+			"sanity check: at least one fragment-debug event should have been recorded — either the workload didn't actually \
+			 fragment or the capture layer is broken"
+		);
+	}
+}
+
+// ============================================================================
+// Tracing capture layer (test-only)
+// ============================================================================
+
+#[cfg(test)]
+mod log_capture {
+	use std::{
+		fmt::Write,
+		sync::{Mutex, OnceLock},
+	};
+
+	use tracing::{Event, Level, Subscriber};
+	use tracing_subscriber::{layer::Context, prelude::*};
+
+	/// A captured event from the process-wide tracing buffer.
+	#[derive(Debug, Clone)]
+	pub struct Captured {
+		pub level: Level,
+		/// The `tracing::target` (i.e. the `target:` directive in the macro).
+		/// Recorded for forward-compatibility with assertions that want to
+		/// scope a check to a specific subsystem; not consumed by the current
+		/// test set, hence the lint silencer.
+		#[allow(dead_code)]
+		pub target: String,
+		pub message: String,
+	}
+
+	static BUFFER: OnceLock<Mutex<Vec<Captured>>> = OnceLock::new();
+	static INSTALLED: OnceLock<()> = OnceLock::new();
+
+	fn buf() -> &'static Mutex<Vec<Captured>> {
+		BUFFER.get_or_init(|| Mutex::new(Vec::with_capacity(1024)))
+	}
+
+	/// Install the global capturing subscriber. Idempotent — repeated calls
+	/// are no-ops, so multiple tests can call this without racing.
+	pub fn install() {
+		INSTALLED.get_or_init(|| {
+			let layer = CaptureLayer;
+			// Best-effort: if some other test has already installed a global
+			// dispatcher (e.g. via `tracing_subscriber::fmt::init`), this
+			// returns Err and we accept it; the assertions in this test
+			// degrade gracefully because the buffer simply stays empty and
+			// the "must have at least N events" sanity check trips first
+			// with a clear error rather than producing a false pass.
+			let _ = tracing_subscriber::registry().with(layer).try_init();
+		});
+	}
+
+	/// Snapshot the current buffer length. Use to ignore events recorded by
+	/// earlier tests / setup work.
+	pub fn snapshot_len() -> usize {
+		buf().lock().unwrap().len()
+	}
+
+	/// Return every event recorded at index `>= since`.
+	pub fn since(since: usize) -> Vec<Captured> {
+		let g = buf().lock().unwrap();
+		g.iter().skip(since).cloned().collect()
+	}
+
+	struct CaptureLayer;
+
+	impl<S: Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
+		fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+			let metadata = event.metadata();
+			let mut message = String::new();
+			let mut visitor = MessageVisitor(&mut message);
+			event.record(&mut visitor);
+			if message.is_empty() {
+				// Some events only have a "message" field; if the visitor
+				// missed it (e.g. structured-only event), fall back to the
+				// metadata name so we at least have something searchable.
+				message.push_str(metadata.name());
+			}
+			let _ = buf().lock().map(|mut g| {
+				g.push(Captured {
+					level: *metadata.level(),
+					target: metadata.target().to_string(),
+					message,
+				});
+			});
+		}
+	}
+
+	struct MessageVisitor<'a>(&'a mut String);
+
+	impl<'a> tracing::field::Visit for MessageVisitor<'a> {
+		fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+			if field.name() == "message" {
+				let _ = write!(self.0, "{value:?}");
+			} else {
+				let _ = write!(self.0, " {}={:?}", field.name(), value);
+			}
+		}
+
+		fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+			if field.name() == "message" {
+				self.0.push_str(value);
+			} else {
+				let _ = write!(self.0, " {}={}", field.name(), value);
+			}
+		}
+	}
 }
