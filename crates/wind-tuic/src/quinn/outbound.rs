@@ -176,8 +176,20 @@ impl TuicOutbound {
 								}
 							};
 
-							// Extract payload
-							let payload = buf.copy_to_bytes(size as usize);
+							// Extract payload. `size` is attacker-controlled (it comes straight
+							// from the wire); `copy_to_bytes` panics when `size > buf.remaining()`,
+							// so a malicious peer could crash the outbound poll task by
+							// over-declaring it. Validate first and bail out cleanly instead.
+							let size = size as usize;
+							if buf.remaining() < size {
+								warn!(
+									target: "[OUT]",
+									"Packet command claims {} bytes of payload but only {} remain — dropping",
+									size, buf.remaining()
+								);
+								continue;
+							}
+							let payload = buf.copy_to_bytes(size);
 
 							// Convert address to TargetAddr and handle logging
 							let (target, has_address) = match crate::proto::address_to_target(addr) {
