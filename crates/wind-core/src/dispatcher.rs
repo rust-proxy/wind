@@ -64,11 +64,7 @@ pub trait Router: Send + Sync + 'static {
 	///
 	/// * `target` – the destination address as reported by the inbound.
 	/// * `is_tcp`  – `true` for TCP streams, `false` for UDP streams.
-	fn route(
-		&self,
-		target: &TargetAddr,
-		is_tcp: bool,
-	) -> impl Future<Output = eyre::Result<RouteAction>> + Send;
+	fn route(&self, target: &TargetAddr, is_tcp: bool) -> impl Future<Output = eyre::Result<RouteAction>> + Send;
 }
 
 // ============================================================================
@@ -87,11 +83,7 @@ pub trait OutboundAction: Send + Sync + 'static {
 	/// The stream is boxed and `'static` so it can be stored or sent across
 	/// tasks.  All concrete `AbstractTcpStream` implementations (owned
 	/// `TcpStream`, `Socks5Stream<TcpStream>`, …) satisfy this bound.
-	async fn handle_tcp(
-		&self,
-		target: TargetAddr,
-		stream: Box<dyn AbstractTcpStream + 'static>,
-	) -> eyre::Result<()>;
+	async fn handle_tcp(&self, target: TargetAddr, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()>;
 
 	/// Handle an inbound UDP session.
 	async fn handle_udp(&self, stream: UdpStream) -> eyre::Result<()>;
@@ -438,11 +430,7 @@ mod tests {
 
 	#[async_trait]
 	impl OutboundAction for MockHandler {
-		async fn handle_tcp(
-			&self,
-			_target: TargetAddr,
-			_stream: Box<dyn AbstractTcpStream + 'static>,
-		) -> eyre::Result<()> {
+		async fn handle_tcp(&self, _target: TargetAddr, _stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 			self.tcp_called.store(true, Ordering::Relaxed);
 			Ok(())
 		}
