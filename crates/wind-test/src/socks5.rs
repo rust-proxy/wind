@@ -606,7 +606,10 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 
 	// Initialize inbound servers
 	let tuic_inbound = Arc::new(wind_tuic::quinn::inbound::TuicInbound::new(ctx.clone(), tuic_opts));
-	let socks_inbound = Arc::new(wind_socks::inbound::SocksInbound::new(config.socks_opt, ctx.token.child_token()).await);
+	let socks_inbound = Arc::new(wind_socks::inbound::SocksInbound::new(
+		config.socks_opt,
+		ctx.token.child_token(),
+	));
 
 	let manager = Arc::new(TestManager {
 		socks_inbound: socks_inbound.clone(),

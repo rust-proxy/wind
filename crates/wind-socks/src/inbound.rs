@@ -78,7 +78,9 @@ impl AbstractInbound for SocksInbound {
 }
 
 impl SocksInbound {
-	pub async fn new(opts: SocksInboundOpt, cancel: CancellationToken) -> Self {
+	// Pure plumbing — no `await` was reached inside. Drop the redundant
+	// `async`. Callers update from `.await` to plain call.
+	pub fn new(opts: SocksInboundOpt, cancel: CancellationToken) -> Self {
 		Self {
 			opts: Arc::new(opts),
 			cancel,

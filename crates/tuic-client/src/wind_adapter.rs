@@ -36,10 +36,40 @@ impl TuicOutboundAdapter {
 		// Convert password to Arc<[u8]>
 		let password: Arc<[u8]> = relay.password.clone();
 
+		// Pick the SNI to send during TLS handshake.
+		//
+		// Defaulting to `relay.server.0` is sensible when the server field is
+		// a hostname, but if it's an IP literal we end up announcing the IP
+		// in the SNI extension — most rustls/webpki verifiers reject that as
+		// a non-hostname SNI, and even when they don't, the SNI value carries
+		// no integrity benefit. Warn loudly so operators notice the
+		// wrong configuration; require an explicit `sni` for IP-literal
+		// servers and use a placeholder otherwise so the connection still
+		// attempts to handshake (and rustls will surface the bad-SNI error
+		// in its own message).
+		let sni = match relay.sni.clone() {
+			Some(s) => s,
+			None => {
+				if relay.server.0.parse::<std::net::IpAddr>().is_ok() {
+					tracing::warn!(
+						"relay server `{}` is an IP literal but no `sni` was configured; TLS verification will likely fail. \
+						 Set `sni = \"<hostname>\"` in the relay config to fix.",
+						relay.server.0,
+					);
+					// rustls accepts "invalid" only if the verifier accepts it
+					// — for the skip-verify path this is harmless; for the
+					// real path the connection will fail with a clear error.
+					"invalid.sni.placeholder".to_string()
+				} else {
+					relay.server.0.clone()
+				}
+			}
+		};
+
 		// Create wind-tuic outbound options
 		let opts = TuicOutboundOpts {
 			peer_addr: server_addr,
-			sni: relay.sni.unwrap_or_else(|| relay.server.0.clone()),
+			sni,
 			auth: (relay.uuid, password),
 			zero_rtt_handshake: relay.zero_rtt_handshake,
 			heartbeat: relay.heartbeat,

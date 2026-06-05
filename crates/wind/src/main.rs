@@ -82,16 +82,20 @@ mod log;
 async fn main() -> eyre::Result<()> {
 	log::init_log(Level::TRACE)?;
 	info!(target: "wind_main", "Wind starting");
+	// Use clap's own `Error::exit()` so version/help requests go to stdout
+	// with exit code 0 and ACTUAL errors go to stderr with a non-zero exit
+	// code. The previous `println!("{err:#}"); return Ok(())` lumped both
+	// together: real argument errors disappeared into stdout with exit 0,
+	// hiding misconfigurations from CI and shell pipelines.
 	let cli = match Cli::try_parse() {
 		Ok(v) => v,
-		Err(err) => {
-			println!("{:#}", err);
-			return Ok(());
-		}
+		Err(err) => err.exit(),
 	};
 
 	if cli.version {
-		const VER: &str = match option_env!("WIND_OVERRIVE_VERSION") {
+		// Allow build-time override via `WIND_OVERRIDE_VERSION` (e.g. nightly
+		// builds stamping a dated SHA).
+		const VER: &str = match option_env!("WIND_OVERRIDE_VERSION") {
 			Some(v) => v,
 			None => env!("CARGO_PKG_VERSION"),
 		};
@@ -183,7 +187,7 @@ async fn start_inbound(
 	match ib.opts {
 		InboundOpts::Socks(opts) => {
 			let addr = opts.listen_addr;
-			let inbound = SocksInbound::new(opts, ctx.token.child_token()).await;
+			let inbound = SocksInbound::new(opts, ctx.token.child_token());
 			let handle = InboundHandle::Socks(inbound);
 
 			let mgr = Arc::new(Manager {

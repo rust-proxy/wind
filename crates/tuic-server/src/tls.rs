@@ -235,7 +235,6 @@ mod tests {
 			SanType::IpAddress("127.0.0.1".parse()?),
 		];
 		let key_pair = KeyPair::generate()?;
-		key_pair.serialize_der();
 
 		let cert = params.self_signed(&key_pair)?;
 

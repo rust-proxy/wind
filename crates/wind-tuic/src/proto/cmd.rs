@@ -93,22 +93,22 @@ impl Encoder<Command> for CmdCodec {
 			}
 			Command::Connect => {}
 			Command::Packet {
-				assoc_id: assos_id,
+				assoc_id,
 				pkt_id,
 				frag_total,
 				frag_id,
 				size,
 			} => {
 				dst.reserve(8);
-				dst.put_u16(assos_id);
+				dst.put_u16(assoc_id);
 				dst.put_u16(pkt_id);
 				dst.put_u8(frag_total);
 				dst.put_u8(frag_id);
 				dst.put_u16(size);
 			}
-			Command::Dissociate { assoc_id: assos_id } => {
+			Command::Dissociate { assoc_id } => {
 				dst.reserve(2);
-				dst.put_u16(assos_id);
+				dst.put_u16(assoc_id);
 			}
 			Command::Heartbeat => {}
 		}

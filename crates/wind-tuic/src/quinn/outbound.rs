@@ -48,13 +48,18 @@ impl TuicOutbound {
 		let peer_addr = opts.peer_addr;
 		let server_name = opts.sni.clone();
 
-		// TODO move to top-level initialization
-		{
+		// Install the rustls default crypto provider EXACTLY ONCE per process.
+		// `install_default` returns `Err` after the first call (the global is
+		// already set), which we previously swallowed via `let _ = ...` on
+		// every single `TuicOutbound::new`. `OnceLock::get_or_init` is the
+		// canonical race-free single-init primitive.
+		static PROVIDER_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+		PROVIDER_INSTALLED.get_or_init(|| {
 			#[cfg(feature = "aws-lc-rs")]
 			let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 			#[cfg(feature = "ring")]
 			let _ = rustls::crypto::ring::default_provider().install_default();
-		}
+		});
 		info!(target: "tuic_out", "Creating a new outbound");
 		let client_config = {
 			let tls_config = super::tls::tls_config(&server_name, &opts)?;

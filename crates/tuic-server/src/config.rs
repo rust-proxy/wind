@@ -1671,8 +1671,11 @@ mod tests {
 		// Note: This test doesn't actually set env vars, just tests the structure
 		let env_state = EnvState::from_system();
 
-		// Should not panic and return a valid EnvState
-		assert!(env_state.tuic_config_format.is_none() || env_state.tuic_config_format.is_some());
+		// `from_system` must not panic. There is no value we can usefully
+		// assert about `tuic_config_format` here without setting up env
+		// vars first, so just keep `env_state` alive to confirm it
+		// constructs.
+		let _ = env_state;
 	}
 
 	#[tokio::test]

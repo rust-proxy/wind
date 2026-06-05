@@ -8,12 +8,8 @@ use std::{
 };
 
 use bytes::Bytes;
-use once_cell::sync::OnceCell;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use tokio::{
-	net::{TcpListener, UdpSocket},
-	sync::RwLock as AsyncRwLock,
-};
+use tokio::net::{TcpListener, UdpSocket};
 use tracing::{Instrument, debug, info, warn};
 use wind_core::{
 	AbstractOutbound,
@@ -27,8 +23,6 @@ use crate::{
 	wind_adapter,
 };
 
-// Global UDP forward session registry
-pub static UDP_SESSIONS: OnceCell<AsyncRwLock<HashMap<u16, ForwardUdpSession>>> = OnceCell::new();
 static NEXT_ASSOC_ID: AtomicU16 = AtomicU16::new(0);
 
 fn next_assoc_id() -> u16 {
@@ -36,39 +30,13 @@ fn next_assoc_id() -> u16 {
 	0x8000 | (NEXT_ASSOC_ID.fetch_add(1, Ordering::Relaxed) & 0x7fff)
 }
 
-#[derive(Clone)]
-pub struct ForwardUdpSession {
-	socket: Arc<UdpSocket>,
-	src_addr: SocketAddr,
-	assoc_id: u16,
-}
-
-impl ForwardUdpSession {
-	pub fn new(socket: Arc<UdpSocket>, src_addr: SocketAddr, assoc_id: u16) -> Self {
-		Self {
-			socket,
-			src_addr,
-			assoc_id,
-		}
-	}
-
-	pub async fn send(&self, pkt: Bytes) -> Result<(), Error> {
-		if let Err(err) = self.socket.send_to(&pkt, self.src_addr).await {
-			warn!(
-				"[forward-udp] [{assoc:#06x}] failed sending packet to {dst}: {err}",
-				assoc = self.assoc_id,
-				dst = self.src_addr,
-			);
-			return Err(Error::Io(err));
-		}
-		Ok(())
-	}
-}
+// NOTE: a global `UDP_SESSIONS: HashMap<assoc_id, ForwardUdpSession>` once
+// existed here; it was being written (insert / remove) by this file but
+// never read by anyone — pure dead code that just took locks on the UDP
+// hot path. The local `sessions: HashMap<SocketAddr, UdpForwardSession>`
+// in `run_udp_forwarder` is the only routing table in use.
 
 pub async fn start(tcp: Vec<TcpForward>, udp: Vec<UdpForward>) {
-	// Init UDP session map
-	let _ = UDP_SESSIONS.set(AsyncRwLock::new(HashMap::new()));
-
 	for entry in tcp {
 		tokio::spawn(run_tcp_forwarder(entry));
 	}
@@ -85,7 +53,8 @@ async fn run_tcp_forwarder(entry: TcpForward) {
 			return;
 		}
 	};
-	warn!(
+	// Normal startup info — `warn!` here was startling on every launch.
+	info!(
 		"[forward-tcp] listening on {listen} -> {remote:?}",
 		listen = listener.local_addr().unwrap(),
 		remote = entry.remote
@@ -161,7 +130,8 @@ async fn run_udp_forwarder(entry: UdpForward) {
 		}
 	};
 	let socket = Arc::new(socket);
-	warn!(
+	// Normal startup info — `warn!` here was startling on every launch.
+	info!(
 		"[forward-udp] listening on {listen} -> {remote:?} timeout={timeout:?}",
 		listen = entry.listen,
 		remote = entry.remote,
@@ -195,14 +165,6 @@ async fn run_udp_forwarder(entry: UdpForward) {
 						let (tx_to_out, rx_from_local) = tokio::sync::mpsc::channel::<UdpPacket>(64);
 						let (tx_to_local, mut rx_from_out) = tokio::sync::mpsc::channel::<UdpPacket>(64);
 						let udp_stream = UdpStream { tx: tx_to_local, rx: rx_from_local };
-
-						UDP_SESSIONS
-							.get()
-							.map(|s| s.try_write().map(|mut w| {
-								w.insert(assoc_id, ForwardUdpSession::new(socket.clone(), src_addr, assoc_id));
-							}))
-							.and_then(|res| res.ok())
-							.unwrap_or(());
 
 						// Reply bridge: take packets coming back from the outbound
 						// and write them to the original src_addr.
@@ -253,9 +215,6 @@ async fn run_udp_forwarder(entry: UdpForward) {
 						Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
 							debug!("[forward-udp] [{assoc_id:#06x}] outbound closed; removing session for {src_addr}");
 							sessions.remove(&src_addr);
-							if let Some(reg) = UDP_SESSIONS.get() {
-								let _ = reg.try_write().map(|mut w| w.remove(&assoc_id));
-							}
 						}
 					}
 				}
@@ -272,9 +231,6 @@ async fn run_udp_forwarder(entry: UdpForward) {
 							"[forward-udp] [{assoc:#06x}] idle timeout; dropping session for {src_addr}",
 							assoc = s.assoc_id
 						);
-						if let Some(reg) = UDP_SESSIONS.get() {
-							let _ = reg.try_write().map(|mut w| w.remove(&s.assoc_id));
-						}
 						false
 					} else {
 						true

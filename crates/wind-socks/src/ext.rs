@@ -84,7 +84,13 @@ where
 	let tcp_fut = wait_on_tcp(&mut inner).map_err(Error::from);
 
 	match try_join!(udp_fut, tcp_fut) {
-		Ok(_) => warn!("unreachable"),
+		Ok(_) => {
+			// `try_join!` only reaches this arm if BOTH futures complete with
+			// `Ok`. `wait_on_tcp` only returns on EOF, and `transfer` returns
+			// on the upstream channel closing — both are legitimate clean
+			// shutdowns, not "unreachable" anomalies.
+			debug!("SOCKS5 UDP proxy completed cleanly")
+		}
 		Err(Error::Socks {
 			source: SocksServerError::EOF,
 			backtrace: _,

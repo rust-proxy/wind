@@ -1,6 +1,6 @@
 //! Utility functions and types for wind-tuiche
 
-use std::{io, time::Duration};
+use std::time::Duration;
 
 /// Congestion control algorithm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -82,30 +82,9 @@ pub struct ConnectionStats {
 	pub packets_retransmitted: u64,
 }
 
-/// Error types for wind-tuiche
-#[derive(Debug, thiserror::Error)]
-pub enum QuicheError {
-	#[error("Protocol error: {0}")]
-	Protocol(String),
-
-	#[error("TLS error: {0}")]
-	Tls(String),
-
-	#[error("IO error: {0}")]
-	Io(#[from] io::Error),
-
-	#[error("Configuration error: {0}")]
-	Config(String),
-
-	#[error("Connection error: {0}")]
-	Connection(String),
-
-	#[error("Timeout: {0}")]
-	Timeout(String),
-
-	#[error("Authentication error: {0}")]
-	Auth(String),
-}
-
-/// Result type for quiche operations
-pub type QuicheResult<T> = Result<T, QuicheError>;
+// NOTE: `QuicheError` and `QuicheResult` used to live here. Every variant
+// of `QuicheError` was unconstructed and the type was unused anywhere in
+// the workspace — the whole quiche subsystem is currently a placeholder
+// (see review findings on `TuicheInbound::listen` / `TuicheOutbound`).
+// Re-add either type when the implementation actually surfaces structured
+// errors.

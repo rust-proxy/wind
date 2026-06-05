@@ -4708,6 +4708,7 @@ dependencies = [
 name = "wind-base"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "bytes",
  "eyre",
  "tokio",
@@ -4719,6 +4720,7 @@ dependencies = [
 name = "wind-core"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "bytes",
  "eyre",
  "futures",
@@ -4768,6 +4770,7 @@ name = "wind-socks"
 version = "0.1.1"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "bytes",
  "eyre",
  "fast-socks5",
