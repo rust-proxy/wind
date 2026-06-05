@@ -3,11 +3,11 @@ use std::{
 	sync::Arc,
 };
 
+use async_trait::async_trait;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tracing::Instrument;
 use wind_core::{
 	OutboundAction,
-	dispatcher::BoxFuture,
 	resolve::Resolver,
 	tcp::AbstractTcpStream,
 	types::TargetAddr,
@@ -36,25 +36,27 @@ impl DirectOutbound {
 	}
 }
 
+#[async_trait]
 impl OutboundAction for DirectOutbound {
-	fn handle_tcp<'a>(&'a self, target: TargetAddr, mut stream: Box<dyn AbstractTcpStream>) -> BoxFuture<'a, eyre::Result<()>> {
+	async fn handle_tcp(&self, target: TargetAddr, mut stream: Box<dyn AbstractTcpStream>) -> eyre::Result<()> {
 		let span = tracing::debug_span!("direct_tcp", target = %target);
-		Box::pin(
-			async move {
-				let target_sa = resolve_target(&target, self.resolver.as_ref()).await?;
-				let mut target_stream = connect_direct_tcp(target_sa, &self.opts).await?;
-				if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut target_stream).await {
-					tracing::debug!(error = %e, "direct copy_bidirectional ended");
-				}
-				Ok(())
+		async move {
+			let target_sa = resolve_target(&target, self.resolver.as_ref()).await?;
+			let mut target_stream = connect_direct_tcp(target_sa, &self.opts).await?;
+			if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut target_stream).await {
+				tracing::debug!(error = %e, "direct copy_bidirectional ended");
 			}
-			.instrument(span),
-		)
+			Ok(())
+		}
+		.instrument(span)
+		.await
 	}
 
-	fn handle_udp<'a>(&'a self, udp_stream: UdpStream) -> BoxFuture<'a, eyre::Result<()>> {
+	async fn handle_udp(&self, udp_stream: UdpStream) -> eyre::Result<()> {
 		let span = tracing::debug_span!("direct_udp");
-		Box::pin(relay_udp_direct(self.opts.clone(), self.resolver.clone(), udp_stream).instrument(span))
+		relay_udp_direct(self.opts.clone(), self.resolver.clone(), udp_stream)
+			.instrument(span)
+			.await
 	}
 }
 

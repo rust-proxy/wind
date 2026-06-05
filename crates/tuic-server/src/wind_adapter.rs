@@ -32,7 +32,6 @@ use wind_base::{
 };
 use wind_core::{
 	AclRouter, AppContext, Dispatcher, OutboundAction, RouteAction, Router, SystemResolver,
-	dispatcher::BoxFuture,
 	resolve::Resolver,
 	rule::Rule,
 	types::TargetAddr,
@@ -119,9 +118,9 @@ impl TuicRouter {
 }
 
 impl Router for TuicRouter {
-	fn route<'a>(&'a self, target: &'a TargetAddr, is_tcp: bool) -> BoxFuture<'a, eyre::Result<RouteAction>> {
+	async fn route(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction> {
 		let span = tracing::debug_span!("route", target = %target, proto = if is_tcp { "tcp" } else { "udp" });
-		Box::pin(self.do_route(target, is_tcp).instrument(span))
+		self.do_route(target, is_tcp).instrument(span).await
 	}
 }
 
