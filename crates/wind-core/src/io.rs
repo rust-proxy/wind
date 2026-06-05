@@ -1,60 +1,24 @@
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
-const BUFFER_SIZE: usize = 16 * 1024;
-
+/// Bidirectionally relay bytes between two duplex streams until BOTH sides
+/// have closed.
+///
+/// Delegates to [`tokio::io::copy_bidirectional`], which correctly handles
+/// half-close: when one direction sees EOF, it calls `shutdown()` on the
+/// opposite writer and continues pumping the remaining direction. The
+/// previous hand-rolled implementation broke out of the outer loop on the
+/// FIRST EOF, dropping any in-flight bytes flowing the other way — a common
+/// problem for HTTP, where a client sends its request and FINs while the
+/// server is still streaming the response.
 pub async fn copy_io<A, B>(a: &mut A, b: &mut B) -> (usize, usize, Option<std::io::Error>)
 where
 	A: AsyncRead + AsyncWrite + Unpin + ?Sized,
 	B: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
-	let mut a2b = [0u8; BUFFER_SIZE];
-	let mut b2a = [0u8; BUFFER_SIZE];
-
-	let mut a2b_num = 0;
-	let mut b2a_num = 0;
-
-	let mut last_err = None;
-
-	loop {
-		tokio::select! {
-		   a2b_res = a.read(&mut a2b) => match a2b_res {
-			  Ok(num) => {
-				 // EOF
-				 if num == 0 {
-					break;
-				 }
-				 a2b_num += num;
-				 if let Err(err) = b.write_all(&a2b[..num]).await {
-					last_err = Some(err);
-					break;
-				 }
-			  },
-			  Err(err) => {
-				 last_err = Some(err);
-				 break;
-			  }
-		   },
-		   b2a_res = b.read(&mut b2a) => match b2a_res {
-			  Ok(num) => {
-				 // EOF
-				 if num == 0 {
-					break;
-				 }
-				 b2a_num += num;
-				 if let Err(err) = a.write_all(&b2a[..num]).await {
-					last_err = Some(err);
-					break;
-				 }
-			  },
-			  Err(err) => {
-				 last_err = Some(err);
-				 break;
-			  },
-		   }
-		}
+	match tokio::io::copy_bidirectional(a, b).await {
+		Ok((a2b, b2a)) => (a2b as usize, b2a as usize, None),
+		Err(e) => (0, 0, Some(e)),
 	}
-
-	(a2b_num, b2a_num, last_err)
 }
 
 #[cfg(feature = "quic")]

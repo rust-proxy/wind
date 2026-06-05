@@ -38,25 +38,31 @@ ipv4 = @{
     ASCII_DIGIT{1,3} 
 }
 
+// IPv6 must contain at least one ':' — the previous `(ASCII_HEX_DIGIT | ":")+`
+// accepted `10`, `cafe`, `::::`, and any other hex-only or colon-only run,
+// causing tokens like `proxy 10` to be parsed as `proxy <ipv6>` and stored
+// verbatim. Address-Parsing in Rust then never matched anything against the
+// resulting "10" string. The reshape below requires the colon up front so a
+// pure decimal/hex run no longer slips through here.
 ipv6 = @{
-    (ASCII_HEX_DIGIT | ":")+ ~ 
+    ASCII_HEX_DIGIT* ~ ":" ~ (ASCII_HEX_DIGIT | ":")* ~
     &(WHITESPACE | EOI)
 }
 
 // CIDR notation
-cidr = @{ 
+cidr = @{
     (ipv4_cidr | ipv6_cidr)
 }
 
 ipv4_cidr = @{
-    ASCII_DIGIT{1,3} ~ "." ~ 
-    ASCII_DIGIT{1,3} ~ "." ~ 
-    ASCII_DIGIT{1,3} ~ "." ~ 
+    ASCII_DIGIT{1,3} ~ "." ~
+    ASCII_DIGIT{1,3} ~ "." ~
+    ASCII_DIGIT{1,3} ~ "." ~
     ASCII_DIGIT{1,3} ~ "/" ~ ASCII_DIGIT{1,3}
 }
 
 ipv6_cidr = @{
-    (ASCII_HEX_DIGIT | ":")+ ~ "/" ~ ASCII_DIGIT{1,3}
+    ASCII_HEX_DIGIT* ~ ":" ~ (ASCII_HEX_DIGIT | ":")* ~ "/" ~ ASCII_DIGIT{1,3}
 }
 
 // Domain patterns
