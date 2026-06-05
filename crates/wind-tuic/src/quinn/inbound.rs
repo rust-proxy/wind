@@ -73,7 +73,21 @@ async fn acceptor_loop<A, AccFut, HFut, AccFn, HFn>(
 		};
 		match result {
 			Err(e) => {
-				error!("{label} error: {e:?}");
+				// `ApplicationClosed`, `LocallyClosed`, `TimedOut`, and other
+				// non-error connection terminations are normal lifecycle
+				// events; treating them as ERR muddied operator logs with
+				// red-herring entries on every legitimate disconnect. Log at
+				// debug instead and let the connection wind down quietly.
+				if matches!(
+					&e,
+					quinn::ConnectionError::ApplicationClosed(_)
+						| quinn::ConnectionError::LocallyClosed
+						| quinn::ConnectionError::TimedOut
+				) {
+					tracing::debug!("{label} loop ending after benign connection close: {e:?}");
+				} else {
+					error!("{label} error: {e:?}");
+				}
 				return;
 			}
 			Ok(v) => handle(v).await,

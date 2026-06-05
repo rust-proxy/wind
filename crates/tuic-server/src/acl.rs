@@ -27,15 +27,28 @@ pub struct AclRule {
 	pub hijack: Option<String>,
 }
 
-fn format_optional_parts(ports: &Option<AclPorts>, hijack: &Option<String>) -> String {
-	let mut result = String::new();
-	if let Some(p) = ports {
-		result.push_str(&format!(" {}", p));
+// Used by the derive(Display) macro on `AclRule`. The macro expands to a
+// `write!` call, so anything implementing `Display` works — return type was
+// `String` purely for the previous `format!`-based implementation.
+struct OptionalParts<'a> {
+	ports: &'a Option<AclPorts>,
+	hijack: &'a Option<String>,
+}
+
+impl<'a> std::fmt::Display for OptionalParts<'a> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		if let Some(p) = self.ports {
+			write!(f, " {p}")?;
+		}
+		if let Some(h) = self.hijack {
+			write!(f, " {h}")?;
+		}
+		Ok(())
 	}
-	if let Some(h) = hijack {
-		result.push_str(&format!(" {}", h));
-	}
-	result
+}
+
+fn format_optional_parts<'a>(ports: &'a Option<AclPorts>, hijack: &'a Option<String>) -> OptionalParts<'a> {
+	OptionalParts { ports, hijack }
 }
 
 /// Represents different types of addresses in ACL rules
@@ -86,10 +99,14 @@ pub struct AclPortEntry {
 	pub port_spec: AclPortSpec,
 }
 
-fn format_protocol(protocol: &Option<AclProtocol>) -> String {
+fn format_protocol(protocol: &Option<AclProtocol>) -> &'static str {
+	// Allocation-free: each combination maps to a fixed string literal. The
+	// derive(Display) macro just needs `Display`, which `&str` already
+	// implements, so we can return the borrowed literal directly.
 	match protocol {
-		Some(p) => format!("{}/", p),
-		None => String::new(),
+		Some(AclProtocol::Tcp) => "tcp/",
+		Some(AclProtocol::Udp) => "udp/",
+		None => "",
 	}
 }
 
@@ -2170,5 +2187,28 @@ addr = "private"
 		};
 		let rules = acl_to_rules(std::slice::from_ref(&acl));
 		assert!(rules.is_empty(), "malformed IP must drop the rule");
+	}
+
+	// ------------------------------------------------------------------
+	// PR5-K regression: `format_protocol` / `format_optional_parts` Display
+	// output must still match the parser-accepted spelling.
+	// ------------------------------------------------------------------
+
+	#[test]
+	fn pr5_format_protocol_zero_alloc_output() {
+		assert_eq!(super::format_protocol(&Some(super::AclProtocol::Tcp)), "tcp/");
+		assert_eq!(super::format_protocol(&Some(super::AclProtocol::Udp)), "udp/");
+		assert_eq!(super::format_protocol(&None), "");
+	}
+
+	#[test]
+	fn pr5_format_optional_parts_display() {
+		// Empty case — no ports + no hijack ⇒ empty Display.
+		let s = super::format_optional_parts(&None, &None).to_string();
+		assert_eq!(s, "");
+
+		// Hijack only.
+		let s = super::format_optional_parts(&None, &Some("10.0.0.1".into())).to_string();
+		assert_eq!(s, " 10.0.0.1");
 	}
 }
