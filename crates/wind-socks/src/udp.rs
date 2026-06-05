@@ -162,11 +162,20 @@ pub async fn serve_udp_with_client(
 							}
 						}
 					}
-					source_addr_rx.store(Arc::new(addr));
 					let packet_data = &rx_buf[..len];
 
+					// Only commit the observed peer to `source_addr` AFTER the
+					// frame parses cleanly. Storing first meant a malformed
+					// datagram from an authorized client (or an attacker that
+					// somehow got past the IP check) could displace the
+					// previously-latched address, leaving the reply path
+					// pointing at a stale or hostile peer.
+					//
+					// TODO RFC 1928 §7: honour the FRAG byte. The current
+					// implementation drops fragmentation entirely.
 					match parse_udp_request_sync(packet_data) {
 						Ok((_frag, target_addr, payload)) => {
+							source_addr_rx.store(Arc::new(addr));
 							let packet = UdpPacket {
 								source: None,
 								target: convert_target_addr(&target_addr),
@@ -177,7 +186,7 @@ pub async fn serve_udp_with_client(
 							}
 						}
 						Err(e) => {
-							warn!(target: "udp", "Failed to parse SOCKS5 UDP header: {}", e);
+							warn!(target: "udp", "Failed to parse SOCKS5 UDP header from {addr}: {e}");
 						}
 					}
 				}
