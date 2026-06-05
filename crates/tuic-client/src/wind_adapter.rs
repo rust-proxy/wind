@@ -43,7 +43,7 @@ impl TuicOutboundAdapter {
 		// in the SNI extension — most rustls/webpki verifiers reject that as
 		// a non-hostname SNI, and even when they don't, the SNI value carries
 		// no integrity benefit. Warn loudly so operators notice the
-		// mis-configuration; require an explicit `sni` for IP-literal
+		// wrong configuration; require an explicit `sni` for IP-literal
 		// servers and use a placeholder otherwise so the connection still
 		// attempts to handshake (and rustls will surface the bad-SNI error
 		// in its own message).
