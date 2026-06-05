@@ -94,13 +94,10 @@ async fn main() -> eyre::Result<()> {
 
 	if cli.version {
 		// Allow build-time override via `WIND_OVERRIDE_VERSION` (e.g. nightly
-		// builds stamping a dated SHA). The historic spelling
-		// `WIND_OVERRIVE_VERSION` is kept as a fallback for one release so
-		// existing CI doesn't silently lose its override on upgrade.
-		const VER: &str = match (option_env!("WIND_OVERRIDE_VERSION"), option_env!("WIND_OVERRIVE_VERSION")) {
-			(Some(v), _) => v,
-			(None, Some(v)) => v,
-			(None, None) => env!("CARGO_PKG_VERSION"),
+		// builds stamping a dated SHA).
+		const VER: &str = match option_env!("WIND_OVERRIDE_VERSION") {
+			Some(v) => v,
+			None => env!("CARGO_PKG_VERSION"),
 		};
 		println!("wind {VER}");
 		return Ok(());
