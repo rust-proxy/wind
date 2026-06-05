@@ -618,7 +618,7 @@ fn infer_config_format(content: &str) -> ConfigFormat {
 	//    The previous heuristic was `... || trimmed_line.contains('=')` (with
 	//    bare-OR precedence over `&&`!), so any YAML line containing an `=` in a
 	//    VALUE — for example `secret: aGVsbG8=` — was flagged as TOML. The combined
-	//    check then mis-detected those YAML files as TOML and parsing failed. The
+	//    check then wrongly classified those YAML files as TOML and parsing failed. The
 	//    check below uses a strict identifier prefix and is properly parenthesised.
 	let is_toml_assignment = |s: &str| -> bool {
 		let bytes = s.as_bytes();
