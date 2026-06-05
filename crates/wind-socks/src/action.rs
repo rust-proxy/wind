@@ -1,7 +1,8 @@
+use async_trait::async_trait;
 use fast_socks5::client::{Config as Socks5Config, Socks5Stream};
 use tokio::net::TcpStream;
 use tracing::Instrument;
-use wind_core::{OutboundAction, dispatcher::BoxFuture, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
+use wind_core::{OutboundAction, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
 
 /// Options for a SOCKS5 outbound action handler.
 #[derive(Clone, Debug)]
@@ -26,30 +27,28 @@ impl Socks5Action {
 	}
 }
 
+#[async_trait]
 impl OutboundAction for Socks5Action {
-	fn handle_tcp<'a>(&'a self, target: TargetAddr, mut stream: Box<dyn AbstractTcpStream>) -> BoxFuture<'a, eyre::Result<()>> {
+	async fn handle_tcp(&self, target: TargetAddr, mut stream: Box<dyn AbstractTcpStream>) -> eyre::Result<()> {
 		let span = tracing::debug_span!("socks5_tcp", target = %target, addr = %self.opts.addr);
-		Box::pin(
-			async move {
-				let mut socks_stream = connect_socks5_tcp(&self.opts.addr, &target, &self.opts).await?;
-				if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut socks_stream).await {
-					tracing::debug!(error = %e, "socks5 copy_bidirectional ended");
-				}
-				Ok(())
+		async move {
+			let mut socks_stream = connect_socks5_tcp(&self.opts.addr, &target, &self.opts).await?;
+			if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut socks_stream).await {
+				tracing::debug!(error = %e, "socks5 copy_bidirectional ended");
 			}
-			.instrument(span),
-		)
+			Ok(())
+		}
+		.instrument(span)
+		.await
 	}
 
-	fn handle_udp<'a>(&'a self, _udp_stream: UdpStream) -> BoxFuture<'a, eyre::Result<()>> {
-		Box::pin(async move {
-			if !self.opts.allow_udp.unwrap_or(false) {
-				tracing::debug!("socks5 outbound disallows UDP, dropping");
-				return Ok(());
-			}
-			tracing::warn!("UDP-over-SOCKS5 is not implemented");
-			Ok(())
-		})
+	async fn handle_udp(&self, _udp_stream: UdpStream) -> eyre::Result<()> {
+		if !self.opts.allow_udp.unwrap_or(false) {
+			tracing::debug!("socks5 outbound disallows UDP, dropping");
+			return Ok(());
+		}
+		tracing::warn!("UDP-over-SOCKS5 is not implemented");
+		Ok(())
 	}
 }
 

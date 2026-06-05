@@ -38,13 +38,12 @@ struct DefaultRouter {
 }
 
 impl Router for DefaultRouter {
-	fn route<'a>(
-		&'a self,
-		_target: &'a wind_core::types::TargetAddr,
+	async fn route(
+		&self,
+		_target: &wind_core::types::TargetAddr,
 		_is_tcp: bool,
-	) -> wind_core::dispatcher::BoxFuture<'a, eyre::Result<wind_core::dispatcher::RouteAction>> {
-		let d = self.default.clone();
-		Box::pin(async move { Ok(wind_core::dispatcher::RouteAction::Forward(d)) })
+	) -> eyre::Result<wind_core::dispatcher::RouteAction> {
+		Ok(wind_core::dispatcher::RouteAction::Forward(self.default.clone()))
 	}
 }
 

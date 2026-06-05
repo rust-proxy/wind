@@ -17,6 +17,7 @@
 
 use std::{collections::HashMap, future::Future, net::IpAddr, pin::Pin, sync::Arc};
 
+use async_trait::async_trait;
 use tracing::Instrument;
 
 use crate::{
@@ -57,14 +58,13 @@ pub enum RouteAction {
 /// Determines which outbound handler should serve a connection.
 ///
 /// Implementations are free to perform DNS resolution, consult ACL tables, or
-/// apply any other policy.  The trait is object-safe; all methods take
-/// `&self` and return a pinned boxed future.
+/// apply any other policy.
 pub trait Router: Send + Sync + 'static {
 	/// Classify a TCP or UDP connection.
 	///
 	/// * `target` – the destination address as reported by the inbound.
 	/// * `is_tcp`  – `true` for TCP streams, `false` for UDP streams.
-	fn route<'a>(&'a self, target: &'a TargetAddr, is_tcp: bool) -> BoxFuture<'a, eyre::Result<RouteAction>>;
+	fn route(&self, target: &TargetAddr, is_tcp: bool) -> impl Future<Output = eyre::Result<RouteAction>> + Send;
 }
 
 // ============================================================================
@@ -76,20 +76,17 @@ pub trait Router: Send + Sync + 'static {
 /// Each concrete outbound strategy (direct connect, SOCKS5 proxy, …)
 /// implements this trait.  The stream types are erased via trait objects so
 /// handlers can be stored in a `HashMap`.
+#[async_trait]
 pub trait OutboundAction: Send + Sync + 'static {
 	/// Handle an inbound TCP stream.
 	///
 	/// The stream is boxed and `'static` so it can be stored or sent across
 	/// tasks.  All concrete `AbstractTcpStream` implementations (owned
 	/// `TcpStream`, `Socks5Stream<TcpStream>`, …) satisfy this bound.
-	fn handle_tcp<'a>(
-		&'a self,
-		target: TargetAddr,
-		stream: Box<dyn AbstractTcpStream + 'static>,
-	) -> BoxFuture<'a, eyre::Result<()>>;
+	async fn handle_tcp(&self, target: TargetAddr, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()>;
 
 	/// Handle an inbound UDP session.
-	fn handle_udp<'a>(&'a self, stream: UdpStream) -> BoxFuture<'a, eyre::Result<()>>;
+	async fn handle_udp(&self, stream: UdpStream) -> eyre::Result<()>;
 }
 
 // ============================================================================
@@ -290,9 +287,9 @@ impl AclRouter {
 }
 
 impl Router for AclRouter {
-	fn route<'a>(&'a self, target: &'a TargetAddr, is_tcp: bool) -> BoxFuture<'a, eyre::Result<RouteAction>> {
+	async fn route(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction> {
 		let span = tracing::trace_span!("acl_route", target = %target, proto = if is_tcp { "tcp" } else { "udp" });
-		Box::pin(self.eval_rules(target, is_tcp).instrument(span))
+		self.eval_rules(target, is_tcp).instrument(span).await
 	}
 }
 
@@ -382,17 +379,18 @@ pub struct OutboundAsAction<O> {
 	pub inner: O,
 }
 
+#[async_trait]
 impl<O: AbstractOutbound + Send + Sync + 'static> OutboundAction for OutboundAsAction<O> {
-	fn handle_tcp<'a>(
-		&'a self,
+	async fn handle_tcp(
+		&self,
 		target: TargetAddr,
 		stream: Box<dyn crate::tcp::AbstractTcpStream + 'static>,
-	) -> BoxFuture<'a, eyre::Result<()>> {
-		Box::pin(async move { self.inner.handle_tcp(target, stream, Option::<NoChain>::None).await })
+	) -> eyre::Result<()> {
+		self.inner.handle_tcp(target, stream, Option::<NoChain>::None).await
 	}
 
-	fn handle_udp<'a>(&'a self, stream: crate::udp::UdpStream) -> BoxFuture<'a, eyre::Result<()>> {
-		Box::pin(async move { self.inner.handle_udp(stream, Option::<NoChain>::None).await })
+	async fn handle_udp(&self, stream: crate::udp::UdpStream) -> eyre::Result<()> {
+		self.inner.handle_udp(stream, Option::<NoChain>::None).await
 	}
 }
 
@@ -430,19 +428,16 @@ mod tests {
 		}
 	}
 
+	#[async_trait]
 	impl OutboundAction for MockHandler {
-		fn handle_tcp<'a>(
-			&'a self,
-			_target: TargetAddr,
-			_stream: Box<dyn AbstractTcpStream + 'static>,
-		) -> BoxFuture<'a, eyre::Result<()>> {
+		async fn handle_tcp(&self, _target: TargetAddr, _stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 			self.tcp_called.store(true, Ordering::Relaxed);
-			Box::pin(async { Ok(()) })
+			Ok(())
 		}
 
-		fn handle_udp<'a>(&'a self, _stream: UdpStream) -> BoxFuture<'a, eyre::Result<()>> {
+		async fn handle_udp(&self, _stream: UdpStream) -> eyre::Result<()> {
 			self.udp_called.store(true, Ordering::Relaxed);
-			Box::pin(async { Ok(()) })
+			Ok(())
 		}
 	}
 
