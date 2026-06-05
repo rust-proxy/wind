@@ -185,8 +185,25 @@ impl<R: Router> Dispatcher<R> {
 	}
 
 	async fn dispatch_udp(&self, udp_stream: UdpStream) -> eyre::Result<()> {
-		let sentinel = TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0);
-		let action = self.router.route(&sentinel, false).await?;
+		// Wait for the first packet so the routing decision can be made
+		// against the real `packet.target`. The previous implementation
+		// routed against a `TargetAddr::IPv4(0.0.0.0, 0)` sentinel, so every
+		// UDP session matched the same set of rules regardless of its actual
+		// destination — `IP-CIDR`, `DOMAIN-SUFFIX`, `DST-PORT` and friends
+		// were effectively no-ops on UDP traffic.
+		//
+		// Routing is done ONCE on the first packet; subsequent packets follow
+		// the same handler. SOCKS5-style sessions that target many remotes in
+		// one logical UDP session will all flow through the handler picked
+		// for the first packet — this matches Clash behaviour and is a
+		// strict improvement over the sentinel.
+		let UdpStream { tx, mut rx } = udp_stream;
+		let first = match rx.recv().await {
+			Some(p) => p,
+			None => return Ok(()), // remote closed before sending anything
+		};
+
+		let action = self.router.route(&first.target, false).await?;
 
 		match action {
 			RouteAction::Reject(reason) => {
@@ -194,13 +211,30 @@ impl<R: Router> Dispatcher<R> {
 				Err(eyre::eyre!("UDP session rejected: {}", reason))
 			}
 			RouteAction::Forward(name) => {
-				tracing::debug!(outbound = %name, "forwarding");
+				tracing::debug!(outbound = %name, target = %first.target, "forwarding");
 
 				let handler = self
 					.resolve_handler(&name)
 					.ok_or_else(|| eyre::eyre!("no outbound handler registered for '{}' (and no 'default')", name))?;
 
-				handler.handle_udp(udp_stream).await
+				// Rebuild the inbound side of the UdpStream so the handler
+				// sees the first packet too. A small proxy channel replays
+				// the first packet and then forwards everything else from the
+				// original receiver verbatim.
+				let (proxy_tx, proxy_rx) = tokio::sync::mpsc::channel(32);
+				tokio::spawn(async move {
+					if proxy_tx.send(first).await.is_err() {
+						return;
+					}
+					while let Some(pkt) = rx.recv().await {
+						if proxy_tx.send(pkt).await.is_err() {
+							break;
+						}
+					}
+				});
+
+				let routed_stream = UdpStream { tx, rx: proxy_rx };
+				handler.handle_udp(routed_stream).await
 			}
 		}
 	}
@@ -291,10 +325,19 @@ impl AclRouter {
 }
 
 /// Map a rule target string to a [`RouteAction`].
+///
+/// The reject/block/deny keywords are matched case-insensitively (so
+/// `REJECT`, `Reject`, `reject` all work). Everything else is treated as an
+/// outbound name and forwarded verbatim — handler lookups in
+/// `Dispatcher::resolve_handler` are case-SENSITIVE, so we must NOT lower-case
+/// the name. Previously the match arm rebound `name` to the lowercased string
+/// and forwarded that, so an outbound registered as `"Proxy_Out"` would
+/// silently fall through to the `"default"` handler.
 fn rule_target_to_action(target: &str, rule: &Rule) -> RouteAction {
-	match target.to_ascii_lowercase().as_str() {
+	let lower = target.to_ascii_lowercase();
+	match lower.as_str() {
 		"reject" | "block" | "deny" => RouteAction::Reject(format!("rejected by rule: {}", rule)),
-		name => RouteAction::Forward(name.to_string()),
+		_ => RouteAction::Forward(target.to_string()),
 	}
 }
 
@@ -576,8 +619,20 @@ mod tests {
 		dispatcher.add_handler("relay", handler.clone());
 
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
-		let (_tx2, rx2) = tokio::sync::mpsc::channel(1);
+		let (tx2, rx2) = tokio::sync::mpsc::channel(1);
 		let stream = UdpStream { tx, rx: rx2 };
+
+		// `dispatch_udp` now awaits the first packet so it can route by the
+		// real target rather than a sentinel — push one in so the routing
+		// decision happens, then drop the sender to signal end-of-stream.
+		tx2.send(crate::udp::UdpPacket {
+			source: None,
+			target: TargetAddr::Domain("anywhere.example".into(), 80),
+			payload: bytes::Bytes::new(),
+		})
+		.await
+		.unwrap();
+		drop(tx2);
 
 		dispatcher.handle_udpstream(stream).await.unwrap();
 		assert!(handler.udp_called.load(Ordering::Relaxed));
@@ -753,5 +808,36 @@ mod tests {
 		let target = TargetAddr::Domain("other.org".into(), 80);
 		let action = router.route(&target, true).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
+	}
+
+	// ------------------------------------------------------------------
+	// PR4-A regression tests for `rule_target_to_action`
+	// ------------------------------------------------------------------
+
+	/// Outbound names registered with mixed case must survive routing —
+	/// previously the `name => RouteAction::Forward(name.to_string())` arm
+	/// bound to the lowercased string and silently routed `Proxy_Out` to
+	/// `proxy_out`, which `Dispatcher::resolve_handler` failed to find.
+	#[tokio::test]
+	async fn pr4_router_forwards_with_original_case() {
+		let router = AclRouter::new(parse_rules("DOMAIN-SUFFIX,example.com,Proxy_Out"), "default");
+		let target = TargetAddr::Domain("foo.example.com".into(), 80);
+		let action = router.route(&target, true).await.unwrap();
+		assert!(matches!(action, RouteAction::Forward(name) if name == "Proxy_Out"));
+	}
+
+	/// Reject keywords are still recognised case-insensitively across all
+	/// three spellings.
+	#[tokio::test]
+	async fn pr4_router_reject_keywords_case_insensitive() {
+		for kw in ["REJECT", "Reject", "reject", "BLOCK", "Block", "deny", "Deny", "DENY"] {
+			let r = AclRouter::new(parse_rules(&format!("DOMAIN-SUFFIX,blocked.com,{kw}")), "default");
+			let target = TargetAddr::Domain("a.blocked.com".into(), 443);
+			let action = r.route(&target, true).await.unwrap();
+			assert!(
+				matches!(action, RouteAction::Reject(_)),
+				"keyword {kw:?} must map to RouteAction::Reject"
+			);
+		}
 	}
 }

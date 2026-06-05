@@ -120,6 +120,16 @@ pub struct Rule {
 	pub options: Vec<String>,
 }
 
+/// Compiled `DOMAIN-WILDCARD` payload — original wildcard string plus the
+/// pre-compiled case-insensitive anchored `Regex`. Stored together so the
+/// per-match hot path needs no allocation while `Display` can still emit the
+/// original wildcard form.
+#[derive(Debug, Clone)]
+pub struct DomainWildcardPattern {
+	pub pattern: String,
+	pub re: Regex,
+}
+
 /// All supported rule types.
 pub enum RuleType {
 	// -- Domain rules --
@@ -130,7 +140,11 @@ pub enum RuleType {
 	/// Domain contains keyword (case-insensitive).
 	DomainKeyword(String),
 	/// Wildcard domain (`*` and `?`).
-	DomainWildcard(String),
+	///
+	/// The original wildcard string is kept alongside the compiled regex so
+	/// `Display` can round-trip the rule (the regex's own `as_str()` reflects
+	/// the regex-syntax form, not the wildcard).
+	DomainWildcard(DomainWildcardPattern),
 	/// Domain matched by regex.
 	DomainRegex(Regex),
 	/// GeoSite database match — requires external lookup.
@@ -205,8 +219,17 @@ pub enum RuleType {
 	Or(Vec<Rule>),
 	/// Logical NOT of a sub-rule.
 	Not(Box<Rule>),
-	/// Sub-rule reference (placeholder — delegates to contained rule).
-	SubRule(Box<Rule>, String),
+	/// Sub-rule reference. Currently a placeholder: matches if every
+	/// contained sub-rule matches (AND semantics). The trailing `String` is
+	/// the (optional) name of a referenced sub-rule block; full
+	/// reference-by-name semantics is not yet wired up — the field is kept so
+	/// future config layouts can populate it without breaking the variant
+	/// shape again.
+	///
+	/// The previous shape was `SubRule(Box<Rule>, String)`, which silently
+	/// discarded every sub-rule past the first one whenever the parser saw
+	/// more than one.
+	SubRule(Vec<Rule>, String),
 
 	// -- Catch-all --
 	/// Matches every connection.
@@ -316,15 +339,22 @@ impl Rule {
 			// -- Domain --
 			RuleType::Domain(d) => ctx.domain.is_some_and(|h| h.eq_ignore_ascii_case(d)),
 
-			RuleType::DomainSuffix(suffix) => ctx.domain.is_some_and(|h| {
-				h.eq_ignore_ascii_case(suffix) || h.to_ascii_lowercase().ends_with(&format!(".{}", suffix.to_ascii_lowercase()))
-			}),
+			// `suffix` and `kw` are already lowercased at parse time
+			// (`parse_type` normalises both DOMAIN-SUFFIX and DOMAIN-KEYWORD
+			// values), so per-match we only need an ASCII-case-insensitive
+			// compare on the haystack — no `to_ascii_lowercase()` allocation,
+			// no `format!()` to build a `.suffix` string. Previously a
+			// hot-path call here allocated TWO `String`s per evaluation.
+			RuleType::DomainSuffix(suffix) => ctx.domain.is_some_and(|h| ascii_ci_ends_with_dot_or_eq(h, suffix)),
 
-			RuleType::DomainKeyword(kw) => ctx
-				.domain
-				.is_some_and(|h| h.to_ascii_lowercase().contains(&kw.to_ascii_lowercase())),
+			RuleType::DomainKeyword(kw) => ctx.domain.is_some_and(|h| ascii_ci_contains(h, kw)),
 
-			RuleType::DomainWildcard(pattern) => ctx.domain.is_some_and(|h| wildcard_match(pattern, h)),
+			// Regex is compiled ONCE at parse time (`compile_wildcard`) and
+			// stored on the rule. The previous implementation recompiled the
+			// regex (and lowercased both operands) on every single match
+			// evaluation, which is extremely expensive on the routing hot
+			// path.
+			RuleType::DomainWildcard(p) => ctx.domain.is_some_and(|h| p.re.is_match(h)),
 
 			RuleType::DomainRegex(re) => ctx.domain.is_some_and(|h| re.is_match(h)),
 
@@ -395,7 +425,9 @@ impl Rule {
 			RuleType::And(rules) => rules.iter().all(|r| r.matches(ctx)),
 			RuleType::Or(rules) => rules.iter().any(|r| r.matches(ctx)),
 			RuleType::Not(rule) => !rule.matches(ctx),
-			RuleType::SubRule(rule, _) => rule.matches(ctx), // placeholder
+			// AND semantics across the contained sub-rules until proper
+			// "sub-rule reference by name" lookup is implemented.
+			RuleType::SubRule(rules, _) => rules.iter().all(|r| r.matches(ctx)),
 
 			// -- Catch-all --
 			RuleType::Match => true,
@@ -492,9 +524,20 @@ impl Rule {
 		match type_str.to_ascii_uppercase().as_str() {
 			// Domain rules
 			"DOMAIN" => Ok(RuleType::Domain(value.to_string())),
-			"DOMAIN-SUFFIX" => Ok(RuleType::DomainSuffix(value.to_string())),
-			"DOMAIN-KEYWORD" => Ok(RuleType::DomainKeyword(value.to_string())),
-			"DOMAIN-WILDCARD" => Ok(RuleType::DomainWildcard(value.to_string())),
+			// DOMAIN-SUFFIX / DOMAIN-KEYWORD values are stored in lower-case
+			// ASCII at parse time, so the per-match hot path can compare
+			// without allocating. The `Display` output is also lowercase as
+			// a result, which is fine — DNS names are case-insensitive per
+			// RFC 1035 §2.3.3 so the canonical form is the lowercase one.
+			"DOMAIN-SUFFIX" => Ok(RuleType::DomainSuffix(value.to_ascii_lowercase())),
+			"DOMAIN-KEYWORD" => Ok(RuleType::DomainKeyword(value.to_ascii_lowercase())),
+			"DOMAIN-WILDCARD" => {
+				let re = compile_wildcard(value).map_err(|e| RuleParseError::InvalidRegex(e.to_string()))?;
+				Ok(RuleType::DomainWildcard(DomainWildcardPattern {
+					pattern: value.to_string(),
+					re,
+				}))
+			}
 			"DOMAIN-REGEX" => {
 				let re = Regex::new(value).map_err(|e| RuleParseError::InvalidRegex(e.to_string()))?;
 				Ok(RuleType::DomainRegex(re))
@@ -515,10 +558,19 @@ impl Rule {
 				Ok(RuleType::IpCidr6(net))
 			}
 			"IP-SUFFIX" => {
+				// `IpSuffix` was a separate variant whose `matches` body was
+				// byte-for-byte identical to `IpCidr` (both did
+				// `net.contains(&ip)`), so the two diverged in name only and
+				// it was easy to ship a rule under one keyword that read like
+				// the OTHER semantic. Until proper "match the LOW N bits"
+				// suffix semantics are implemented, accept the keyword as a
+				// formal alias for IP-CIDR — at least the duplication
+				// disappears and config files using either keyword behave
+				// identically and predictably.
 				let net = value
 					.parse::<IpNet>()
 					.map_err(|e| RuleParseError::InvalidIpCidr(e.to_string()))?;
-				Ok(RuleType::IpSuffix(net))
+				Ok(RuleType::IpCidr(net))
 			}
 			"IP-ASN" => {
 				let asn = value
@@ -543,10 +595,12 @@ impl Rule {
 				Ok(RuleType::SrcIpCidr(net))
 			}
 			"SRC-IP-SUFFIX" => {
+				// Same alias treatment as IP-SUFFIX above — `SrcIpSuffix` and
+				// `SrcIpCidr` had identical match bodies.
 				let net = value
 					.parse::<IpNet>()
 					.map_err(|e| RuleParseError::InvalidIpCidr(e.to_string()))?;
-				Ok(RuleType::SrcIpSuffix(net))
+				Ok(RuleType::SrcIpCidr(net))
 			}
 
 			// Port rules
@@ -605,12 +659,27 @@ impl Rule {
 
 			// Advanced rules
 			"RULE-SET" => Ok(RuleType::RuleSet(value.to_string())),
+			// `iter().all(...)` returns true on an empty iterator, so an empty
+			// AND would silently degenerate into a catch-all MATCH. Likewise
+			// an empty OR is a vacuous never-match. Either is almost certainly
+			// a config-authoring mistake; reject up front rather than ship a
+			// rule whose semantics flip when sub-rules are removed.
 			"AND" => {
 				let sub = Self::parse_compound(value)?;
+				if sub.is_empty() {
+					return Err(RuleParseError::InvalidFormat(
+						"AND rule must contain at least one sub-rule".into(),
+					));
+				}
 				Ok(RuleType::And(sub))
 			}
 			"OR" => {
 				let sub = Self::parse_compound(value)?;
+				if sub.is_empty() {
+					return Err(RuleParseError::InvalidFormat(
+						"OR rule must contain at least one sub-rule".into(),
+					));
+				}
 				Ok(RuleType::Or(sub))
 			}
 			"NOT" => {
@@ -627,7 +696,11 @@ impl Rule {
 				if sub.is_empty() {
 					return Err(RuleParseError::InvalidFormat("SUB-RULE must contain a condition".into()));
 				}
-				Ok(RuleType::SubRule(Box::new(sub.into_iter().next().unwrap()), String::new()))
+				// Preserve EVERY parsed sub-rule. The previous implementation
+				// took only `sub.into_iter().next()` and silently dropped the
+				// rest, so a SUB-RULE with multiple conditions matched only
+				// the first.
+				Ok(RuleType::SubRule(sub, String::new()))
 			}
 
 			other => Err(RuleParseError::UnknownRuleType(other.to_string())),
@@ -645,6 +718,15 @@ impl Rule {
 				.trim()
 				.parse::<u16>()
 				.map_err(|e| RuleParseError::InvalidNumber(e.to_string()))?;
+			// A reversed range (lo > hi) silently never matches anything
+			// because every comparison `port >= lo && port <= hi` is false.
+			// Catch the misconfiguration at parse time so the operator hears
+			// about it instead of silently shipping a dead rule.
+			if lo > hi {
+				return Err(RuleParseError::InvalidFormat(format!(
+					"port range {lo}-{hi} is reversed (lo > hi); use {hi}-{lo} instead"
+				)));
+			}
 			if is_src {
 				Ok(RuleType::SrcPortRange(lo, hi))
 			} else {
@@ -744,7 +826,7 @@ impl fmt::Display for RuleType {
 			Self::Domain(v) => write!(f, "DOMAIN,{v}"),
 			Self::DomainSuffix(v) => write!(f, "DOMAIN-SUFFIX,{v}"),
 			Self::DomainKeyword(v) => write!(f, "DOMAIN-KEYWORD,{v}"),
-			Self::DomainWildcard(v) => write!(f, "DOMAIN-WILDCARD,{v}"),
+			Self::DomainWildcard(p) => write!(f, "DOMAIN-WILDCARD,{}", p.pattern),
 			Self::DomainRegex(v) => write!(f, "DOMAIN-REGEX,{v}"),
 			Self::GeoSite(v) => write!(f, "GEOSITE,{v}"),
 			Self::IpCidr(v) => write!(f, "IP-CIDR,{v}"),
@@ -792,8 +874,26 @@ impl fmt::Display for RuleType {
 				}
 				write!(f, ")")
 			}
+			// Match the parser's compound-form grammar: `(<inner>)`, not
+			// `((<inner>))` with mismatched parens. NOT/SUB-RULE both go
+			// through `parse_compound`, which strips exactly one outer pair
+			// of parens, so emitting two pairs (or, worse, a stray third in
+			// the old SUB-RULE form) makes the output unparsable.
 			Self::Not(rule) => write!(f, "NOT,(({}))", rule.rule_type),
-			Self::SubRule(rule, name) => write!(f, "SUB-RULE,(({}))),{name}", rule.rule_type),
+			Self::SubRule(rules, name) => {
+				write!(f, "SUB-RULE,(")?;
+				for (i, r) in rules.iter().enumerate() {
+					if i > 0 {
+						write!(f, ",")?;
+					}
+					write!(f, "({})", r.rule_type)?;
+				}
+				if name.is_empty() {
+					write!(f, ")")
+				} else {
+					write!(f, "),{name}")
+				}
+			}
 			Self::Match => write!(f, "MATCH"),
 		}
 	}
@@ -828,13 +928,12 @@ impl fmt::Debug for RuleType {
 // Helpers
 // ============================================================================
 
-/// Simple wildcard matching (`*` = any chars, `?` = one char).
-/// Case-insensitive.
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-	let pattern = pattern.to_ascii_lowercase();
-	let text = text.to_ascii_lowercase();
-
-	let mut re = String::from("^");
+/// Convert a wildcard pattern (`*` = any chars, `?` = one char) into a
+/// case-insensitive anchored regex. Used at PARSE time so we don't recompile
+/// the regex on every match. Returns the compiled regex; the caller is
+/// expected to carry the original pattern alongside it (e.g. for `Display`).
+fn compile_wildcard(pattern: &str) -> Result<Regex, regex::Error> {
+	let mut re = String::from("(?i)^");
 	for ch in pattern.chars() {
 		match ch {
 			'*' => re.push_str(".*"),
@@ -847,8 +946,41 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 		}
 	}
 	re.push('$');
+	Regex::new(&re)
+}
 
-	Regex::new(&re).is_ok_and(|r| r.is_match(&text))
+/// `h.eq_ignore_ascii_case(suffix)` OR `h` ends with `.{suffix}` (also
+/// case-insensitive). Allocation-free.
+fn ascii_ci_ends_with_dot_or_eq(host: &str, suffix_lc: &str) -> bool {
+	let hb = host.as_bytes();
+	let sb = suffix_lc.as_bytes();
+	if hb.len() < sb.len() {
+		return false;
+	}
+	if hb.len() == sb.len() {
+		// Exact match path.
+		return hb.iter().zip(sb).all(|(a, b)| a.eq_ignore_ascii_case(b));
+	}
+	// `.` + suffix: hb must end with b'.' followed by suffix.
+	let dot_pos = hb.len() - sb.len() - 1;
+	if hb[dot_pos] != b'.' {
+		return false;
+	}
+	hb[dot_pos + 1..].iter().zip(sb).all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// ASCII-case-insensitive substring search. Allocation-free; O(host.len() *
+/// needle.len()) but `needle` is typically tiny.
+fn ascii_ci_contains(host: &str, needle_lc: &str) -> bool {
+	let hb = host.as_bytes();
+	let nb = needle_lc.as_bytes();
+	if nb.is_empty() {
+		return true;
+	}
+	if hb.len() < nb.len() {
+		return false;
+	}
+	(0..=hb.len() - nb.len()).any(|i| hb[i..i + nb.len()].iter().zip(nb).all(|(a, b)| a.eq_ignore_ascii_case(b)))
 }
 
 /// Split a rule line on commas, but treat parenthesised groups as a single
@@ -1607,5 +1739,98 @@ mod tests {
 	fn not_requires_single_subrule() {
 		let err = Rule::parse("NOT,((NETWORK,tcp),(DST-PORT,443)),TARGET").unwrap_err();
 		assert!(matches!(err, RuleParseError::InvalidFormat(_)));
+	}
+
+	// ------------------------------------------------------------------
+	// PR4 regression tests
+	// ------------------------------------------------------------------
+
+	/// PR4-C: an empty AND would silently become MATCH (every closure over an
+	/// empty `Vec` returns true); empty OR would silently become a never-match.
+	#[test]
+	fn pr4_empty_and_rejected_at_parse() {
+		let err = Rule::parse("AND,(),TARGET").unwrap_err();
+		assert!(matches!(err, RuleParseError::InvalidFormat(_)));
+	}
+
+	#[test]
+	fn pr4_empty_or_rejected_at_parse() {
+		let err = Rule::parse("OR,(),TARGET").unwrap_err();
+		assert!(matches!(err, RuleParseError::InvalidFormat(_)));
+	}
+
+	/// PR4-H: a reversed port range matches nothing because `port >= lo` and
+	/// `port <= hi` cannot both hold. Catch the misconfiguration at parse.
+	#[test]
+	fn pr4_reversed_port_range_rejected() {
+		let err = Rule::parse("DST-PORT,9000-1000,TARGET").unwrap_err();
+		assert!(matches!(err, RuleParseError::InvalidFormat(_)));
+		let err = Rule::parse("SRC-PORT,9000-1000,TARGET").unwrap_err();
+		assert!(matches!(err, RuleParseError::InvalidFormat(_)));
+	}
+
+	/// PR4-D: IP-SUFFIX and SRC-IP-SUFFIX were variant-distinct from IP-CIDR
+	/// despite having an identical match body. Both are now parsed straight
+	/// into the IP-CIDR variant so the two keywords have provably-identical
+	/// runtime behaviour.
+	#[test]
+	fn pr4_ip_suffix_parses_as_ip_cidr() {
+		let r = Rule::parse("IP-SUFFIX,10.0.0.0/24,PROXY").unwrap();
+		assert!(matches!(r.rule_type, RuleType::IpCidr(_)));
+		let r = Rule::parse("SRC-IP-SUFFIX,10.0.0.0/24,PROXY").unwrap();
+		assert!(matches!(r.rule_type, RuleType::SrcIpCidr(_)));
+	}
+
+	/// PR4-F: the wildcard regex is now compiled ONCE at parse time and
+	/// stored on the variant. A regex-compile failure must surface as a parse
+	/// error instead of being deferred to every match call (where it used to
+	/// silently fail-closed via `Regex::new(...).is_ok_and(...)`).
+	#[test]
+	fn pr4_wildcard_compiles_at_parse() {
+		let r = Rule::parse("DOMAIN-WILDCARD,*.example.com,PROXY").unwrap();
+		match r.rule_type {
+			RuleType::DomainWildcard(p) => {
+				assert_eq!(p.pattern, "*.example.com");
+				assert!(p.re.is_match("foo.example.com"));
+				assert!(p.re.is_match("FOO.Example.com"), "match must be case-insensitive");
+				assert!(!p.re.is_match("example.com"));
+			}
+			other => panic!("expected DomainWildcard, got {other:?}"),
+		}
+	}
+
+	/// PR4-E: DOMAIN-SUFFIX / DOMAIN-KEYWORD values are normalised to lower
+	/// case at parse time so the per-match path can compare without
+	/// allocating.
+	#[test]
+	fn pr4_domain_suffix_keyword_lowercased() {
+		let r = Rule::parse("DOMAIN-SUFFIX,Example.COM,DIRECT").unwrap();
+		match r.rule_type {
+			RuleType::DomainSuffix(s) => assert_eq!(s, "example.com"),
+			other => panic!("expected DomainSuffix, got {other:?}"),
+		}
+		let r = Rule::parse("DOMAIN-KEYWORD,Bing,DIRECT").unwrap();
+		match r.rule_type {
+			RuleType::DomainKeyword(s) => assert_eq!(s, "bing"),
+			other => panic!("expected DomainKeyword, got {other:?}"),
+		}
+	}
+
+	/// PR4-G: SUB-RULE used to keep only the first parsed sub-rule and drop
+	/// the rest. After the fix it carries every parsed condition AND its
+	/// `Display` form parses back to the same shape.
+	#[test]
+	fn pr4_sub_rule_preserves_all_children() {
+		let r = Rule::parse("SUB-RULE,((NETWORK,tcp),(DST-PORT,443)),PROXY").unwrap();
+		match &r.rule_type {
+			RuleType::SubRule(rules, _) => assert_eq!(rules.len(), 2),
+			other => panic!("expected SubRule, got {other:?}"),
+		}
+		let s = r.rule_type.to_string();
+		assert!(s.starts_with("SUB-RULE,("), "Display = {s:?}");
+		// Round-trip must parse the displayed form back to a SUB-RULE again.
+		let line = format!("{s},PROXY");
+		let r2 = Rule::parse(&line).unwrap_or_else(|e| panic!("SUB-RULE Display ({s:?}) must round-trip via parser: {e:?}"));
+		assert!(matches!(r2.rule_type, RuleType::SubRule(_, _)));
 	}
 }

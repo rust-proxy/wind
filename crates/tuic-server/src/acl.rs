@@ -624,15 +624,35 @@ fn normalize_outbound(name: &str) -> String {
 fn address_to_rule_types(addr: &AclAddress) -> Vec<wrule::RuleType> {
 	match addr {
 		AclAddress::Ip(ip_str) => {
-			if let Ok(net) = format!("{ip_str}/32").parse::<ipnet::IpNet>() {
-				vec![wrule::RuleType::IpCidr(net)]
-			} else if let Ok(net) = format!("{ip_str}/128").parse::<ipnet::IpNet>() {
-				vec![wrule::RuleType::IpCidr(net)]
-			} else {
-				// Shouldn't happen for valid ACL — but be defensive.
-				vec![wrule::RuleType::IpCidr(
-					ip_str.parse().unwrap_or_else(|_| "0.0.0.0/32".parse().unwrap()),
-				)]
+			// First parse the literal as an `IpAddr` so we can pick the
+			// correct host-prefix length. The previous implementation tried
+			// `{ip}/32` first — `ipnet::IpNet` HAPPILY accepts
+			// `"2001:db8::1/32"`, because `/32` is a legal IPv6 prefix length,
+			// but it returns the network `2001:db8::/32` instead of the host
+			// `/128`, silently expanding the ACL to cover all of `2001:db8::/32`.
+			// Now parse the address first, then construct the host-prefixed
+			// CIDR by IP family. Truly malformed literals return an empty Vec
+			// (drops the rule) instead of falling back to `0.0.0.0/32`, which
+			// turned bad data into a silently-passing "match nothing" rule.
+			match ip_str.parse::<std::net::IpAddr>() {
+				Ok(std::net::IpAddr::V4(v4)) => {
+					if let Ok(net) = ipnet::Ipv4Net::new(v4, 32) {
+						vec![wrule::RuleType::IpCidr(ipnet::IpNet::V4(net))]
+					} else {
+						vec![]
+					}
+				}
+				Ok(std::net::IpAddr::V6(v6)) => {
+					if let Ok(net) = ipnet::Ipv6Net::new(v6, 128) {
+						vec![wrule::RuleType::IpCidr(ipnet::IpNet::V6(net))]
+					} else {
+						vec![]
+					}
+				}
+				Err(e) => {
+					tracing::warn!("ACL entry {ip_str:?} could not be parsed as IPv4/IPv6 ({e}); rule dropped");
+					vec![]
+				}
 			}
 		}
 		AclAddress::Cidr(cidr_str) => {
@@ -2079,5 +2099,76 @@ addr = "private"
 			..Default::default()
 		};
 		assert!(!rules.iter().any(|r| r.matches(&ctx_pub)));
+	}
+
+	// ------------------------------------------------------------------
+	// PR4-O regression tests for `address_to_rule_types`
+	// ------------------------------------------------------------------
+
+	/// IPv6 literals must produce a `/128` host route, not a `/32` network
+	/// route. Previously `format!("{ip}/32").parse::<ipnet::IpNet>()` was
+	/// tried first; `ipnet` accepts `/32` for IPv6 too and silently returned
+	/// the network `2001:db8::/32`, expanding the ACL by ~96 bits.
+	#[test]
+	fn pr4_acl_ipv6_address_yields_128_host_route() {
+		let acl = AclRule {
+			outbound: "direct".into(),
+			addr: AclAddress::Ip("2001:db8::1".into()),
+			ports: None,
+			hijack: None,
+		};
+		let rules = acl_to_rules(std::slice::from_ref(&acl));
+		assert!(!rules.is_empty(), "expected at least one rule");
+		let ctx_match = wrule::MatchContext {
+			dst_ip: Some("2001:db8::1".parse().unwrap()),
+			..Default::default()
+		};
+		assert!(rules.iter().any(|r| r.matches(&ctx_match)));
+
+		let ctx_outside = wrule::MatchContext {
+			dst_ip: Some("2001:db8::2".parse().unwrap()),
+			..Default::default()
+		};
+		assert!(
+			!rules.iter().any(|r| r.matches(&ctx_outside)),
+			"a /128 host rule must NOT match a different IPv6 in the same /32",
+		);
+	}
+
+	/// IPv4 case stays correct.
+	#[test]
+	fn pr4_acl_ipv4_address_yields_32_host_route() {
+		let acl = AclRule {
+			outbound: "direct".into(),
+			addr: AclAddress::Ip("10.0.0.5".into()),
+			ports: None,
+			hijack: None,
+		};
+		let rules = acl_to_rules(std::slice::from_ref(&acl));
+		let ctx = wrule::MatchContext {
+			dst_ip: Some("10.0.0.5".parse().unwrap()),
+			..Default::default()
+		};
+		assert!(rules.iter().any(|r| r.matches(&ctx)));
+		let ctx2 = wrule::MatchContext {
+			dst_ip: Some("10.0.0.6".parse().unwrap()),
+			..Default::default()
+		};
+		assert!(!rules.iter().any(|r| r.matches(&ctx2)));
+	}
+
+	/// Malformed IP literals must drop the rule (returning `vec![]`) instead
+	/// of falling back to `0.0.0.0/32`, which previously turned bad data into
+	/// a silently "matches nothing" rule that hid the configuration error.
+	#[test]
+	fn pr4_acl_malformed_ip_drops_rule() {
+		let acl = AclRule {
+			outbound: "direct".into(),
+			addr: AclAddress::Ip("not-an-ip".into()),
+			ports: None,
+			hijack: None,
+		};
+		let rules = acl_to_rules(std::slice::from_ref(&acl));
+		assert!(rules.is_empty(), "malformed IP must drop the rule");
 	}
 }

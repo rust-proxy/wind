@@ -59,6 +59,7 @@ pub struct DnsConfig {
 	pub timeout: Option<Duration>,
 
 	/// Retry attempts per query. Defaults to the Hickory library default.
+	#[serde(default)]
 	pub attempts: Option<usize>,
 
 	/// IP stack preference. Default: v4first (A first, then AAAA).

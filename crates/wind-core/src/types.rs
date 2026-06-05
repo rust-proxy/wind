@@ -79,24 +79,34 @@ impl<'de> Deserialize<'de> for TargetAddr {
 			return Ok(TargetAddr::IPv6(ipv6_addr, port));
 		}
 
-		// Split the string into host and port parts for IPv4 or domain
-		let parts: Vec<&str> = s.split(':').collect();
-		if parts.len() != 2 {
-			return Err(Error::custom("Invalid address format, expected host:port"));
+		// Split the string into host and port parts for IPv4 or domain.
+		// `rsplit_once` matches the LAST ':' so multi-colon inputs (which the
+		// IPv6 branch above didn't catch) fail cleanly instead of silently
+		// taking only the first segment.
+		let (host, port_str) = s
+			.rsplit_once(':')
+			.ok_or_else(|| Error::custom("Invalid address format, expected host:port"))?;
+
+		// Reject empty hosts. Previously `:80` parsed to `Domain("", 80)`
+		// which then failed at DNS time with a confusing error.
+		if host.is_empty() {
+			return Err(Error::custom("Invalid address: host part is empty"));
 		}
 
 		// Parse the port
-		let port = match parts[1].parse::<u16>() {
-			Ok(p) => p,
-			Err(_) => return Err(Error::custom("Invalid port number")),
-		};
+		let port = port_str.parse::<u16>().map_err(|_| Error::custom("Invalid port number"))?;
 
 		// Try to parse as IPv4 first
-		if let Ok(ipv4) = parts[0].parse::<Ipv4Addr>() {
+		if let Ok(ipv4) = host.parse::<Ipv4Addr>() {
 			Ok(TargetAddr::IPv4(ipv4, port))
 		} else {
-			// Otherwise treat as domain
-			Ok(TargetAddr::Domain(parts[0].to_string(), port))
+			// Otherwise treat as a domain. Apply a minimal sanity check: no
+			// whitespace, no embedded brackets/colons (those would indicate
+			// a malformed IPv6 literal that escaped the earlier branch).
+			if host.chars().any(|c| c.is_whitespace() || c == '[' || c == ']' || c == ':') {
+				return Err(Error::custom(format!("Invalid domain literal: {host:?}")));
+			}
+			Ok(TargetAddr::Domain(host.to_string(), port))
 		}
 	}
 }
@@ -176,5 +186,31 @@ mod tests {
 		let s = "justastring";
 		let result: Result<TargetAddr, _> = serde_json::from_str(&format!("\"{}\"", s));
 		assert!(result.is_err());
+	}
+
+	// PR4-I regression tests: empty / malformed host parts must fail
+	// deserialization, not silently produce a `Domain("", _)` etc.
+
+	#[test]
+	fn pr4_deserialize_rejects_empty_host() {
+		let result: Result<TargetAddr, _> = serde_json::from_str("\":80\"");
+		let err = result.expect_err("`:80` must not parse — empty host");
+		assert!(err.to_string().to_lowercase().contains("empty"));
+	}
+
+	#[test]
+	fn pr4_deserialize_rejects_whitespace_in_domain() {
+		let result: Result<TargetAddr, _> = serde_json::from_str("\"x y:80\"");
+		assert!(result.is_err(), "domain with whitespace must be rejected");
+	}
+
+	#[test]
+	fn pr4_deserialize_uses_last_colon_for_split() {
+		// Without an IPv6 bracket form, an embedded `:` is ambiguous. The
+		// hardened parser uses `rsplit_once(':')`, so the host part keeps any
+		// leading colons; the validation step then catches the malformed
+		// IPv6-like literal.
+		let result: Result<TargetAddr, _> = serde_json::from_str("\"a:b:80\"");
+		assert!(result.is_err(), "ambiguous `a:b:80` must be rejected");
 	}
 }
