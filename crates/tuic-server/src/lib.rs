@@ -22,12 +22,22 @@ pub struct AppContext {
 	pub cancel: CancellationToken,
 }
 
-/// Run the TUIC server with the given configuration (using wind-tuic)
+/// Run the TUIC server with the given configuration (using wind-tuic).
+///
+/// Constructs its own [`CancellationToken`] internally; callers that want to
+/// drive a graceful shutdown from outside should use [`run_with_cancel`].
 pub async fn run(cfg: Config) -> eyre::Result<()> {
-	let ctx = Arc::new(AppContext {
-		cancel: CancellationToken::new(),
-		cfg,
-	});
+	run_with_cancel(cfg, CancellationToken::new()).await
+}
+
+/// Run the TUIC server with a caller-owned cancel token.
+///
+/// Cancelling `cancel` causes the listen loop to exit and every spawned
+/// connection/UDP-session handler to wind down via its child token. Pair with
+/// `tokio::select!` on `ctrl_c()` so signal-triggered shutdown is graceful
+/// instead of relying on runtime drop.
+pub async fn run_with_cancel(cfg: Config, cancel: CancellationToken) -> eyre::Result<()> {
+	let ctx = Arc::new(AppContext { cancel, cfg });
 
 	// Create wind-tuic inbound and adapter
 	let (inbound, adapter) = wind_adapter::create_inbound(ctx).await?;

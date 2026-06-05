@@ -178,7 +178,17 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 		load_cert_from_files(&cfg.tls.certificate, &cfg.tls.private_key)?
 	};
 
-	let wind_ctx = Arc::new(AppContext::default());
+	// Derive the wind-core token from the tuic-server cancel token so a single
+	// `cancel()` from the binary's signal handler tears down the listen loop
+	// AND every spawned inbound task (each wind_ctx.tasks-tracked task uses a
+	// child of `wind_ctx.token`). Previously `wind_ctx` was an independent
+	// `AppContext::default()`, so ctrl-c would return from `main` while the
+	// listen loop was still alive in the background — quinn's connections
+	// stayed up and log guards never flushed.
+	let wind_ctx = Arc::new(AppContext {
+		tasks: tokio_util::task::TaskTracker::new(),
+		token: ctx.cancel.child_token(),
+	});
 
 	let default_ip_mode = cfg.outbound.default.ip_mode.unwrap_or(StackPrefer::V4first);
 	let resolver: Arc<dyn Resolver> = match wind_dns::build(&cfg.dns)? {

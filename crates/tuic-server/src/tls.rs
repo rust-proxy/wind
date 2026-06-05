@@ -47,11 +47,39 @@ impl CertResolver {
 		let mut interval = tokio::time::interval(interval);
 		loop {
 			interval.tick().await;
-			let hash = Self::calc_hash(&self.cert_path, &self.key_path).await?;
-			if &hash != self.hash.swap(hash.into()).deref() {
-				match self.reload_cert_key().await {
-					Ok(_) => warn!("Successfully reloaded TLS certificate and key"),
-					Err(e) => warn!("Failed to reload TLS certificate and key: {e}"),
+
+			// Treat I/O errors here as transient (the cert file may be in the
+			// middle of an ACME-driven `rename`, the directory may be missing
+			// permission briefly during a system update, etc.). Previously
+			// `?` propagated the error out of the spawned watcher task and the
+			// watcher silently died — hot-reload then permanently stopped
+			// working until the process was restarted.
+			let new_hash = match Self::calc_hash(&self.cert_path, &self.key_path).await {
+				Ok(h) => h,
+				Err(e) => {
+					warn!("Certificate watcher: failed to hash cert/key (will retry on next tick): {e}");
+					continue;
+				}
+			};
+
+			// Compare against the currently committed hash WITHOUT swapping
+			// first. The previous code did `swap(new_hash)` even when the
+			// reload subsequently failed; the next tick then saw an unchanged
+			// hash and never retried, leaving the old (possibly expired)
+			// certificate served forever with no further warnings.
+			if self.hash.load().deref().as_ref() == &new_hash {
+				continue;
+			}
+
+			match self.reload_cert_key().await {
+				Ok(_) => {
+					// Only commit the new hash on a successful reload, so a
+					// failed reload keeps retrying on subsequent ticks.
+					self.hash.store(Arc::new(new_hash));
+					warn!("Successfully reloaded TLS certificate and key");
+				}
+				Err(e) => {
+					warn!("Failed to reload TLS certificate and key (will retry on next tick): {e}");
 				}
 			}
 		}

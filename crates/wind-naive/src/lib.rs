@@ -196,7 +196,25 @@ impl AbstractOutbound for NaiveOutbound {
 		naive_async_bridge(naive_conn, stream).await
 	}
 
+	// FIXME(PR3-followup): three known issues in this UDP path that aren't
+	// addressed here because they all require a Naive UDP multiplex protocol
+	// implementation, not just polish:
+	//   1. Every incoming packet `tokio::spawn`s a new task and a fresh
+	//      `udp_tunnel_tx` connection — full TLS+HTTP-CONNECT cost per datagram. A
+	//      small per-{src_addr,target} session pool would amortise that.
+	//   2. No spawn ceiling. A UDP flood from any inbound becomes an unbounded task
+	//      fan-out.
+	//   3. The `tx` half is discarded (`_tx`), so UDP replies are silently
+	//      black-holed. Needs a real receive demuxer.
+	// Until #1–#3 land, the only mitigation here is a `Semaphore` to bound
+	// concurrent tunnels; document the limitation rather than silently
+	// dropping packets.
 	async fn handle_udp(&self, udp_stream: UdpStream, _via: Option<impl AbstractOutbound + Sized + Send>) -> eyre::Result<()> {
+		use tokio::sync::Semaphore;
+
+		const MAX_CONCURRENT_UDP_TUNNELS: usize = 64;
+		let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_UDP_TUNNELS));
+
 		let UdpStream { tx: _tx, mut rx } = udp_stream;
 		let client = self.client.clone();
 
@@ -210,8 +228,21 @@ impl AbstractOutbound for NaiveOutbound {
 			let client = client.clone();
 			let payload_len = payload.len();
 
+			let permit = match permits.clone().try_acquire_owned() {
+				Ok(p) => p,
+				Err(_) => {
+					tracing::warn!(
+						target = %target_str,
+						bytes = payload_len,
+						"[NAIVE:UDP] {MAX_CONCURRENT_UDP_TUNNELS} concurrent tunnels in flight; dropping packet",
+					);
+					continue;
+				}
+			};
+
 			tokio::spawn(
 				async move {
+					let _permit = permit; // released on drop
 					if let Err(e) = udp_tunnel_tx(client, &target_str, &payload).await {
 						tracing::warn!(target = %target_str, error = %e, "[NAIVE:UDP] tunnel failed");
 					} else {
@@ -275,8 +306,15 @@ async fn naive_async_bridge(
 	let span = tracing::debug_span!("naive_bridge");
 
 	async move {
-		let (naive_write_tx, mut naive_write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-		let (naive_read_tx, mut naive_read_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+		// Bounded channels apply back-pressure to producers when the I/O
+		// thread or the async reader can't keep up. The previous
+		// `unbounded_channel` would let a stalled consumer accrete an
+		// unbounded queue, causing the per-connection bridge to OOM under a
+		// busy upstream. 64 entries × MAX chunk size keeps a tight ceiling
+		// while remaining deep enough to absorb single-RTT bursts.
+		const NAIVE_BRIDGE_QUEUE: usize = 64;
+		let (naive_write_tx, mut naive_write_rx) = mpsc::channel::<Vec<u8>>(NAIVE_BRIDGE_QUEUE);
+		let (naive_read_tx, mut naive_read_rx) = mpsc::channel::<Vec<u8>>(NAIVE_BRIDGE_QUEUE);
 
 		// ── I/O thread (owns NaiveConn) ──────────────────────────────
 		let io_handle = std::thread::Builder::new()
@@ -308,7 +346,10 @@ async fn naive_async_bridge(
 							return;
 						}
 						Ok(n) => {
-							if naive_read_tx.send(read_buf[..n].to_vec()).is_err() {
+							// I/O thread is sync; use `blocking_send` so back-
+							// pressure naturally stalls reads from `naive`
+							// instead of OOMing the queue.
+							if naive_read_tx.blocking_send(read_buf[..n].to_vec()).is_err() {
 								return;
 							}
 						}
@@ -330,7 +371,7 @@ async fn naive_async_bridge(
 					match result {
 						Ok(0) => break,
 						Ok(n) => {
-							if naive_write_tx.send(local_buf[..n].to_vec()).is_err() {
+							if naive_write_tx.send(local_buf[..n].to_vec()).await.is_err() {
 								break;
 							}
 							local_buf = vec![0u8; 65535];

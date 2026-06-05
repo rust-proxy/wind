@@ -265,8 +265,28 @@ impl AbstractOutbound for TuicOutbound {
 		use std::sync::atomic::Ordering;
 		// Create a cancel token for single udp session
 		let cancel = self.token.child_token();
-		// Generate a new UDP association ID
-		let assoc_id = self.udp_assoc_counter.fetch_add(1, Ordering::SeqCst);
+
+		// Allocate a u16 association id, skipping ids that already have a live
+		// session. Plain `fetch_add` would wrap silently into an active slot and
+		// `udp_session.insert` would overwrite the previous Arc<UdpStream>,
+		// dropping any in-flight packets for the original session and confusing
+		// the peer (which still routes by the now-stolen id). We probe up to
+		// `u16::MAX` candidates and refuse to allocate if every slot is in use.
+		let assoc_id = {
+			let mut id = self.udp_assoc_counter.fetch_add(1, Ordering::SeqCst);
+			let mut probes = 0u32;
+			while self.udp_session.get(&id).await.is_some() {
+				probes += 1;
+				if probes >= u16::MAX as u32 {
+					return Err(eyre::eyre!(
+						"UDP association id exhausted ({} concurrent sessions on this outbound)",
+						self.udp_session.entry_count()
+					));
+				}
+				id = self.udp_assoc_counter.fetch_add(1, Ordering::SeqCst);
+			}
+			id
+		};
 		info!(target: "tuic_out", "Creating new UDP association: {:#06x}", assoc_id);
 
 		let connection = self.connection.clone();

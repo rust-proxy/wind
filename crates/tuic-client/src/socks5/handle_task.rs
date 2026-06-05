@@ -140,7 +140,14 @@ impl Server {
 
 				debug!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] stopped associating");
 
-				UDP_SESSIONS.get().unwrap().write().await.remove(&assoc_id).unwrap();
+				// `assoc_id` is `u16` and the allocator does fetch_add(Relaxed)
+				// without wraparound protection, so two concurrent SOCKS5
+				// connections can land on the same id. If a remote-side close
+				// path got there first this `remove` returns `None`; previously
+				// the trailing `.unwrap()` panicked and tore the entire SOCKS5
+				// connection handler down. Now drop the result quietly — the
+				// session is gone either way.
+				let _ = UDP_SESSIONS.get().unwrap().write().await.remove(&assoc_id);
 
 				// Cancel the outbound UDP handler
 				outbound_handle.abort();

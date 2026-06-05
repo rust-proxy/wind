@@ -194,3 +194,65 @@ async fn reply_header_origin_is_remote_not_client() {
 	assert_eq!(origin_port, remote_origin.port(), "reply origin port must match remote");
 	assert_eq!(&frame[payload_start..], b"reply");
 }
+
+/// PR3-G regression: a datagram that passes the source-IP check but fails to
+/// parse as a SOCKS5 UDP request must NOT update the relay's latched client
+/// address. Previously `source_addr.store(addr)` happened BEFORE parsing, so
+/// a malformed packet from an authorized source IP could displace the
+/// legitimate sender's port, sending all subsequent replies to a stale or
+/// hostile peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_packet_does_not_displace_latched_source() {
+	let (relay_addr, mut rx_at_upstream, tx_at_upstream) = spawn_relay(Some(IpAddr::V4(Ipv4Addr::LOCALHOST))).await;
+
+	// 1) Send a well-formed packet from a legitimate sender. This both passes the
+	//    IP check and (with the fix) sets `source_addr` to its `(127.0.0.1,
+	//    legit_port)`.
+	let legit = UdpSocket::bind("127.0.0.1:0").await.expect("bind legit");
+	let legit_addr = legit.local_addr().unwrap();
+	let frame = make_socks_udp_pkt(SocketAddr::from(([1, 1, 1, 1], 53)), b"first");
+	legit.send_to(&frame, relay_addr).await.expect("send legit");
+	let _ = timeout(Duration::from_millis(500), rx_at_upstream.recv())
+		.await
+		.expect("legit packet must be forwarded")
+		.expect("upstream channel closed");
+
+	// 2) Send a MALFORMED packet (RSV != 0x00 0x00) from a DIFFERENT 127.0.0.1
+	//    port. Pre-PR3-G this stored the malformed sender's address into
+	//    `source_addr` *before* parsing failed.
+	let mallory = UdpSocket::bind("127.0.0.1:0").await.expect("bind mallory");
+	let mallory_addr = mallory.local_addr().unwrap();
+	assert_ne!(legit_addr, mallory_addr, "test setup: distinct local ports");
+	let mut bad = vec![0xffu8, 0xff, 0x00, 0x01];
+	bad.extend_from_slice(&[1, 1, 1, 1, 0, 53]);
+	bad.extend_from_slice(b"junk");
+	mallory.send_to(&bad, relay_addr).await.expect("send malformed");
+	// Give the relay a tick to process (or drop) the bad packet.
+	tokio::time::sleep(Duration::from_millis(50)).await;
+
+	// 3) Inject a reply from upstream. It should still be delivered to
+	//    `legit_addr`, NOT `mallory_addr`.
+	tx_at_upstream
+		.send(UdpPacket {
+			source: Some(TargetAddr::IPv4(Ipv4Addr::new(1, 1, 1, 1), 53)),
+			target: TargetAddr::IPv4(Ipv4Addr::new(1, 1, 1, 1), 53),
+			payload: Bytes::from_static(b"reply"),
+		})
+		.await
+		.unwrap();
+
+	// 4) `legit` should receive; `mallory` should not.
+	let mut buf = [0u8; 256];
+	let legit_recv = timeout(Duration::from_millis(500), legit.recv_from(&mut buf)).await;
+	assert!(
+		legit_recv.is_ok(),
+		"reply should reach the legitimate client even though a malformed packet arrived after the first valid one"
+	);
+
+	let mut buf2 = [0u8; 256];
+	let mallory_recv = timeout(Duration::from_millis(150), mallory.recv_from(&mut buf2)).await;
+	assert!(
+		mallory_recv.is_err(),
+		"reply must NOT be diverted to the malformed-packet sender: {mallory_recv:?}"
+	);
+}

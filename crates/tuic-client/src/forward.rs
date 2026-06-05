@@ -5,7 +5,6 @@ use std::{
 		Arc,
 		atomic::{AtomicU16, Ordering},
 	},
-	time::Duration,
 };
 
 use bytes::Bytes;
@@ -144,6 +143,15 @@ fn create_tcp_listener(addr: SocketAddr) -> Result<TcpListener, Error> {
 	TcpListener::from_std(StdTcpListener::from(socket)).map_err(|err| Error::Socket("failed to create tcp forward socket", err))
 }
 
+/// Per-`src_addr` UDP forwarder session. Holds a sender into a single,
+/// persistent `UdpStream` that's bridged through `wind_adapter::handle_udp`,
+/// plus an `Instant` of last activity used for idle expiry.
+struct UdpForwardSession {
+	assoc_id: u16,
+	tx_to_out: tokio::sync::mpsc::Sender<UdpPacket>,
+	last_seen: std::time::Instant,
+}
+
 async fn run_udp_forwarder(entry: UdpForward) {
 	let socket = match UdpSocket::bind(entry.listen).await {
 		Ok(s) => s,
@@ -161,86 +169,118 @@ async fn run_udp_forwarder(entry: UdpForward) {
 	);
 
 	let mut buf = vec![0u8; 65535];
-	// Map from client src addr to assoc_id for this forwarder instance
-	let mut src_map: HashMap<SocketAddr, u16> = HashMap::new();
+
+	// Per-`src_addr` sessions. Previously every incoming UDP packet spawned a
+	// fresh task that opened a one-shot TUIC `UdpStream`, sent the single
+	// payload and closed — paying the entire stream-setup cost per datagram
+	// and forfeiting NAT 5-tuple state on the remote. Now we keep one
+	// `UdpForwardSession` per source address with a long-lived `UdpStream`
+	// bridge and feed every subsequent packet from that source through the
+	// same channel. Idle sessions are reaped on a coarse-grained interval.
+	let mut sessions: HashMap<SocketAddr, UdpForwardSession> = HashMap::new();
+	let mut gc_interval = tokio::time::interval(entry.timeout / 4);
+	gc_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
 	loop {
-		match socket.recv_from(&mut buf).await {
-			Ok((n, src_addr)) => {
-				let pkt = Bytes::copy_from_slice(&buf[..n]);
-				let assoc_id = match src_map.get(&src_addr).cloned() {
-					Some(id) => id,
-					None => {
-						let id = next_assoc_id();
-						// register session
-						let session = ForwardUdpSession::new(socket.clone(), src_addr, id);
-						UDP_SESSIONS.get().unwrap().write().await.insert(id, session);
-						src_map.insert(src_addr, id);
-						// Spawn timeout watcher
-						tokio::spawn(expire_after(id, entry.timeout));
-						id
-					}
-				};
+		tokio::select! {
+			recv = socket.recv_from(&mut buf) => match recv {
+				Ok((n, src_addr)) => {
+					let pkt = Bytes::copy_from_slice(&buf[..n]);
+					let target = TargetAddr::Domain(entry.remote.0.clone(), entry.remote.1);
 
-				let remote = entry.remote.clone();
-				let socket_clone = socket.clone();
-				tokio::spawn(async move {
-					let adapter = match wind_adapter::get_connection() {
-						Some(a) => a,
-						None => {
-							warn!("[forward-udp] wind adapter not initialized");
-							return;
-						}
-					};
-					let target = TargetAddr::Domain(remote.0, remote.1);
+					// Look up or create the session for this source.
+					let session = sessions.entry(src_addr).or_insert_with(|| {
+						let assoc_id = next_assoc_id();
+						let socket_for_reply = socket.clone();
+						let (tx_to_out, rx_from_local) = tokio::sync::mpsc::channel::<UdpPacket>(64);
+						let (tx_to_local, mut rx_from_out) = tokio::sync::mpsc::channel::<UdpPacket>(64);
+						let udp_stream = UdpStream { tx: tx_to_local, rx: rx_from_local };
 
-					// Build a one-shot UdpStream: send pkt then close
-					let (tx_to_out, rx_from_local) = tokio::sync::mpsc::channel::<UdpPacket>(8);
-					let (tx_to_local, mut rx_from_out) = tokio::sync::mpsc::channel::<UdpPacket>(8);
+						UDP_SESSIONS
+							.get()
+							.map(|s| s.try_write().map(|mut w| {
+								w.insert(assoc_id, ForwardUdpSession::new(socket.clone(), src_addr, assoc_id));
+							}))
+							.and_then(|res| res.ok())
+							.unwrap_or(());
 
-					let udp_stream = UdpStream {
-						tx: tx_to_local,
-						rx: rx_from_local,
-					};
-
-					// Send the single packet
-					let _ = tx_to_out
-						.send(UdpPacket {
-							source: None,
-							target: target.clone(),
-							payload: pkt,
-						})
-						.await;
-					drop(tx_to_out);
-
-					// Bridge outbound replies back to the local socket
-					tokio::spawn(async move {
-						while let Some(reply_pkt) = rx_from_out.recv().await {
-							if let Err(err) = socket_clone.send_to(&reply_pkt.payload, src_addr).await {
-								warn!("[forward-udp] [{assoc:#06x}] reply send error: {err}", assoc = assoc_id);
+						// Reply bridge: take packets coming back from the outbound
+						// and write them to the original src_addr.
+						tokio::spawn(async move {
+							while let Some(reply_pkt) = rx_from_out.recv().await {
+								if let Err(err) = socket_for_reply.send_to(&reply_pkt.payload, src_addr).await {
+									warn!("[forward-udp] [{assoc_id:#06x}] reply send error: {err}");
+								}
 							}
+						}.instrument(tracing::info_span!("forward_udp_reply", peer = %src_addr, assoc_id)));
+
+						// One persistent `handle_udp` per session.
+						tokio::spawn(async move {
+							let Some(adapter) = wind_adapter::get_connection() else {
+								warn!("[forward-udp] wind adapter not initialized");
+								return;
+							};
+							if let Err(err) = adapter
+								.handle_udp(udp_stream, None::<wind_adapter::TuicOutboundAdapter>)
+								.await
+							{
+								warn!("[forward-udp] [{assoc_id:#06x}] relay error: {err}");
+							}
+						}.instrument(tracing::info_span!("forward_udp_relay", peer = %src_addr, assoc_id)));
+
+						UdpForwardSession {
+							assoc_id,
+							tx_to_out,
+							last_seen: std::time::Instant::now(),
 						}
 					});
 
-					if let Err(err) = adapter
-						.handle_udp(udp_stream, None::<wind_adapter::TuicOutboundAdapter>)
-						.await
-					{
-						warn!("[forward-udp] [{assoc:#06x}] relay error: {err}", assoc = assoc_id);
+					session.last_seen = std::time::Instant::now();
+					let assoc_id = session.assoc_id;
+
+					// Forward the packet through the existing session. A
+					// `try_send` failure means the outbound side is saturated;
+					// drop with a debug log rather than blocking the recv loop.
+					match session.tx_to_out.try_send(UdpPacket {
+						source: None,
+						target,
+						payload: pkt,
+					}) {
+						Ok(()) => {}
+						Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+							debug!("[forward-udp] [{assoc_id:#06x}] outbound queue full; dropping packet from {src_addr}");
+						}
+						Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+							debug!("[forward-udp] [{assoc_id:#06x}] outbound closed; removing session for {src_addr}");
+							sessions.remove(&src_addr);
+							if let Some(reg) = UDP_SESSIONS.get() {
+								let _ = reg.try_write().map(|mut w| w.remove(&assoc_id));
+							}
+						}
+					}
+				}
+				Err(err) => warn!("[forward-udp] recv_from error: {err}"),
+			},
+			_ = gc_interval.tick() => {
+				// Reap idle sessions. Dropping the entry drops `tx_to_out`,
+				// which closes `rx_from_local` and lets the spawned relay
+				// task exit cleanly.
+				let now = std::time::Instant::now();
+				sessions.retain(|src_addr, s| {
+					if now.duration_since(s.last_seen) >= entry.timeout {
+						debug!(
+							"[forward-udp] [{assoc:#06x}] idle timeout; dropping session for {src_addr}",
+							assoc = s.assoc_id
+						);
+						if let Some(reg) = UDP_SESSIONS.get() {
+							let _ = reg.try_write().map(|mut w| w.remove(&s.assoc_id));
+						}
+						false
+					} else {
+						true
 					}
 				});
 			}
-			Err(err) => warn!("[forward-udp] recv_from error: {err}"),
-		}
-	}
-}
-
-async fn expire_after(assoc_id: u16, timeout: Duration) {
-	tokio::time::sleep(timeout).await;
-	if let Some(session) = UDP_SESSIONS.get() {
-		let mut w = session.write().await;
-		if w.remove(&assoc_id).is_some() {
-			debug!("[forward-udp] [{assoc:#06x}] timeout; dissociated", assoc = assoc_id);
 		}
 	}
 }

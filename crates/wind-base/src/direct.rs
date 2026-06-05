@@ -88,9 +88,16 @@ async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>
 
 	let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
-	// Task: client → target
+	// Both directions are inlined as plain futures rather than `tokio::spawn`ed
+	// — `select!` then implicitly aborts whichever half-loop is still pending
+	// when its sibling finishes. Previously each branch was its own spawned
+	// task and `select!` only awaited the JoinHandles, so the surviving task
+	// kept polling on the shared `relay_socket`/channel until the receiver
+	// closed — i.e. forever for a long-lived `tx`. Result: one leaked task
+	// per UDP association, plus a `relay_socket` that stayed bound until OS
+	// FD-table pressure forced a recycle.
 	let socket_send = relay_socket.clone();
-	let send_task = tokio::spawn(async move {
+	let send_fut = async move {
 		while let Some(pkt) = rx.recv().await {
 			let target_sa = match resolve_target(&pkt.target, resolver.as_ref()).await {
 				Ok(sa) => sa,
@@ -103,11 +110,10 @@ async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>
 				tracing::warn!(target = %target_sa, error = %err, "UDP send failed");
 			}
 		}
-	});
+	};
 
-	// Task: target → client
 	let socket_recv = relay_socket.clone();
-	let recv_task = tokio::spawn(async move {
+	let recv_fut = async move {
 		let mut buf = vec![0u8; 65535];
 		loop {
 			match socket_recv.recv_from(&mut buf).await {
@@ -129,11 +135,11 @@ async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>
 				}
 			}
 		}
-	});
+	};
 
 	tokio::select! {
-		_ = send_task => {}
-		_ = recv_task => {}
+		_ = send_fut => {}
+		_ = recv_fut => {}
 	}
 
 	Ok(())

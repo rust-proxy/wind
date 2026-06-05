@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use crossfire::{AsyncRx, spsc};
+use crossfire::{AsyncRx, SendTimeoutError, spsc};
 use quinn::{RecvStream, SendStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, info, warn};
@@ -50,9 +50,22 @@ where
 						};
 
 						info!("Accepted new {}", name);
-						if let Err(e) = tx.send_timeout(item, Duration::from_secs(1)).await {
-							warn!("{} channel send failed (receiver dropped or timeout): {e:?}", name);
-							break;
+						// Distinguish a closed channel (consumer permanently
+						// gone — we must exit) from a slow consumer (transient
+						// back-pressure — drop the item and keep accepting).
+						// Previously both bailed out of the accept loop, so a
+						// single slow downstream pinned every future incoming
+						// stream/datagram on this connection.
+						match tx.send_timeout(item, Duration::from_secs(1)).await {
+							Ok(()) => {}
+							Err(SendTimeoutError::Disconnected(_)) => {
+								warn!("{name} consumer dropped; ending accept loop");
+								break;
+							}
+							Err(SendTimeoutError::Timeout(_)) => {
+								warn!("{name} consumer slow (>1s); dropping item and continuing");
+								continue;
+							}
 						}
 					}
 					_ = cancel_token.cancelled() => {

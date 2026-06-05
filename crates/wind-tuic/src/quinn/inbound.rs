@@ -257,6 +257,12 @@ impl AbstractInbound for TuicInbound {
 		let users = Arc::new(self.opts.users.clone());
 
 		loop {
+			// `endpoint.accept()` returns `None` once the endpoint is shut down
+			// (e.g. the underlying socket closed). Without an `else =>` arm the
+			// `tokio::select!` macro panics when every branch is disabled —
+			// `Some(...) = endpoint.accept()` is the only data branch and it
+			// goes from "pending" to "disabled" the instant `accept()` yields
+			// `None`. Catch that as a normal shutdown.
 			tokio::select! {
 				_ = self.cancel.cancelled() => {
 					info!("TUIC server shutting down");
@@ -277,6 +283,10 @@ impl AbstractInbound for TuicInbound {
 						handle_connection(incoming, users, auth_timeout, zero_rtt, cb, conn_cancel),
 					).instrument(span));
 				}
+				else => {
+					info!("TUIC endpoint closed; shutting down listen loop");
+					break;
+				}
 			}
 		}
 
@@ -291,12 +301,38 @@ struct InboundCtx {
 	users: Arc<HashMap<Uuid, String>>,
 	auth_timeout: Duration,
 	udp_sessions: Cache<u16, UdpSession>,
+	/// Parent of every per-UDP-session cancel token. Cancelling this tears
+	/// down all live bridge tasks at once (used when the parent connection
+	/// terminates).
+	udp_root_cancel: CancellationToken,
 }
 
+/// Per-UDP-session state stored in the LRU cache.
+///
+/// `cancel` is a child of `InboundCtx::udp_root_cancel` and is wired into the
+/// three bridge tasks via `tokio::select!`. When the session is evicted —
+/// either by an explicit `Dissociate` command via `handle_dissociate` or by
+/// LRU/capacity pressure — the moka `async_eviction_listener` calls
+/// `cancel.cancel()`, causing all bridge tasks to exit promptly. Without this
+/// the tasks captured strong `Arc<UdpStream>` clones AND owned the channel
+/// halves they recv from, forming a self-sustaining cycle that survived the
+/// cache eviction. The session "removed" from the cache but the tasks kept
+/// running until the connection died, letting a peer that cycles assoc_ids
+/// pile up unbounded background work.
 #[derive(Clone)]
 struct UdpSession {
 	tuic_stream: Arc<crate::proto::UdpStream>,
+	cancel: CancellationToken,
 }
+
+/// Per-connection ceiling on concurrent UDP associations. The previous
+/// `u16::MAX` covered the entire association-id space — every assoc id had a
+/// reserved cache slot and each session spawned three tasks plus four
+/// channels, so a single authenticated peer could pin ~200k tasks at
+/// O(few MB) state each. 1024 is plenty for legitimate clients (the spec's
+/// own example uses single-digit assoc_ids) while keeping per-connection
+/// memory bounded.
+const MAX_UDP_SESSIONS_PER_CONN: u64 = 1024;
 
 async fn handle_connection<C: InboundCallback>(
 	incoming: quinn::Incoming,
@@ -342,13 +378,31 @@ async fn handle_connection<C: InboundCallback>(
 		conn
 	};
 
+	let udp_root_cancel = cancel.child_token();
+
+	// Eviction listener fires for both explicit `remove()` (via
+	// `handle_dissociate`) and capacity/LRU pressure. Cancel the session's
+	// token so the bridge tasks unstick from their channel waits and shut
+	// down promptly. Using the async listener so we can be cheap & infallible
+	// — just toggle the token.
+	let eviction_cancel = move |_k: Arc<u16>, v: UdpSession, _cause| -> moka::notification::ListenerFuture {
+		Box::pin(async move {
+			v.cancel.cancel();
+		})
+	};
+	let udp_sessions = Cache::builder()
+		.max_capacity(MAX_UDP_SESSIONS_PER_CONN)
+		.async_eviction_listener(eviction_cancel)
+		.build();
+
 	let connection = Arc::new(InboundCtx {
 		conn: conn.clone(),
 		uuid: ArcSwapOption::empty(),
 		auth_notify: Arc::new(Notify::new()),
 		users,
 		auth_timeout,
-		udp_sessions: Cache::new(u16::MAX.into()),
+		udp_sessions,
+		udp_root_cancel,
 	});
 
 	// Spawn authentication timeout task.
@@ -779,6 +833,7 @@ async fn get_or_create_session<C: InboundCallback>(
 
 	let cb = callback.clone();
 	let conn = ctx.conn.clone();
+	let session_cancel = ctx.udp_root_cancel.child_token();
 	let session = ctx
 		.udp_sessions
 		.entry(assoc_id)
@@ -798,14 +853,30 @@ async fn get_or_create_session<C: InboundCallback>(
 			};
 
 			// Bridge reassembled packets from quinn -> outbound with backpressure.
+			let cancel_a = session_cancel.clone();
 			tokio::spawn(
 				async move {
-					while let Ok(packet) = reassembled_rx.recv().await {
-						match tokio::time::timeout(Duration::from_secs(5), to_outbound_tx.send(packet)).await {
-							Ok(Ok(())) => {}
-							Ok(Err(mpsc::error::SendError(_))) => break,
-							Err(_) => {
-								warn!("UDP outbound queue full (assoc {}), dropping packet after 5s", assoc_id);
+					loop {
+						tokio::select! {
+							biased;
+							_ = cancel_a.cancelled() => break,
+							res = reassembled_rx.recv() => {
+								let packet = match res {
+									Ok(p) => p,
+									Err(_) => break,
+								};
+								tokio::select! {
+									_ = cancel_a.cancelled() => break,
+									send_res = tokio::time::timeout(Duration::from_secs(5), to_outbound_tx.send(packet)) => {
+										match send_res {
+											Ok(Ok(())) => {}
+											Ok(Err(mpsc::error::SendError(_))) => break,
+											Err(_) => {
+												warn!("UDP outbound queue full (assoc {}), dropping packet after 5s", assoc_id);
+											}
+										}
+									}
+								}
 							}
 						}
 					}
@@ -815,12 +886,20 @@ async fn get_or_create_session<C: InboundCallback>(
 
 			{
 				let response_stream = tuic_stream.clone();
+				let cancel_b = session_cancel.clone();
 				tokio::spawn(
 					async move {
-						while let Some(packet) = from_outbound_rx.recv().await {
-							if let Err(e) = response_stream.send_packet(packet).await {
-								warn!("Failed to send UDP response (assoc {}): {}", assoc_id, e);
-								break;
+						loop {
+							tokio::select! {
+								biased;
+								_ = cancel_b.cancelled() => break,
+								maybe_packet = from_outbound_rx.recv() => {
+									let Some(packet) = maybe_packet else { break };
+									if let Err(e) = response_stream.send_packet(packet).await {
+										warn!("Failed to send UDP response (assoc {}): {}", assoc_id, e);
+										break;
+									}
+								}
 							}
 						}
 					}
@@ -829,17 +908,30 @@ async fn get_or_create_session<C: InboundCallback>(
 			}
 
 			{
+				let cancel_c = session_cancel.clone();
 				tokio::spawn(
 					async move {
-						if let Err(e) = cb.handle_udpstream(outbound_stream).await {
-							error!("UDP stream handler error (assoc {}): {}", assoc_id, e);
+						// `handle_udpstream` typically runs forever; race the
+						// session-cancel token so it exits with the rest of
+						// the session instead of holding the callback's
+						// resources hostage after eviction/dissociate.
+						tokio::select! {
+							_ = cancel_c.cancelled() => {}
+							res = cb.handle_udpstream(outbound_stream) => {
+								if let Err(e) = res {
+									error!("UDP stream handler error (assoc {}): {}", assoc_id, e);
+								}
+							}
 						}
 					}
 					.in_current_span(),
 				);
 			}
 
-			UdpSession { tuic_stream }
+			UdpSession {
+				tuic_stream,
+				cancel: session_cancel,
+			}
 		})
 		.await;
 
