@@ -619,8 +619,20 @@ mod tests {
 		dispatcher.add_handler("relay", handler.clone());
 
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
-		let (_tx2, rx2) = tokio::sync::mpsc::channel(1);
+		let (tx2, rx2) = tokio::sync::mpsc::channel(1);
 		let stream = UdpStream { tx, rx: rx2 };
+
+		// `dispatch_udp` now awaits the first packet so it can route by the
+		// real target rather than a sentinel — push one in so the routing
+		// decision happens, then drop the sender to signal end-of-stream.
+		tx2.send(crate::udp::UdpPacket {
+			source: None,
+			target: TargetAddr::Domain("anywhere.example".into(), 80),
+			payload: bytes::Bytes::new(),
+		})
+		.await
+		.unwrap();
+		drop(tx2);
 
 		dispatcher.handle_udpstream(stream).await.unwrap();
 		assert!(handler.udp_called.load(Ordering::Relaxed));
