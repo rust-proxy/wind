@@ -227,7 +227,7 @@ async fn malformed_packet_does_not_displace_latched_source() {
 	bad.extend_from_slice(&[1, 1, 1, 1, 0, 53]);
 	bad.extend_from_slice(b"junk");
 	mallory.send_to(&bad, relay_addr).await.expect("send malformed");
-	// Give the relay a tick to (mis)handle the bad packet.
+	// Give the relay a tick to process (or drop) the bad packet.
 	tokio::time::sleep(Duration::from_millis(50)).await;
 
 	// 3) Inject a reply from upstream. It should still be delivered to
