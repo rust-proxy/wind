@@ -222,10 +222,10 @@ mod test {
 		let mut expect_len = 0;
 		for var in &vars {
 			match var {
-				Address::None => expect_len = expect_len + 1,
-				Address::Domain(domain, _) => expect_len = expect_len + 1 + 1 + domain.len() + 2,
-				Address::IPv4(..) => expect_len = expect_len + 1 + 4 + 2,
-				Address::IPv6(..) => expect_len = expect_len + 1 + 16 + 2,
+				Address::None => expect_len += 1,
+				Address::Domain(domain, _) => expect_len += 1 + 1 + domain.len() + 2,
+				Address::IPv4(..) => expect_len += 1 + 4 + 2,
+				Address::IPv6(..) => expect_len += 1 + 16 + 2,
 			}
 			writer.send(var.clone()).await?;
 			assert_eq!(writer.get_ref().len(), expect_len);
@@ -259,7 +259,7 @@ mod test {
 
 			// Split the encoded data in half to simulate partial data arrival
 			let full_len = buffer.len();
-			let mut half_b = buffer.split_off(full_len / 2 as usize);
+			let mut half_b = buffer.split_off(full_len / 2_usize);
 			let mut half_a = buffer;
 
 			// First half should result in BytesRemaining error
@@ -284,7 +284,7 @@ mod test {
 	#[test_log::test(tokio::test)]
 	async fn hex_check() -> eyre::Result<()> {
 		let mut buffer = Vec::new();
-		let vars = vec![
+		let vars = [
 			Address::None,
 			Address::IPv4(Ipv4Addr::LOCALHOST, 80),
 			Address::IPv6(Ipv6Addr::LOCALHOST, 12),

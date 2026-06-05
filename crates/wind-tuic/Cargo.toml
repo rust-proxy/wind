@@ -7,15 +7,11 @@ description.workspace = true
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["server", "client", "quiche", "quinn", "aws-lc-rs"]
-decode = []
-encode = []
+default = ["server", "client", "quinn", "aws-lc-rs"]
+decode = ["tuic-core/decode"]
+encode = ["tuic-core/encode"]
 server = ["decode"]
 client = ["encode"]
-
-# Quiche Backend
-boringssl = []   # Enable BoringSSL support via quiche
-quiche = ["dep:quiche"]
 
 # Quinn Backend
 quinn = ["dep:quinn", "dep:quinn-congestions", "dep:tokio-rustls", "dep:rustls", "dep:rustls-platform-verifier"]
@@ -32,6 +28,7 @@ ring = [
 
 [dependencies]
 wind-core = { version = "0.1.1", path = "../wind-core", features = ["quic"] }
+tuic-core = { version = "0.1.1", path = "../tuic-core", default-features = false }
 
 # Async
 tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "sync"] }
@@ -45,9 +42,6 @@ eyre = "0.6"
 uuid = { version = "1", features = ["v4"] }
 crossfire = { version = "3", features = ["tokio"] }
 moka = { version = "0.12", features = ["future"] }
-snafu = "0.9"
-num_enum = "0.7"
-hex = { package = "const-hex", version = "1" }
 arc-swap = "1.9.1"
 serde = { version = "1", features = ["derive"] }
 enum_dispatch = "0.3"
@@ -56,9 +50,6 @@ pin-project = "1"
 portable-atomic = { version = "1" }
 thiserror = "2"
 tracing = "0.1"
-
-# QUIC with quiche
-quiche = { version = "0.28", default-features = false, features = ["boringssl-boring-crate", "qlog"], optional = true }
 
 # QUIC with quinn
 quinn = { workspace = true, default-features = false, features = ["runtime-tokio"], optional = true }

@@ -148,14 +148,13 @@ mod test {
 		for cmd in vars {
 			let buffer = Vec::with_capacity(128);
 			let mut writer = FramedWrite::new(buffer, CmdCodec((&cmd).into()));
-			let mut expect_len = 0;
-			match cmd {
-				Command::Auth { .. } => expect_len = expect_len + 16 + 32,
-				Command::Connect => expect_len = expect_len + 0,
-				Command::Packet { .. } => expect_len = expect_len + 8,
-				Command::Dissociate { .. } => expect_len = expect_len + 2,
-				Command::Heartbeat => expect_len = expect_len + 0,
-			}
+			let expect_len = match cmd {
+				Command::Auth { .. } => 16 + 32,
+				Command::Connect => 0,
+				Command::Packet { .. } => 8,
+				Command::Dissociate { .. } => 2,
+				Command::Heartbeat => 0,
+			};
 			writer.send(cmd.clone()).await?;
 			assert_eq!(writer.get_ref().len(), expect_len);
 			let buffer = writer.get_ref();
@@ -190,7 +189,7 @@ mod test {
 			writer.send(cmd.clone()).await?;
 			let mut buffer = writer.into_inner();
 			let full_len = buffer.len();
-			let mut half_b = buffer.split_off(full_len / 2 as usize);
+			let mut half_b = buffer.split_off(full_len / 2_usize);
 			let mut half_a = buffer;
 			{
 				let mut reader = FramedRead::new(half_a.as_slice(), CmdCodec((&cmd).into()));

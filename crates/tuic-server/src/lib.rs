@@ -39,10 +39,10 @@ pub async fn run(cfg: Config) -> eyre::Result<()> {
 pub async fn run_with_cancel(cfg: Config, cancel: CancellationToken) -> eyre::Result<()> {
 	let ctx = Arc::new(AppContext { cancel, cfg });
 
-	// Create wind-tuic inbound and adapter
+	// Create the inbound (quinn or quiche, per `backend.mode`) and adapter.
 	let (inbound, adapter) = wind_adapter::create_inbound(ctx).await?;
 
-	tracing::info!("Starting TUIC server with wind-tuic backend");
+	tracing::info!("Starting TUIC server");
 
 	// Start the server
 	inbound.listen(&adapter).await

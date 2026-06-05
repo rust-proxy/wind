@@ -38,13 +38,21 @@ use wind_core::{
 	utils::{StackPrefer, is_private_ip},
 };
 use wind_socks::action::{Socks5Action, Socks5ActionOpts};
-use wind_tuic::{
-	quiche::inbound::{TuicheInbound, TuicheInboundBuilder},
-	quinn::inbound::{TuicInbound, TuicInboundOpts},
+use wind_tuic::quinn::inbound::{TuicInbound, TuicInboundOpts};
+use wind_tuiche::{TuicheInbound, TuicheInboundBuilder};
+
+use crate::{
+	AppContext as TuicAppContext,
+	acl::acl_to_rules,
+	config::{BackendMode, OutboundRule},
+	utils::CongestionController,
 };
 
+/// Inbound QUIC listener selected by `backend.mode`.
 pub enum ServerInbound {
+	/// quinn-based backend (`wind-tuic`).
 	Tuic(TuicInbound),
+	/// tokio-quiche-based backend (`wind-tuiche`).
 	Tuiche(TuicheInbound),
 }
 
@@ -57,8 +65,7 @@ impl wind_core::AbstractInbound for ServerInbound {
 	}
 }
 
-use crate::{AppContext as TuicAppContext, acl::acl_to_rules, config::OutboundRule};
-
+/// Build an [`OutboundAction`] for a single configured outbound rule.
 fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc<dyn OutboundAction> {
 	match rule.kind.as_str() {
 		"socks5" => Arc::new(Socks5Action::new(Socks5ActionOpts {
@@ -150,8 +157,57 @@ impl TuicRouter {
 }
 
 
-pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInbound, Dispatcher<TuicRouter>)> {
+/// Build the DNS resolver selected by the configuration.
+fn build_resolver(cfg: &crate::Config) -> eyre::Result<Arc<dyn Resolver>> {
+	let default_ip_mode = cfg.outbound.default.ip_mode.unwrap_or(StackPrefer::V4first);
+	let resolver: Arc<dyn Resolver> = match wind_dns::build(&cfg.dns)? {
+		Some(hickory) => {
+			tracing::info!("[dns] using {:?} resolver", cfg.dns.mode);
+			Arc::new(hickory)
+		}
+		None => {
+			tracing::info!("[dns] using system resolver");
+			Arc::new(SystemResolver::new(default_ip_mode))
+		}
+	};
+	Ok(resolver)
+}
+
+/// Assemble the routing [`Dispatcher`] (ACL router + named outbound handlers).
+///
+/// Backend-agnostic: the dispatcher is identical for both QUIC backends, which
+/// differ only in the inbound listener paired with it.
+fn build_dispatcher(ctx: Arc<TuicAppContext>, resolver: Arc<dyn Resolver>) -> Dispatcher<TuicRouter> {
 	let cfg = &ctx.cfg;
+	let router = TuicRouter::new(ctx.clone(), resolver.clone());
+	let mut dispatcher = Dispatcher::new(router);
+
+	dispatcher.add_handler("default", make_outbound_action(&cfg.outbound.default, resolver.clone()));
+
+	for (name, rule) in &cfg.outbound.named {
+		dispatcher.add_handler(name.clone(), make_outbound_action(rule, resolver.clone()));
+	}
+
+	dispatcher
+}
+
+pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInbound, Dispatcher<TuicRouter>)> {
+	let resolver = build_resolver(&ctx.cfg)?;
+	let dispatcher = build_dispatcher(ctx.clone(), resolver);
+
+	let inbound = match ctx.cfg.backend.mode {
+		BackendMode::Quinn => ServerInbound::Tuic(create_quinn_inbound(&ctx).await?),
+		BackendMode::Quiche => ServerInbound::Tuiche(create_quiche_inbound(&ctx).await?),
+	};
+
+	Ok((inbound, dispatcher))
+}
+
+/// Build the quinn (`wind-tuic`) inbound, including ACME / self-signed / file
+/// certificate resolution.
+async fn create_quinn_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<TuicInbound> {
+	let cfg = &ctx.cfg;
+	let quinn = &cfg.backend.quinn;
 
 	let mut cert_resolver = None;
 	let (certs, key) = if cfg.tls.auto_ssl && crate::tls::is_valid_domain(&cfg.tls.hostname) {
@@ -189,59 +245,73 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 		token: ctx.cancel.child_token(),
 	});
 
-	let default_ip_mode = cfg.outbound.default.ip_mode.unwrap_or(StackPrefer::V4first);
-	let resolver: Arc<dyn Resolver> = match wind_dns::build(&cfg.dns)? {
-		Some(hickory) => {
-			tracing::info!("[dns] using {:?} resolver", cfg.dns.mode);
-			Arc::new(hickory)
-		}
-		None => {
-			tracing::info!("[dns] using system resolver");
-			Arc::new(SystemResolver::new(default_ip_mode))
-		}
+	let opts = TuicInboundOpts {
+		listen_addr: cfg.server,
+		certificate: certs,
+		private_key: key,
+		cert_resolver,
+		alpn: cfg.tls.alpn.clone(),
+		users: cfg.users.clone(),
+		auth_timeout: cfg.auth_timeout,
+		max_idle_time: quinn.max_idle_time,
+		max_concurrent_bi_streams: 512,
+		max_concurrent_uni_streams: 512,
+		send_window: quinn.send_window,
+		receive_window: quinn.receive_window,
+		zero_rtt: cfg.zero_rtt_handshake,
+		initial_mtu: quinn.initial_mtu,
+		min_mtu: quinn.min_mtu,
+		gso: quinn.gso,
 	};
+	tracing::info!("Initializing quinn (wind-tuic) backend");
+	Ok(TuicInbound::new(wind_ctx, opts))
+}
 
-	let inbound = if cfg.backend == "tuiche" {
-		tracing::info!("Initializing wind-tuiche backend (experimental)");
-		let mut builder = TuicheInboundBuilder::new()
-			.listen_addr(cfg.server)
-			.max_idle_time(cfg.quic.max_idle_time);
-		for (uuid, pwd) in &cfg.users {
-			builder = builder.user(*uuid, pwd.clone());
-		}
-		ServerInbound::Tuiche(builder.build().await?)
-	} else {
-		let opts = TuicInboundOpts {
-			listen_addr: cfg.server,
-			certificate: certs,
-			private_key: key,
-			cert_resolver,
-			alpn: cfg.tls.alpn.clone(),
-			users: cfg.users.clone(),
-			auth_timeout: cfg.auth_timeout,
-			max_idle_time: cfg.quic.max_idle_time,
-			max_concurrent_bi_streams: 512,
-			max_concurrent_uni_streams: 512,
-			send_window: cfg.quic.send_window,
-			receive_window: cfg.quic.receive_window,
-			zero_rtt: cfg.zero_rtt_handshake,
-			initial_mtu: cfg.quic.initial_mtu,
-			min_mtu: cfg.quic.min_mtu,
-			gso: cfg.quic.gso,
-		};
-		ServerInbound::Tuic(TuicInbound::new(wind_ctx, opts))
-	};
+/// Build the tokio-quiche (`wind-tuiche`) inbound from the shared config.
+///
+/// The quiche backend needs TLS certificate + key *file paths*; ACME /
+/// on-the-fly self-signed certificates are not yet supported there.
+async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<TuicheInbound> {
+	let cfg = &ctx.cfg;
+	let quiche = &cfg.backend.quiche;
 
-	let router = TuicRouter::new(ctx.clone(), resolver.clone());
-	let mut dispatcher = Dispatcher::new(router);
-
-	dispatcher.add_handler("default", make_outbound_action(&cfg.outbound.default, resolver.clone()));
-
-	for (name, rule) in &cfg.outbound.named {
-		dispatcher.add_handler(name.clone(), make_outbound_action(rule, resolver.clone()));
+	let cert = cfg.tls.certificate.to_string_lossy();
+	let key = cfg.tls.private_key.to_string_lossy();
+	if cert.is_empty() || key.is_empty() {
+		return Err(eyre::eyre!(
+			"backend.mode = \"quiche\" requires explicit tls.certificate and tls.private_key paths (auto_ssl / self_sign are \
+			 not supported by the quiche backend)"
+		));
 	}
 
-	Ok((inbound, dispatcher))
+	let congestion_control = match quiche.congestion_control.controller {
+		CongestionController::Cubic => wind_tuiche::CongestionControl::Cubic,
+		CongestionController::Bbr | CongestionController::Bbr3 => wind_tuiche::CongestionControl::Bbr,
+		CongestionController::NewReno => wind_tuiche::CongestionControl::Reno,
+	};
+
+	let opts = wind_tuiche::ConnectionOpts {
+		max_idle_timeout: quiche.max_idle_time,
+		max_concurrent_bi_streams: quiche.max_concurrent_bi_streams,
+		max_concurrent_uni_streams: quiche.max_concurrent_uni_streams,
+		send_window: quiche.send_window,
+		receive_window: quiche.receive_window,
+		congestion_control,
+		udp_relay_mode: wind_tuiche::UdpRelayMode::Datagram,
+		enable_0rtt: quiche.zero_rtt,
+	};
+
+	let mut builder = TuicheInboundBuilder::new()
+		.listen_addr(cfg.server)
+		.connection_opts(opts)
+		.certificate_path(cert.into_owned())
+		.private_key_path(key.into_owned());
+	for (uuid, pwd) in &cfg.users {
+		builder = builder.user(*uuid, pwd.clone());
+	}
+
+	tracing::info!("Initializing tokio-quiche (wind-tuiche) backend");
+	builder.build().await
 }
 
 fn generate_self_signed(

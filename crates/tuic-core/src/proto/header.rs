@@ -134,7 +134,7 @@ mod test {
 		writer.send(header.clone()).await?;
 		let mut buffer = writer.into_inner();
 		let full_len = buffer.len();
-		let mut half_b = buffer.split_off(full_len / 2 as usize);
+		let mut half_b = buffer.split_off(full_len / 2_usize);
 		let mut half_a = buffer;
 		{
 			let mut reader = FramedRead::new(half_a.as_slice(), HeaderCodec);

@@ -81,10 +81,3 @@ pub struct ConnectionStats {
 	/// Retransmitted packets
 	pub packets_retransmitted: u64,
 }
-
-// NOTE: `QuicheError` and `QuicheResult` used to live here. Every variant
-// of `QuicheError` was unconstructed and the type was unused anywhere in
-// the workspace — the whole quiche subsystem is currently a placeholder
-// (see review findings on `TuicheInbound::listen` / `TuicheOutbound`).
-// Re-add either type when the implementation actually surfaces structured
-// errors.

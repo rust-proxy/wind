@@ -90,16 +90,19 @@ pub struct Config {
 	#[educe(Default = "")]
 	pub data_dir: PathBuf,
 
-	pub quic: QuicConfig,
+	/// QUIC backend selection plus per-backend tuning.
+	///
+	/// `backend.mode` chooses between the quinn-based (`wind-tuic`) and the
+	/// tokio-quiche-based (`wind-tuiche`) implementations; `backend.quinn` and
+	/// `backend.quiche` hold the transport tuning for each.
+	#[serde(default)]
+	pub backend: BackendConfig,
 
 	#[educe(Default = true)]
 	pub udp_relay_ipv6: bool,
 
 	#[educe(Default = false)]
 	pub zero_rtt_handshake: bool,
-
-	#[educe(Default = "tuic".to_string())]
-	pub backend: String,
 
 	#[educe(Default = true)]
 	pub dual_stack: bool,
@@ -202,6 +205,35 @@ pub struct Config {
 	#[serde(default, rename = "pmtu")]
 	#[deprecated]
 	pub __pmtu: Option<bool>,
+	/// Deprecated top-level `[quic]` section — migrated into `backend.quinn`.
+	#[serde(default, rename = "quic")]
+	#[deprecated]
+	pub __quic: Option<QuinnConfig>,
+}
+
+/// QUIC backend selection plus per-backend transport tuning.
+#[derive(Deserialize, Serialize, Educe)]
+#[educe(Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct BackendConfig {
+	/// Which QUIC implementation to run.
+	pub mode: BackendMode,
+	/// Tuning for the quinn backend (`wind-tuic`).
+	pub quinn: QuinnConfig,
+	/// Tuning for the tokio-quiche backend (`wind-tuiche`).
+	pub quiche: QuicheConfig,
+}
+
+/// Selects the inbound QUIC implementation.
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendMode {
+	/// quinn-based backend (`wind-tuic`). The default, fully-featured backend.
+	#[default]
+	Quinn,
+	/// tokio-quiche-based backend (`wind-tuiche`). Experimental; see the
+	/// authentication caveat in the `wind-tuiche` crate docs.
+	Quiche,
 }
 
 #[derive(Deserialize, Serialize, Educe)]
@@ -225,10 +257,11 @@ pub struct TlsConfig {
 	pub acme_staging: bool,
 }
 
+/// Transport tuning for the quinn backend (`wind-tuic`).
 #[derive(Deserialize, Serialize, Educe)]
 #[educe(Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct QuicConfig {
+pub struct QuinnConfig {
 	pub congestion_control: CongestionControlConfig,
 
 	#[educe(Default = 1200)]
@@ -252,6 +285,34 @@ pub struct QuicConfig {
 	#[serde(with = "humantime_serde")]
 	#[educe(Default(expression = Duration::from_secs(30)))]
 	pub max_idle_time: Duration,
+}
+
+/// Transport tuning for the tokio-quiche backend (`wind-tuiche`).
+#[derive(Deserialize, Serialize, Educe)]
+#[educe(Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuicheConfig {
+	pub congestion_control: CongestionControlConfig,
+
+	#[serde(with = "humantime_serde")]
+	#[educe(Default(expression = Duration::from_secs(30)))]
+	pub max_idle_time: Duration,
+
+	#[educe(Default = 100)]
+	pub max_concurrent_bi_streams: u64,
+
+	#[educe(Default = 100)]
+	pub max_concurrent_uni_streams: u64,
+
+	#[educe(Default = 16777216)]
+	pub send_window: u64,
+
+	#[educe(Default = 8388608)]
+	pub receive_window: u64,
+
+	/// Enable 0-RTT early data (replayable; see the quinn backend's warning).
+	#[educe(Default = false)]
+	pub zero_rtt: bool,
 }
 
 /// The `default` rule is mandatory when named rules are present; other named
@@ -452,35 +513,42 @@ impl Config {
 			}
 		}
 
-		// Migrate QUIC-related fields
+		// Migrate QUIC-related fields into the quinn backend tuning.
+		//
+		// A deprecated top-level `[quic]` section is applied first (as a whole),
+		// then the even-older flat scalar keys override individual fields, so the
+		// historical precedence (flat keys win) is preserved.
 		#[allow(deprecated)]
 		{
+			if let Some(quic) = self.__quic.take() {
+				self.backend.quinn = quic;
+			}
 			if let Some(congestion_control) = self.__congestion_control {
-				self.quic.congestion_control.controller = congestion_control;
+				self.backend.quinn.congestion_control.controller = congestion_control;
 			}
 			if let Some(max_idle_time) = self.__max_idle_time {
-				self.quic.max_idle_time = max_idle_time;
+				self.backend.quinn.max_idle_time = max_idle_time;
 			}
 			if let Some(initial_window) = self.__initial_window {
-				self.quic.congestion_control.initial_window = initial_window;
+				self.backend.quinn.congestion_control.initial_window = initial_window;
 			}
 			if let Some(send_window) = self.__send_window {
-				self.quic.send_window = send_window;
+				self.backend.quinn.send_window = send_window;
 			}
 			if let Some(receive_window) = self.__receive_window {
-				self.quic.receive_window = receive_window;
+				self.backend.quinn.receive_window = receive_window;
 			}
 			if let Some(initial_mtu) = self.__initial_mtu {
-				self.quic.initial_mtu = initial_mtu;
+				self.backend.quinn.initial_mtu = initial_mtu;
 			}
 			if let Some(min_mtu) = self.__min_mtu {
-				self.quic.min_mtu = min_mtu;
+				self.backend.quinn.min_mtu = min_mtu;
 			}
 			if let Some(gso) = self.__gso {
-				self.quic.gso = gso;
+				self.backend.quinn.gso = gso;
 			}
 			if let Some(pmtu) = self.__pmtu {
-				self.quic.pmtu = pmtu;
+				self.backend.quinn.pmtu = pmtu;
 			}
 		}
 	}
@@ -894,11 +962,11 @@ mod tests {
 		assert!(result.tls.auto_ssl);
 		assert_eq!(result.tls.hostname, "testhost");
 		assert_eq!(result.tls.acme_email, "admin@example.com");
-		assert_eq!(result.quic.initial_mtu, 1400);
-		assert_eq!(result.quic.min_mtu, 1300);
-		assert_eq!(result.quic.send_window, 10000000);
-		assert_eq!(result.quic.congestion_control.controller, CongestionController::Bbr);
-		assert_eq!(result.quic.congestion_control.initial_window, 2000000);
+		assert_eq!(result.backend.quinn.initial_mtu, 1400);
+		assert_eq!(result.backend.quinn.min_mtu, 1300);
+		assert_eq!(result.backend.quinn.send_window, 10000000);
+		assert_eq!(result.backend.quinn.congestion_control.controller, CongestionController::Bbr);
+		assert_eq!(result.backend.quinn.congestion_control.initial_window, 2000000);
 
 		let uuid1 = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
 		let uuid2 = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174001").unwrap();
@@ -1222,13 +1290,65 @@ mod tests {
 		let config_bbr = include_str!("../tests/config/congestion_control_bbr.toml");
 
 		let result = test_parse_config(config_bbr, ".toml").await.unwrap();
-		assert_eq!(result.quic.congestion_control.controller, CongestionController::Bbr);
+		assert_eq!(result.backend.quinn.congestion_control.controller, CongestionController::Bbr);
 
 		// Test NewReno (note: lowercase 'newreno' is the valid variant)
 		let config_new_reno = include_str!("../tests/config/congestion_control_newreno.toml");
 
 		let result = test_parse_config(config_new_reno, ".toml").await.unwrap();
-		assert_eq!(result.quic.congestion_control.controller, CongestionController::NewReno);
+		assert_eq!(
+			result.backend.quinn.congestion_control.controller,
+			CongestionController::NewReno
+		);
+	}
+
+	#[tokio::test]
+	async fn test_backend_mode_quiche_and_subsections() {
+		// New `[backend]` layout: mode selects the implementation, and each
+		// backend has its own tuning subsection.
+		let config = r#"
+server = "127.0.0.1:8080"
+
+[backend]
+mode = "quiche"
+
+[backend.quinn]
+initial_mtu = 1400
+
+[backend.quiche]
+max_concurrent_bi_streams = 50
+zero_rtt = true
+max_idle_time = "45s"
+"#;
+		let result = test_parse_config(config, ".toml").await.unwrap();
+		assert_eq!(result.backend.mode, BackendMode::Quiche);
+		assert_eq!(result.backend.quinn.initial_mtu, 1400);
+		assert_eq!(result.backend.quiche.max_concurrent_bi_streams, 50);
+		assert!(result.backend.quiche.zero_rtt);
+		assert_eq!(result.backend.quiche.max_idle_time, Duration::from_secs(45));
+	}
+
+	#[tokio::test]
+	async fn test_backend_mode_defaults_to_quinn() {
+		let result = test_parse_config("server = \"127.0.0.1:8080\"\n", ".toml").await.unwrap();
+		assert_eq!(result.backend.mode, BackendMode::Quinn);
+	}
+
+	#[tokio::test]
+	async fn test_legacy_quic_section_migrates_to_backend_quinn() {
+		// A deprecated top-level `[quic]` section must still load, migrating into
+		// `backend.quinn`.
+		let config = r#"
+server = "127.0.0.1:8080"
+
+[quic]
+initial_mtu = 1456
+send_window = 12345678
+"#;
+		let result = test_parse_config(config, ".toml").await.unwrap();
+		assert_eq!(result.backend.mode, BackendMode::Quinn);
+		assert_eq!(result.backend.quinn.initial_mtu, 1456);
+		assert_eq!(result.backend.quinn.send_window, 12345678);
 	}
 
 	#[tokio::test]
@@ -1251,9 +1371,9 @@ mod tests {
 		assert!(result.tls.certificate.ends_with("cert.pem"));
 		assert!(result.tls.private_key.ends_with("key.pem"));
 		assert_eq!(result.tls.hostname, "example.com");
-		assert_eq!(result.quic.congestion_control.controller, CongestionController::Bbr);
-		assert_eq!(result.quic.max_idle_time, Duration::from_secs(60));
-		assert_eq!(result.quic.initial_mtu, 1500);
+		assert_eq!(result.backend.quinn.congestion_control.controller, CongestionController::Bbr);
+		assert_eq!(result.backend.quinn.max_idle_time, Duration::from_secs(60));
+		assert_eq!(result.backend.quinn.initial_mtu, 1500);
 	}
 
 	#[tokio::test]
@@ -1343,11 +1463,11 @@ mod tests {
 		assert!(result.tls.self_sign);
 		assert!(result.tls.auto_ssl);
 		assert_eq!(result.tls.hostname, "json5.example.com");
-		assert_eq!(result.quic.initial_mtu, 1400);
-		assert_eq!(result.quic.min_mtu, 1300);
-		assert_eq!(result.quic.send_window, 8000000);
-		assert_eq!(result.quic.congestion_control.controller, CongestionController::Bbr);
-		assert_eq!(result.quic.congestion_control.initial_window, 1500000);
+		assert_eq!(result.backend.quinn.initial_mtu, 1400);
+		assert_eq!(result.backend.quinn.min_mtu, 1300);
+		assert_eq!(result.backend.quinn.send_window, 8000000);
+		assert_eq!(result.backend.quinn.congestion_control.controller, CongestionController::Bbr);
+		assert_eq!(result.backend.quinn.congestion_control.initial_window, 1500000);
 	}
 
 	#[tokio::test]

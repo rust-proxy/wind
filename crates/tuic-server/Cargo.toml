@@ -12,12 +12,11 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["aws-lc-rs", "quinn", "quiche"]
+default = ["aws-lc-rs", "quinn"]
 ring = ["rustls/ring", "rcgen/ring", "quinn/rustls-ring"]
 aws-lc-rs = ["dep:aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "quinn/rustls-aws-lc-rs"]
 jemallocator = ["tikv-jemallocator"]
 quinn = ["wind-tuic/quinn"]
-quiche = ["wind-tuic/quiche"]
 
 [dependencies]
 
@@ -27,6 +26,7 @@ wind-base = { path = "../wind-base" }
 wind-dns = { path = "../wind-dns" }
 wind-socks = { path = "../wind-socks" }
 wind-tuic = { path = "../wind-tuic", features = ["server"] }
+wind-tuiche = { path = "../wind-tuiche", default-features = false, features = ["server"] }
 wind-acme = { path = "../wind-acme" }
 
 toml = "1.0"

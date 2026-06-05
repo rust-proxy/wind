@@ -1,0 +1,44 @@
+[package]
+name = "wind-tuiche"
+version.workspace = true
+repository.workspace = true
+edition.workspace = true
+description = "TUIC over QUIC using the tokio-quiche backend"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["server", "client"]
+# The server both decodes client requests and encodes UDP response datagrams,
+# so it needs both codec directions; the client (outbound) needs encode.
+server = ["tuic-core/decode", "tuic-core/encode"]
+client = ["tuic-core/encode"]
+
+[dependencies]
+wind-core = { version = "0.1.1", path = "../wind-core", default-features = false }
+
+# Shared backend-agnostic TUIC protocol codecs + fragment state machine.
+tuic-core = { version = "0.1.1", path = "../tuic-core", default-features = false }
+
+# QUIC backend.
+#
+# Pinned to 0.18 because 0.19 bumped its `serde_with` requirement to ^3.20,
+# which conflicts with `qlog 0.17` (pulled in via the Tipuch quinn fork's
+# `qlog` feature) that pins `serde_with` to ~3.17. tokio-quiche 0.18 also pins
+# ~3.17, so the two unify. 0.18 additionally tracks `quiche ^0.28`, matching the
+# rest of the workspace.
+tokio-quiche = "0.18"
+
+# Async
+tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "sync", "io-util", "macros"] }
+tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# Utilities
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+eyre = "0.6"
+tracing = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }

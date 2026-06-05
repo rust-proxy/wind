@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use wind_tuic::quiche::utils::{CongestionControl, ConnectionOpts, UdpRelayMode};
+use wind_tuiche::{CongestionControl, ConnectionOpts, UdpRelayMode};
 
 #[test]
 fn test_congestion_control() {

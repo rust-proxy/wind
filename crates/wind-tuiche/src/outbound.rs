@@ -1,12 +1,18 @@
-//! TUIC outbound client implementation with quiche
+//! TUIC outbound client implementation backed by `tokio-quiche`.
+//!
+//! The live connection path is not yet wired up: a future implementation will
+//! establish the QUIC connection with [`tokio_quiche::quic::connect`] and then
+//! drive the TUIC client state machine on top of it. For now this mirrors the
+//! placeholder status of the previous quiche backend in `wind-tuic` — the
+//! builder validates and stores the connection parameters.
 
 use std::{net::SocketAddr, time::Duration};
 
 use uuid::Uuid;
 
-use crate::{Result, quiche::utils::ConnectionOpts};
+use crate::{Result, utils::ConnectionOpts};
 
-/// TUIC client implementation using quiche
+/// TUIC client implementation using the `tokio-quiche` backend.
 #[allow(dead_code)]
 pub struct TuicheOutbound {
 	server_addr: SocketAddr,
@@ -23,7 +29,7 @@ impl TuicheOutbound {
 	}
 }
 
-/// Builder for TuicheOutbound
+/// Builder for [`TuicheOutbound`].
 pub struct TuicheOutboundBuilder {
 	server_addr: Option<SocketAddr>,
 	server_name: Option<String>,

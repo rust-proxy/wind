@@ -1,6 +1,5 @@
 use std::{backtrace::Backtrace, str::Utf8Error};
 
-use quinn::ReadToEndError;
 use snafu::prelude::*;
 
 #[derive(Debug, Snafu)]
@@ -41,10 +40,6 @@ pub enum ProtoError {
 	NumericOverflow {
 		field: String,
 		num: String,
-		backtrace: Backtrace,
-	},
-	ReadToEnd {
-		source: ReadToEndError,
 		backtrace: Backtrace,
 	},
 }
