@@ -294,10 +294,19 @@ impl PersistentConfig {
 		}
 
 		if let Some(path) = config_path {
-			figment = if path.ends_with(".yaml") || path.ends_with(".yml") {
+			// Require a known extension instead of silently treating anything
+			// non-yaml as TOML. Previously `foo.json` was happily fed to the
+			// TOML parser; an unknown extension is almost certainly a typo or
+			// a user error, and a clear early failure beats a cryptic
+			// "expected `[section]` at line 1" two layers down.
+			figment = if path.ends_with(".toml") {
+				figment.merge(Toml::file(path))
+			} else if path.ends_with(".yaml") || path.ends_with(".yml") {
 				figment.merge(Yaml::file(path))
 			} else {
-				figment.merge(Toml::file(path))
+				return Err(eyre::eyre!(
+					"unsupported config extension for {path:?}: expected `.toml`, `.yaml`, or `.yml`"
+				));
 			};
 		}
 
@@ -359,5 +368,19 @@ password: "p"
 			panic!("expected tuic")
 		};
 		assert!(!t.skip_cert_verify, "omitted field must default to false");
+	}
+
+	/// PR4-M: unknown extensions used to be silently routed to the TOML
+	/// parser, producing cryptic "expected `[section]`" errors when the file
+	/// was actually JSON or had a typo. Now they fail loudly up front.
+	#[test]
+	fn pr4_unknown_config_extension_rejected() {
+		let err = PersistentConfig::load(Some("/tmp/wind-pr4-bogus.json".into()), None)
+			.expect_err("`.json` is not supported and must be rejected");
+		let msg = format!("{err:#}");
+		assert!(
+			msg.contains("unsupported config extension"),
+			"expected the loader to mention the extension, got: {msg}"
+		);
 	}
 }

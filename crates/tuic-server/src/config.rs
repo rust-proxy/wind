@@ -179,10 +179,15 @@ pub struct Config {
 	#[serde(default, rename = "initial_window")]
 	#[deprecated]
 	pub __initial_window: Option<u64>,
-	#[serde(default, rename = "receive_window")]
+	// NOTE: these renames previously had `send_window`/`receive_window` swapped
+	// (each field renamed to the OTHER name's wire form), so a legacy top-level
+	// `send_window` key deserialised into `__receive_window` and was migrated
+	// into `quic.receive_window`. QUIC flow-control parameters were silently
+	// transposed on every load of a deprecated config layout.
+	#[serde(default, rename = "send_window")]
 	#[deprecated]
 	pub __send_window: Option<u64>,
-	#[serde(default, rename = "send_window")]
+	#[serde(default, rename = "receive_window")]
 	#[deprecated]
 	pub __receive_window: Option<u32>,
 	#[serde(default, rename = "initial_mtu")]
@@ -605,11 +610,34 @@ fn infer_config_format(content: &str) -> ConfigFormat {
 		false
 	});
 
-	// Check for TOML format (common indicators)
-	// TOML uses = for assignment and [section] for tables
+	// Check for TOML format (common indicators).
+	//
+	// 1. TOML uses `[section]` tables — match a bracketed prefix that has no inner
+	//    colon (`:` would suggest a YAML mapping with a list-marker key).
+	// 2. TOML uses `=` for assignments — but ONLY of the form `<identifier> = ...`.
+	//    The previous heuristic was `... || trimmed_line.contains('=')` (with
+	//    bare-OR precedence over `&&`!), so any YAML line containing an `=` in a
+	//    VALUE — for example `secret: aGVsbG8=` — was flagged as TOML. The combined
+	//    check then mis-detected those YAML files as TOML and parsing failed. The
+	//    check below uses a strict identifier prefix and is properly parenthesised.
+	let is_toml_assignment = |s: &str| -> bool {
+		let bytes = s.as_bytes();
+		if bytes.is_empty() || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_') {
+			return false;
+		}
+		let mut i = 1;
+		while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-') {
+			i += 1;
+		}
+		// Skip whitespace then expect `=`
+		while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+			i += 1;
+		}
+		matches!(bytes.get(i), Some(b'='))
+	};
 	let has_toml_patterns = lines.iter().any(|line| {
-		let trimmed_line = line.trim();
-		trimmed_line.starts_with('[') && trimmed_line.contains(']') && !trimmed_line.contains(':') || trimmed_line.contains('=')
+		let trimmed = line.trim();
+		(trimmed.starts_with('[') && trimmed.contains(']') && !trimmed.contains(':')) || is_toml_assignment(trimmed)
 	});
 
 	// Decide based on patterns found
@@ -627,6 +655,7 @@ fn infer_config_format(content: &str) -> ConfigFormat {
 	}
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum ConfigFormat {
 	Json,
 	Toml,
@@ -1799,5 +1828,45 @@ rules = ["INVALID_TYPE,value,target"]
 
 		let result = parse_config(cli, EnvState::default()).await;
 		assert!(result.is_err());
+	}
+
+	// ------------------------------------------------------------------
+	// PR4-L regression tests for `infer_config_format`
+	// ------------------------------------------------------------------
+
+	/// Previously a YAML value that happened to contain `=` (e.g. a base64
+	/// secret like `aGVsbG8=`) was misclassified as TOML because the heuristic
+	/// reduced to `trimmed.contains('=')` due to `&&`/`||` precedence.
+	#[test]
+	fn pr4_yaml_with_equals_in_value_is_yaml() {
+		let yaml = "secret: aGVsbG8=\nfoo: bar\n";
+		assert_eq!(infer_config_format(yaml), ConfigFormat::Yaml);
+	}
+
+	#[test]
+	fn pr4_toml_section_still_detected() {
+		// `infer_config_format` short-circuits `starts_with('[')` to JSON, so
+		// any TOML file starting with a `[section]` would be misidentified as
+		// JSON regardless of the PR4-L heuristic fix. That JSON shortcut is a
+		// pre-existing bug orthogonal to this PR; here we just verify a
+		// TOML file whose FIRST non-comment line is a `key = value`
+		// assignment is still detected as TOML — covering the case PR4-L
+		// actually changed.
+		let toml = "# config\nlog_level = \"info\"\n[server]\nport = 9443\n";
+		assert_eq!(infer_config_format(toml), ConfigFormat::Toml);
+	}
+
+	#[test]
+	fn pr4_toml_bare_assignment_still_detected() {
+		// `key = "value"` without a section header is still valid TOML.
+		let toml = "log_level = \"info\"\n";
+		assert_eq!(infer_config_format(toml), ConfigFormat::Toml);
+	}
+
+	#[test]
+	fn pr4_yaml_with_indented_block_not_misread_as_toml() {
+		// Indented list under a key — pure YAML, no top-level `=`.
+		let yaml = "rules:\n  - foo=bar\n  - baz\n";
+		assert_eq!(infer_config_format(yaml), ConfigFormat::Yaml);
 	}
 }
