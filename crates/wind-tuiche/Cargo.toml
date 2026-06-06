@@ -1,0 +1,50 @@
+[package]
+name = "wind-tuiche"
+version.workspace = true
+repository.workspace = true
+edition.workspace = true
+description = "TUIC over QUIC using the tokio-quiche backend"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["server", "client"]
+# The server both decodes client requests and encodes UDP response datagrams,
+# so it needs both codec directions; the client (outbound) needs encode.
+server = ["tuic-core/decode", "tuic-core/encode"]
+client = ["tuic-core/encode"]
+
+[dependencies]
+wind-core = { version = "0.1.1", path = "../wind-core", default-features = false }
+
+# Shared backend-agnostic TUIC protocol codecs + fragment state machine.
+tuic-core = { version = "0.1.1", path = "../tuic-core", default-features = false }
+
+# Async
+tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "sync", "io-util", "macros"] }
+tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# Utilities
+arc-swap = "1"
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+eyre = "0.6"
+tracing = "0.1"
+thiserror = "2"
+
+# QUIC backend. tokio-quiche 0.19 tracks quiche ^0.29 and serde_with ^3.20.
+#
+# tokio-quiche upstream only compiles on 64-bit (its GSO path transmutes
+# `u128` -> `Instant`); the workspace carries a small patch
+# (`patches/tokio-quiche`, wired via the root `[patch.crates-io]`) that makes it
+# build on 32-bit too, so this dependency is no longer target-gated.
+tokio-quiche = "0.19"
+# Direct access to the BoringSSL `SSL` object behind the quiche connection for
+# the RFC 5705 keying-material exporter used by TUIC authentication.
+boring = { version = "4", default-features = false }
+boring-sys = { version = "4", default-features = false }
+# Provides `ForeignTypeRef::as_ptr` for the FFI exporter call.
+foreign-types-shared = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }

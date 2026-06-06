@@ -1,7 +1,133 @@
-use std::time::Duration;
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::time::timeout;
 use tracing::{error, info};
+use uuid::Uuid;
+
+/// Install the rustls crypto provider (idempotent; safe to call repeatedly).
+pub fn install_crypto_provider() {
+	#[cfg(feature = "aws-lc-rs")]
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	#[cfg(feature = "ring")]
+	let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// Build a `tuic-server` config that uses the tokio-quiche backend with a
+/// self-signed certificate.
+pub fn quiche_server_config(
+	server: SocketAddr,
+	data_dir: PathBuf,
+	uuid: Uuid,
+	password: &str,
+	zero_rtt: bool,
+) -> tuic_server::Config {
+	let mut cfg = tuic_server::Config {
+		log_level: tuic_server::config::LogLevel::Debug,
+		server,
+		users: {
+			let mut users = HashMap::new();
+			users.insert(uuid, password.to_string());
+			users
+		},
+		tls: tuic_server::config::TlsConfig {
+			self_sign: true,
+			hostname: "localhost".to_string(),
+			..Default::default()
+		},
+		data_dir,
+		zero_rtt_handshake: zero_rtt,
+		experimental: tuic_server::config::ExperimentalConfig {
+			// Echo servers run on 127.0.0.1, so loopback must be allowed.
+			drop_loopback: false,
+			drop_private: false,
+		},
+		..Default::default()
+	};
+	cfg.backend.mode = tuic_server::config::BackendMode::Quiche;
+	cfg.backend.quiche.zero_rtt = zero_rtt;
+	cfg
+}
+
+/// Build a `tuic-client` config (quinn) pointing at a local server.
+pub fn quiche_client_config(
+	server_port: u16,
+	socks_port: u16,
+	uuid: Uuid,
+	password: &str,
+	zero_rtt: bool,
+) -> tuic_client::Config {
+	tuic_client::Config {
+		relay: tuic_client::config::Relay {
+			server: ("127.0.0.1".to_string(), server_port),
+			uuid,
+			password: Arc::from(password.as_bytes().to_vec().into_boxed_slice()),
+			ip: None,
+			ipstack_prefer: tuic_client::utils::StackPrefer::V4first,
+			certificates: Vec::new(),
+			udp_relay_mode: tuic_client::utils::UdpRelayMode::Native,
+			congestion_control: tuic_client::utils::CongestionControl::Cubic,
+			alpn: vec![b"h3".to_vec()],
+			zero_rtt_handshake: zero_rtt,
+			disable_sni: true,
+			disable_native_certs: true,
+			gso: false,
+			pmtu: false,
+			skip_cert_verify: true,
+			..Default::default()
+		},
+		local: tuic_client::config::Local {
+			server: format!("127.0.0.1:{socks_port}").parse().unwrap(),
+			username: None,
+			password: None,
+			// `None` (not `Some(false)`): with `Some(false)` the SOCKS5 UDP-associate
+			// socket calls `set_only_v6(true)`, which fails with ENOPROTOOPT on the
+			// IPv4 associate socket used here (notably on CI runners without IPv6).
+			// `None` skips the dual-stack setsockopt entirely.
+			dual_stack: None,
+			max_packet_size: 1500,
+			tcp_forward: Vec::new(),
+			udp_forward: Vec::new(),
+		},
+		log_level: "debug".to_string(),
+	}
+}
+
+/// Start a quiche-backed `tuic-server` plus a `tuic-client`, waiting for the
+/// client's SOCKS5 proxy to come up. Returns the SOCKS5 address.
+///
+/// NOTE: `tuic_client::run` installs a **process-global** connection
+/// (`OnceCell`), so at most one client may run per test process — keep to one
+/// client-starting test per `tests/*.rs` file.
+pub async fn start_quiche_pair(server_port: u16, socks_port: u16, zero_rtt: bool) -> String {
+	install_crypto_provider();
+
+	let uuid = Uuid::new_v4();
+	let password = "test_password";
+	let server_addr: SocketAddr = format!("127.0.0.1:{server_port}").parse().unwrap();
+	let data_dir = std::env::temp_dir().join(format!("wind-tuiche-test-{server_port}"));
+
+	let scfg = quiche_server_config(server_addr, data_dir, uuid, password, zero_rtt);
+	tokio::spawn(async move {
+		match timeout(Duration::from_secs(20), tuic_server::run(scfg)).await {
+			Ok(Ok(())) => info!("[quiche test] server exited ok"),
+			Ok(Err(e)) => error!("[quiche test] server error: {e}"),
+			Err(_) => info!("[quiche test] server timed out (expected at test end)"),
+		}
+	});
+	tokio::time::sleep(Duration::from_secs(1)).await;
+
+	let ccfg = quiche_client_config(server_port, socks_port, uuid, password, zero_rtt);
+	tokio::spawn(async move {
+		match timeout(Duration::from_secs(20), tuic_client::run(ccfg)).await {
+			Ok(Ok(())) => info!("[quiche test] client exited ok"),
+			Ok(Err(e)) => error!("[quiche test] client error: {e}"),
+			Err(_) => info!("[quiche test] client timed out (expected at test end)"),
+		}
+	});
+	tokio::time::sleep(Duration::from_secs(2)).await;
+
+	format!("127.0.0.1:{socks_port}")
+}
 
 // Helper function to create and run a TCP echo server
 pub async fn run_tcp_echo_server(bind_addr: &str, test_name: &str) -> (tokio::task::JoinHandle<()>, std::net::SocketAddr) {
