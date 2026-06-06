@@ -79,7 +79,11 @@ pub fn quiche_client_config(
 			server: format!("127.0.0.1:{socks_port}").parse().unwrap(),
 			username: None,
 			password: None,
-			dual_stack: Some(false),
+			// `None` (not `Some(false)`): with `Some(false)` the SOCKS5 UDP-associate
+			// socket calls `set_only_v6(true)`, which fails with ENOPROTOOPT on the
+			// IPv4 associate socket used here (notably on CI runners without IPv6).
+			// `None` skips the dual-stack setsockopt entirely.
+			dual_stack: None,
 			max_packet_size: 1500,
 			tcp_forward: Vec::new(),
 			udp_forward: Vec::new(),
