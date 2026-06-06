@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use eyre::WrapErr as _;
 use tracing::Instrument;
 use wind_base::{
 	direct::{DirectOutbound, DirectOutboundOpts},
@@ -269,20 +270,14 @@ async fn create_quinn_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<TuicInb
 
 /// Build the tokio-quiche (`wind-tuiche`) inbound from the shared config.
 ///
-/// The quiche backend needs TLS certificate + key *file paths*; ACME /
-/// on-the-fly self-signed certificates are not yet supported there.
+/// The quiche backend reads TLS material from *files*, so ACME-issued and
+/// self-signed certificates are materialised to disk first (see
+/// [`resolve_quiche_cert_files`]).
 async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<TuicheInbound> {
 	let cfg = &ctx.cfg;
 	let quiche = &cfg.backend.quiche;
 
-	let cert = cfg.tls.certificate.to_string_lossy();
-	let key = cfg.tls.private_key.to_string_lossy();
-	if cert.is_empty() || key.is_empty() {
-		return Err(eyre::eyre!(
-			"backend.mode = \"quiche\" requires explicit tls.certificate and tls.private_key paths (auto_ssl / self_sign are \
-			 not supported by the quiche backend)"
-		));
-	}
+	let (cert, key) = resolve_quiche_cert_files(ctx).await?;
 
 	let congestion_control = match quiche.congestion_control.controller {
 		CongestionController::Cubic => wind_tuiche::CongestionControl::Cubic,
@@ -304,14 +299,189 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 	let mut builder = TuicheInboundBuilder::new()
 		.listen_addr(cfg.server)
 		.connection_opts(opts)
-		.certificate_path(cert.into_owned())
-		.private_key_path(key.into_owned());
+		.certificate_path(cert)
+		.private_key_path(key);
 	for (uuid, pwd) in &cfg.users {
 		builder = builder.user(*uuid, pwd.clone());
 	}
 
 	tracing::info!("Initializing tokio-quiche (wind-tuiche) backend");
 	builder.build().await
+}
+
+/// Resolve the TLS certificate + key to on-disk PEM file paths for the quiche
+/// backend, handling ACME (`auto_ssl`), self-signed (`self_sign`), and explicit
+/// file paths. Returns `(cert_path, key_path)`.
+async fn resolve_quiche_cert_files(ctx: &Arc<TuicAppContext>) -> eyre::Result<(String, String)> {
+	use std::time::Duration;
+
+	let cfg = &ctx.cfg;
+
+	// Directory the generated/issued PEM files are written into.
+	let dir = if cfg.data_dir.as_os_str().is_empty() {
+		std::env::temp_dir()
+	} else {
+		cfg.data_dir.clone()
+	};
+	let _ = std::fs::create_dir_all(&dir);
+	let cert_path = dir.join("wind-tuiche.cert.pem");
+	let key_path = dir.join("wind-tuiche.key.pem");
+
+	if cfg.tls.auto_ssl && crate::tls::is_valid_domain(&cfg.tls.hostname) {
+		tracing::info!(
+			"auto_ssl enabled for quiche backend, starting ACME management for: {} (staging: {})",
+			cfg.tls.hostname,
+			cfg.tls.acme_staging
+		);
+		let cache_dir = std::path::Path::new("acme-cache");
+		let (_resolver, mut cert_rx) = wind_acme::start_acme_with_cert(
+			ctx.cancel.child_token(),
+			&cfg.tls.hostname,
+			&cfg.tls.acme_email,
+			cache_dir,
+			!cfg.tls.acme_staging,
+		)
+		.await?;
+
+		// The quiche backend needs the cert on disk before it can listen, so wait
+		// for the first certificate (cached or freshly issued) and write it out.
+		let pem = wait_for_cert(&mut cert_rx, Duration::from_secs(120)).await?;
+		write_split_pem(&pem, &cert_path, &key_path)?;
+
+		// Keep the files refreshed on renewal so a restart always picks up the
+		// latest cert. NOTE: tokio-quiche reads the files once at listen time and
+		// does not hot-reload, so a live renewal only takes effect after restart.
+		let cert_path2 = cert_path.clone();
+		let key_path2 = key_path.clone();
+		let cancel = ctx.cancel.child_token();
+		tokio::spawn(async move {
+			loop {
+				tokio::select! {
+					_ = cancel.cancelled() => break,
+					changed = cert_rx.changed() => {
+						if changed.is_err() {
+							break;
+						}
+						let pem = cert_rx.borrow_and_update().clone();
+						if let Some(pem) = pem {
+							match write_split_pem(&pem, &cert_path2, &key_path2) {
+								Ok(()) => tracing::info!("refreshed quiche ACME cert files (restart to apply)"),
+								Err(e) => tracing::warn!("failed to refresh quiche ACME cert files: {e}"),
+							}
+						}
+					}
+				}
+			}
+		});
+
+		return Ok((path_to_string(&cert_path)?, path_to_string(&key_path)?));
+	}
+
+	if cfg.tls.self_sign {
+		tracing::info!(
+			"self_sign enabled for quiche backend, generating certificate for {}",
+			cfg.tls.hostname
+		);
+		let (cert_pem, key_pem) = generate_self_signed_pem(&cfg.tls.hostname)?;
+		std::fs::write(&cert_path, cert_pem).wrap_err_with(|| format!("writing {}", cert_path.display()))?;
+		std::fs::write(&key_path, key_pem).wrap_err_with(|| format!("writing {}", key_path.display()))?;
+		return Ok((path_to_string(&cert_path)?, path_to_string(&key_path)?));
+	}
+
+	// Explicit certificate / key file paths.
+	let cert = cfg.tls.certificate.to_string_lossy();
+	let key = cfg.tls.private_key.to_string_lossy();
+	if cert.is_empty() || key.is_empty() {
+		return Err(eyre::eyre!(
+			"backend.mode = \"quiche\" requires tls.certificate and tls.private_key paths, or tls.self_sign / tls.auto_ssl"
+		));
+	}
+	Ok((cert.into_owned(), key.into_owned()))
+}
+
+/// Wait for the ACME watch channel to yield a certificate, up to `timeout`.
+async fn wait_for_cert(
+	rx: &mut tokio::sync::watch::Receiver<Option<wind_acme::CertPem>>,
+	timeout: std::time::Duration,
+) -> eyre::Result<wind_acme::CertPem> {
+	let deadline = tokio::time::Instant::now() + timeout;
+	loop {
+		if let Some(pem) = rx.borrow_and_update().clone() {
+			return Ok(pem);
+		}
+		let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+		if remaining.is_zero() {
+			return Err(eyre::eyre!("timed out waiting for ACME certificate"));
+		}
+		match tokio::time::timeout(remaining, rx.changed()).await {
+			Ok(Ok(())) => {}
+			Ok(Err(_)) => {
+				return Err(eyre::eyre!(
+					"ACME certificate channel closed before a certificate was available"
+				));
+			}
+			Err(_) => return Err(eyre::eyre!("timed out waiting for ACME certificate")),
+		}
+	}
+}
+
+/// Generate a self-signed certificate, returning `(cert_pem, key_pem)`.
+fn generate_self_signed_pem(hostname: &str) -> eyre::Result<(String, String)> {
+	let generated = rcgen::generate_simple_self_signed(vec![hostname.to_string()])?;
+	Ok((generated.cert.pem(), generated.signing_key.serialize_pem()))
+}
+
+/// Split a combined PEM blob (private key + certificate chain, as produced by
+/// rustls-acme) into separate cert and key files. Order-independent: every
+/// `PRIVATE KEY` block goes to `key_path`, every other block to `cert_path`.
+fn write_split_pem(pem: &[u8], cert_path: &std::path::Path, key_path: &std::path::Path) -> eyre::Result<()> {
+	let text = std::str::from_utf8(pem).wrap_err("certificate PEM is not valid UTF-8")?;
+	let (certs, key) = split_pem(text);
+	if certs.is_empty() || key.is_empty() {
+		return Err(eyre::eyre!(
+			"certificate blob is missing a certificate or private-key PEM block"
+		));
+	}
+	std::fs::write(cert_path, certs).wrap_err_with(|| format!("writing {}", cert_path.display()))?;
+	std::fs::write(key_path, key).wrap_err_with(|| format!("writing {}", key_path.display()))?;
+	Ok(())
+}
+
+/// Partition PEM blocks into (certificates, private keys) by block label.
+fn split_pem(blob: &str) -> (String, String) {
+	let mut certs = String::new();
+	let mut key = String::new();
+	let mut current = String::new();
+	let mut in_block = false;
+	let mut is_key = false;
+	for line in blob.lines() {
+		if let Some(rest) = line.strip_prefix("-----BEGIN ") {
+			in_block = true;
+			is_key = rest.contains("PRIVATE KEY");
+			current.clear();
+			current.push_str(line);
+			current.push('\n');
+		} else if line.starts_with("-----END ") {
+			current.push_str(line);
+			current.push('\n');
+			if is_key {
+				key.push_str(&current);
+			} else {
+				certs.push_str(&current);
+			}
+			in_block = false;
+		} else if in_block {
+			current.push_str(line);
+			current.push('\n');
+		}
+	}
+	(certs, key)
+}
+
+fn path_to_string(p: &std::path::Path) -> eyre::Result<String> {
+	p.to_str()
+		.map(str::to_owned)
+		.ok_or_else(|| eyre::eyre!("non-UTF-8 path: {}", p.display()))
 }
 
 fn generate_self_signed(

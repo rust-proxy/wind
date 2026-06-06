@@ -5647,6 +5647,7 @@ name = "wind-acme"
 version = "0.1.1"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "axum",
  "eyre",
  "rustls",

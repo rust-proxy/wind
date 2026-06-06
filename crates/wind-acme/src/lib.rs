@@ -5,16 +5,64 @@
 //! is only started when a certificate needs to be issued or renewed, and is
 //! shut down once the new certificate has been deployed.
 
-use std::{path::Path, sync::Arc};
+use std::{path::Path, path::PathBuf, sync::Arc};
 
 use arc_swap::ArcSwapOption;
+use async_trait::async_trait;
 use axum::Router;
 use eyre::{Context, Result};
 use rustls::server::ResolvesServerCert;
-use rustls_acme::{AcmeConfig, UseChallenge::Http01, caches::DirCache};
+use rustls_acme::{AccountCache, AcmeConfig, CertCache, UseChallenge::Http01, caches::DirCache};
+use tokio::sync::watch;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+/// The PEM blob rustls-acme persists for a certificate: the PKCS#8 private key
+/// followed by the certificate chain, all PEM-encoded. Published by
+/// [`start_acme_with_cert`] so non-rustls consumers (e.g. the tokio-quiche
+/// backend, which needs on-disk cert/key files) can materialise it.
+pub type CertPem = Arc<Vec<u8>>;
+
+/// A [`rustls_acme`] cache that wraps [`DirCache`] and, in addition to the
+/// normal disk persistence, publishes every loaded/stored certificate PEM blob
+/// to a [`watch`] channel.
+struct CapturingCache {
+	inner: DirCache<PathBuf>,
+	tx: watch::Sender<Option<CertPem>>,
+}
+
+#[async_trait]
+impl CertCache for CapturingCache {
+	type EC = std::io::Error;
+
+	async fn load_cert(&self, domains: &[String], directory_url: &str) -> Result<Option<Vec<u8>>, Self::EC> {
+		let cert = self.inner.load_cert(domains, directory_url).await?;
+		if let Some(pem) = &cert {
+			let _ = self.tx.send(Some(Arc::new(pem.clone())));
+		}
+		Ok(cert)
+	}
+
+	async fn store_cert(&self, domains: &[String], directory_url: &str, cert: &[u8]) -> Result<(), Self::EC> {
+		// Publish before persisting so a waiter is unblocked as early as possible.
+		let _ = self.tx.send(Some(Arc::new(cert.to_vec())));
+		self.inner.store_cert(domains, directory_url, cert).await
+	}
+}
+
+#[async_trait]
+impl AccountCache for CapturingCache {
+	type EA = std::io::Error;
+
+	async fn load_account(&self, contact: &[String], directory_url: &str) -> Result<Option<Vec<u8>>, Self::EA> {
+		self.inner.load_account(contact, directory_url).await
+	}
+
+	async fn store_account(&self, contact: &[String], directory_url: &str, account: &[u8]) -> Result<(), Self::EA> {
+		self.inner.store_account(contact, directory_url, account).await
+	}
+}
 
 /// Check if a domain name is valid for ACME certificate issuance.
 pub fn is_valid_domain(hostname: &str) -> bool {
@@ -42,6 +90,10 @@ pub fn is_valid_domain(hostname: &str) -> bool {
 ///
 /// Returns a certificate resolver that can be used with a
 /// `rustls::ServerConfig`.
+///
+/// This is the resolver-only entry point used by the rustls-based (quinn)
+/// backend. Backends that need the certificate as on-disk files (e.g. the
+/// tokio-quiche backend) should use [`start_acme_with_cert`] instead.
 pub async fn start_acme(
 	cancel: CancellationToken,
 	hostname: &str,
@@ -49,6 +101,24 @@ pub async fn start_acme(
 	cache_dir: &Path,
 	production: bool,
 ) -> Result<Arc<dyn ResolvesServerCert>> {
+	let (resolver, _cert_rx) = start_acme_with_cert(cancel, hostname, acme_email, cache_dir, production).await?;
+	Ok(resolver)
+}
+
+/// Like [`start_acme`], but additionally returns a [`watch::Receiver`] that is
+/// updated with the certificate PEM blob (PKCS#8 private key + certificate
+/// chain) whenever a certificate is loaded from cache or freshly issued/renewed.
+///
+/// The initial value is `None`; it becomes `Some` once a cached certificate is
+/// found or the first issuance completes. Consumers that need cert/key files
+/// (the tokio-quiche backend) can wait on this and materialise the blob to disk.
+pub async fn start_acme_with_cert(
+	cancel: CancellationToken,
+	hostname: &str,
+	acme_email: &str,
+	cache_dir: &Path,
+	production: bool,
+) -> Result<(Arc<dyn ResolvesServerCert>, watch::Receiver<Option<CertPem>>)> {
 	if !is_valid_domain(hostname) {
 		return Err(eyre::eyre!("Invalid domain name: {hostname}"));
 	}
@@ -65,9 +135,15 @@ pub async fn start_acme(
 		.await
 		.context("Failed to create ACME cache directory")?;
 
+	let (cert_tx, cert_rx) = watch::channel(None);
+	let cache = CapturingCache {
+		inner: DirCache::new(cache_dir.to_path_buf()),
+		tx: cert_tx,
+	};
+
 	let mut state = AcmeConfig::new(vec![hostname.to_string()])
 		.contact(vec![contact])
-		.cache(DirCache::new(cache_dir.to_path_buf()))
+		.cache(cache)
 		.directory_lets_encrypt(production)
 		.challenge_type(Http01)
 		.state();
@@ -152,7 +228,7 @@ pub async fn start_acme(
 		info!("ACME background task for {hostname} exited");
 	});
 
-	Ok(resolver)
+	Ok((resolver, cert_rx))
 }
 
 async fn spawn_axum(cancel: CancellationToken, router: Router) -> eyre::Result<()> {

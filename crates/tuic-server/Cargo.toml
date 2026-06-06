@@ -41,7 +41,7 @@ quinn = { workspace = true, default-features = false, features = ["runtime-tokio
 quinn-congestions = { workspace = true }
 
 # Tokio/Async
-tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "parking_lot", "rt-multi-thread", "time", "fs", "signal"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "parking_lot", "rt-multi-thread", "time", "fs", "signal", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # TLS
