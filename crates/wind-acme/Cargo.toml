@@ -20,9 +20,10 @@ rustls-acme = { git = "https://github.com/rust-proxy/rustls-acme", default-featu
 axum = { version = "0.8", features = ["tokio"] }
 
 # Async
-tokio = { version = "1", default-features = false, features = ["macros", "net", "time", "rt", "fs"] }
+tokio = { version = "1", default-features = false, features = ["macros", "net", "time", "rt", "fs", "sync"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
 
 # Utilities
 arc-swap = "1"

@@ -276,10 +276,9 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 			auto_ssl: false,
 			acme_email: "admin@example.com".to_string(),
 			acme_staging: false,
-			..Default::default()
 		},
 		data_dir: std::env::temp_dir(),
-		quic: tuic_server::config::QuicConfig::default(),
+		backend: tuic_server::config::BackendConfig::default(),
 		udp_relay_ipv6: true,
 		zero_rtt_handshake: false,
 		dual_stack: false,
@@ -583,10 +582,9 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 			auto_ssl: false,
 			acme_email: "admin@example.com".to_string(),
 			acme_staging: false,
-			..Default::default()
 		},
 		data_dir: std::env::temp_dir(),
-		quic: tuic_server::config::QuicConfig::default(),
+		backend: tuic_server::config::BackendConfig::default(),
 		udp_relay_ipv6: true,
 		zero_rtt_handshake: false,
 		dual_stack: false,

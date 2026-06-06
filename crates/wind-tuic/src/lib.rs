@@ -1,6 +1,4 @@
 pub mod proto;
-#[cfg(feature = "quiche")]
-pub mod quiche;
 #[cfg(feature = "quinn")]
 pub mod quinn;
 
