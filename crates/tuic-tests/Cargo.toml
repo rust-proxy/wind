@@ -19,6 +19,11 @@ tuic-core = { path = "../tuic-core" }
 tuic-client = { path = "../tuic-client", default-features = false }
 tuic-server = { path = "../tuic-server", default-features = false }
 wind-tuic = { path = "../wind-tuic", default-features = false, features = ["server", "client", "quinn"] }
+wind-tuiche = { path = "../wind-tuiche", default-features = false, features = ["server"] }
+
+# Raw QUIC client + cert generation for the certificate hot-reload test.
+quinn = { workspace = true, default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 
 bytes = "1"
 json5 = { version = "1.3" }

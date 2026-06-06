@@ -5269,6 +5269,8 @@ dependencies = [
  "fast-socks5",
  "json5 1.3.1",
  "lexopt",
+ "quinn 0.12.0",
+ "rcgen 0.14.8",
  "rustls",
  "serial_test",
  "tokio",
@@ -5281,6 +5283,7 @@ dependencies = [
  "uuid",
  "wind-core",
  "wind-tuic",
+ "wind-tuiche",
 ]
 
 [[package]]

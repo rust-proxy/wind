@@ -56,9 +56,18 @@ impl TuicheInbound {
 		settings.initial_max_streams_bidi = self.opts.max_concurrent_bi_streams;
 		settings.initial_max_streams_uni = self.opts.max_concurrent_uni_streams;
 		settings.cc_algorithm = <&str>::from(self.opts.congestion_control).to_string();
+		// Flow-control windows: size them from the configured receive window so
+		// bulk TCP relay isn't throttled by the conservative defaults.
+		settings.initial_max_data = self.opts.receive_window;
+		settings.initial_max_stream_data_bidi_local = self.opts.receive_window;
+		settings.initial_max_stream_data_bidi_remote = self.opts.receive_window;
+		settings.initial_max_stream_data_uni = self.opts.receive_window;
 		// TUIC relies on QUIC DATAGRAM frames (RFC 9221) for its native UDP relay
 		// mode, so the backend must advertise datagram support.
 		settings.enable_dgram = matches!(self.opts.udp_relay_mode, UdpRelayMode::Datagram);
+		// 0-RTT early data (resumption). TUIC has no app-layer replay protection,
+		// so this is opt-in via `ConnectionOpts::enable_0rtt`.
+		settings.enable_early_data = self.opts.enable_0rtt;
 		settings.alpn = vec![b"h3".to_vec()];
 		settings
 	}
