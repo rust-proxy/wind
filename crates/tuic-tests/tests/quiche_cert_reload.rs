@@ -8,6 +8,10 @@
 //! `select_certificate` callback path hot-reloads certs into the running
 //! listener with no restart.
 
+// The quiche backend is 64-bit only (tokio-quiche's GSO path transmutes
+// u128 -> Instant); skip this test entirely on 32-bit targets.
+#![cfg(target_pointer_width = "64")]
+
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use quinn::Endpoint;

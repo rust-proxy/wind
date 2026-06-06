@@ -9,6 +9,10 @@
 //! handshake — that would require a custom resumption client; the first
 //! connection is always 1-RTT.
 
+// The quiche backend is 64-bit only (tokio-quiche's GSO path transmutes
+// u128 -> Instant); skip this test entirely on 32-bit targets.
+#![cfg(target_pointer_width = "64")]
+
 use std::time::Duration;
 
 use serial_test::serial;

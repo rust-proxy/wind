@@ -19,11 +19,6 @@ tuic-core = { path = "../tuic-core" }
 tuic-client = { path = "../tuic-client", default-features = false }
 tuic-server = { path = "../tuic-server", default-features = false }
 wind-tuic = { path = "../wind-tuic", default-features = false, features = ["server", "client", "quinn"] }
-wind-tuiche = { path = "../wind-tuiche", default-features = false, features = ["server"] }
-
-# Raw QUIC client + cert generation for the certificate hot-reload test.
-quinn = { workspace = true, default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
-rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 
 bytes = "1"
 json5 = { version = "1.3" }
@@ -38,3 +33,13 @@ tokio = { version = "1", features = ["full"] }
 aws-lc-rs = { version = "1", default-features = false, optional = true, features = ["prebuilt-nasm"] }
 uuid = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
+
+# The quiche backend (`wind-tuiche` -> tokio-quiche) is 64-bit only. On 64-bit we
+# enable tuic-server's `quiche` feature (so the e2e tests exercise it) and pull
+# wind-tuiche + a raw quinn client + rcgen for the cert-reload test. On 32-bit
+# none of this is built and the quiche test files compile to nothing.
+[target.'cfg(target_pointer_width = "64")'.dependencies]
+tuic-server = { path = "../tuic-server", default-features = false, features = ["quiche"] }
+wind-tuiche = { path = "../wind-tuiche", default-features = false, features = ["server"] }
+quinn = { workspace = true, default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }

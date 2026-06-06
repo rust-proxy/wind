@@ -17,6 +17,10 @@ ring = ["rustls/ring", "rcgen/ring", "quinn/rustls-ring"]
 aws-lc-rs = ["dep:aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "quinn/rustls-aws-lc-rs"]
 jemallocator = ["tikv-jemallocator"]
 quinn = ["wind-tuic/quinn"]
+# The tokio-quiche (`wind-tuiche`) backend. 64-bit only — tokio-quiche does not
+# compile on 32-bit (its GSO path transmutes `u128` -> `Instant`). Enabled per
+# target via `.github/target.toml`; do NOT enable on 32-bit targets.
+quiche = ["dep:wind-tuiche"]
 
 [dependencies]
 
@@ -26,7 +30,7 @@ wind-base = { path = "../wind-base" }
 wind-dns = { path = "../wind-dns" }
 wind-socks = { path = "../wind-socks" }
 wind-tuic = { path = "../wind-tuic", features = ["server"] }
-wind-tuiche = { path = "../wind-tuiche", default-features = false, features = ["server"] }
+wind-tuiche = { path = "../wind-tuiche", default-features = false, features = ["server"], optional = true }
 wind-acme = { path = "../wind-acme" }
 
 toml = "1.0"

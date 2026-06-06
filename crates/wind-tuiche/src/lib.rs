@@ -10,11 +10,15 @@
 pub mod task;
 pub mod utils;
 
-#[cfg(feature = "server")]
+// The tokio-quiche-backed parts are **64-bit only** (see Cargo.toml:
+// tokio-quiche doesn't compile on 32-bit). On 32-bit targets this crate is just
+// the backend-agnostic re-exports below, so the workspace still builds
+// everywhere.
+#[cfg(all(feature = "server", target_pointer_width = "64"))]
 mod driver;
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", target_pointer_width = "64"))]
 mod stream;
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", target_pointer_width = "64"))]
 pub mod tls;
 
 /// Backend-agnostic TUIC wire codecs and decode helpers, shared with
@@ -24,17 +28,17 @@ pub use tuic_core::proto;
 pub use tuic_core::udp;
 pub use utils::{CongestionControl, ConnectionOpts, ConnectionStats, UdpRelayMode};
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", target_pointer_width = "64"))]
 pub mod inbound;
 
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", target_pointer_width = "64"))]
 pub mod outbound;
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", target_pointer_width = "64"))]
 pub use inbound::{TuicheInbound, TuicheInboundBuilder};
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", target_pointer_width = "64"))]
 pub use outbound::{TuicheOutbound, TuicheOutboundBuilder};
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", target_pointer_width = "64"))]
 pub use tls::CertStore;
 
 pub type Error = eyre::Report;

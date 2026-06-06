@@ -25,6 +25,8 @@
 
 use std::sync::Arc;
 
+// `WrapErr` is only used by the quiche cert helpers (the `quiche` feature).
+#[cfg(feature = "quiche")]
 use eyre::WrapErr as _;
 use tracing::Instrument;
 use wind_base::{
@@ -40,20 +42,26 @@ use wind_core::{
 };
 use wind_socks::action::{Socks5Action, Socks5ActionOpts};
 use wind_tuic::quinn::inbound::{TuicInbound, TuicInboundOpts};
+// The quiche backend lives behind the `quiche` cargo feature (64-bit only;
+// enabled per target via `.github/target.toml`).
+#[cfg(feature = "quiche")]
 use wind_tuiche::{TuicheInbound, TuicheInboundBuilder};
 
+// `CongestionController` is only referenced by the quiche backend wiring.
+#[cfg(feature = "quiche")]
+use crate::utils::CongestionController;
 use crate::{
 	AppContext as TuicAppContext,
 	acl::acl_to_rules,
 	config::{BackendMode, OutboundRule},
-	utils::CongestionController,
 };
 
 /// Inbound QUIC listener selected by `backend.mode`.
 pub enum ServerInbound {
 	/// quinn-based backend (`wind-tuic`).
 	Tuic(TuicInbound),
-	/// tokio-quiche-based backend (`wind-tuiche`).
+	/// tokio-quiche-based backend (`wind-tuiche`); 64-bit targets only.
+	#[cfg(feature = "quiche")]
 	Tuiche(TuicheInbound),
 }
 
@@ -61,6 +69,7 @@ impl wind_core::AbstractInbound for ServerInbound {
 	async fn listen(&self, cb: &impl wind_core::InboundCallback) -> eyre::Result<()> {
 		match self {
 			ServerInbound::Tuic(inbound) => inbound.listen(cb).await,
+			#[cfg(feature = "quiche")]
 			ServerInbound::Tuiche(inbound) => inbound.listen(cb).await,
 		}
 	}
@@ -198,7 +207,15 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 
 	let inbound = match ctx.cfg.backend.mode {
 		BackendMode::Quinn => ServerInbound::Tuic(create_quinn_inbound(&ctx).await?),
+		#[cfg(feature = "quiche")]
 		BackendMode::Quiche => ServerInbound::Tuiche(create_quiche_inbound(&ctx).await?),
+		#[cfg(not(feature = "quiche"))]
+		BackendMode::Quiche => {
+			return Err(eyre::eyre!(
+				"backend.mode = \"quiche\" requires this build to be compiled with the `quiche` feature (tokio-quiche is \
+				 64-bit only); rebuild with --features quiche, or use backend.mode = \"quinn\""
+			));
+		}
 	};
 
 	Ok((inbound, dispatcher))
@@ -273,6 +290,7 @@ async fn create_quinn_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<TuicInb
 /// The quiche backend reads TLS material from *files*, so ACME-issued and
 /// self-signed certificates are materialised to disk first (see
 /// [`resolve_quiche_cert_files`]).
+#[cfg(feature = "quiche")]
 async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<TuicheInbound> {
 	let cfg = &ctx.cfg;
 	let quiche = &cfg.backend.quiche;
@@ -321,6 +339,7 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 /// the running quiche listener via its [`CertStore`](wind_tuiche::CertStore)
 /// and refresh the on-disk PEM files (so a restart also picks up the latest
 /// cert).
+#[cfg(feature = "quiche")]
 fn spawn_quiche_cert_reload(
 	ctx: &Arc<TuicAppContext>,
 	store: wind_tuiche::CertStore,
@@ -370,8 +389,10 @@ fn spawn_quiche_cert_reload(
 ///
 /// Returns `(cert_path, key_path, acme_rx)` where `acme_rx` is `Some` only for
 /// ACME — the caller wires it to the listener's cert store for live rotation.
+#[cfg(feature = "quiche")]
 type CertReceiver = tokio::sync::watch::Receiver<Option<wind_acme::CertPem>>;
 
+#[cfg(feature = "quiche")]
 async fn resolve_quiche_cert_files(ctx: &Arc<TuicAppContext>) -> eyre::Result<(String, String, Option<CertReceiver>)> {
 	use std::time::Duration;
 
@@ -436,6 +457,7 @@ async fn resolve_quiche_cert_files(ctx: &Arc<TuicAppContext>) -> eyre::Result<(S
 }
 
 /// Wait for the ACME watch channel to yield a certificate, up to `timeout`.
+#[cfg(feature = "quiche")]
 async fn wait_for_cert(
 	rx: &mut tokio::sync::watch::Receiver<Option<wind_acme::CertPem>>,
 	timeout: std::time::Duration,
@@ -462,6 +484,7 @@ async fn wait_for_cert(
 }
 
 /// Generate a self-signed certificate, returning `(cert_pem, key_pem)`.
+#[cfg(feature = "quiche")]
 fn generate_self_signed_pem(hostname: &str) -> eyre::Result<(String, String)> {
 	let generated = rcgen::generate_simple_self_signed(vec![hostname.to_string()])?;
 	Ok((generated.cert.pem(), generated.signing_key.serialize_pem()))
@@ -470,6 +493,7 @@ fn generate_self_signed_pem(hostname: &str) -> eyre::Result<(String, String)> {
 /// Split a combined PEM blob (private key + certificate chain, as produced by
 /// rustls-acme) into separate cert and key files. Order-independent: every
 /// `PRIVATE KEY` block goes to `key_path`, every other block to `cert_path`.
+#[cfg(feature = "quiche")]
 fn write_split_pem(pem: &[u8], cert_path: &std::path::Path, key_path: &std::path::Path) -> eyre::Result<()> {
 	let text = std::str::from_utf8(pem).wrap_err("certificate PEM is not valid UTF-8")?;
 	let (certs, key) = split_pem(text);
@@ -484,6 +508,7 @@ fn write_split_pem(pem: &[u8], cert_path: &std::path::Path, key_path: &std::path
 }
 
 /// Partition PEM blocks into (certificates, private keys) by block label.
+#[cfg(feature = "quiche")]
 fn split_pem(blob: &str) -> (String, String) {
 	let mut certs = String::new();
 	let mut key = String::new();
@@ -514,6 +539,7 @@ fn split_pem(blob: &str) -> (String, String) {
 	(certs, key)
 }
 
+#[cfg(feature = "quiche")]
 fn path_to_string(p: &std::path::Path) -> eyre::Result<String> {
 	p.to_str()
 		.map(str::to_owned)

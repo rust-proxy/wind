@@ -10,6 +10,10 @@
 //! single client and covers both TCP and UDP within one test. (0-RTT lives in a
 //! separate test file = separate process; cert hot-reload in another.)
 
+// The quiche backend is 64-bit only (tokio-quiche's GSO path transmutes
+// u128 -> Instant); skip this test entirely on 32-bit targets.
+#![cfg(target_pointer_width = "64")]
+
 use std::{
 	net::{IpAddr, Ipv4Addr, SocketAddr},
 	time::Duration,
