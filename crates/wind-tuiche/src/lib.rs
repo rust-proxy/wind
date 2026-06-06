@@ -14,6 +14,8 @@ pub mod utils;
 mod driver;
 #[cfg(feature = "server")]
 mod stream;
+#[cfg(feature = "server")]
+pub mod tls;
 
 /// Backend-agnostic TUIC wire codecs and decode helpers, shared with
 /// `wind-tuic` via the [`tuic_core`] crate.
@@ -32,6 +34,8 @@ pub mod outbound;
 pub use inbound::{TuicheInbound, TuicheInboundBuilder};
 #[cfg(feature = "client")]
 pub use outbound::{TuicheOutbound, TuicheOutboundBuilder};
+#[cfg(feature = "server")]
+pub use tls::CertStore;
 
 pub type Error = eyre::Report;
 pub type Result<T> = eyre::Result<T>;

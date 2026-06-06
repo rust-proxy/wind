@@ -277,7 +277,7 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 	let cfg = &ctx.cfg;
 	let quiche = &cfg.backend.quiche;
 
-	let (cert, key) = resolve_quiche_cert_files(ctx).await?;
+	let (cert, key, acme_rx) = resolve_quiche_cert_files(ctx).await?;
 
 	let congestion_control = match quiche.congestion_control.controller {
 		CongestionController::Cubic => wind_tuiche::CongestionControl::Cubic,
@@ -299,20 +299,80 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 	let mut builder = TuicheInboundBuilder::new()
 		.listen_addr(cfg.server)
 		.connection_opts(opts)
-		.certificate_path(cert)
-		.private_key_path(key);
+		.certificate_path(cert.clone())
+		.private_key_path(key.clone());
 	for (uuid, pwd) in &cfg.users {
 		builder = builder.user(*uuid, pwd.clone());
 	}
 
 	tracing::info!("Initializing tokio-quiche (wind-tuiche) backend");
-	builder.build().await
+	let inbound = builder.build().await?;
+
+	// For ACME, hot-reload the renewed certificate into the running listener via
+	// the inbound's cert store — no restart required.
+	if let Some(rx) = acme_rx {
+		spawn_quiche_cert_reload(ctx, inbound.cert_store(), rx, cert, key);
+	}
+
+	Ok(inbound)
+}
+
+/// Background task: on every ACME (re)issuance, hot-reload the certificate into
+/// the running quiche listener via its [`CertStore`](wind_tuiche::CertStore)
+/// and refresh the on-disk PEM files (so a restart also picks up the latest
+/// cert).
+fn spawn_quiche_cert_reload(
+	ctx: &Arc<TuicAppContext>,
+	store: wind_tuiche::CertStore,
+	mut rx: tokio::sync::watch::Receiver<Option<wind_acme::CertPem>>,
+	cert_path: String,
+	key_path: String,
+) {
+	let cancel = ctx.cancel.child_token();
+	tokio::spawn(async move {
+		loop {
+			tokio::select! {
+				_ = cancel.cancelled() => break,
+				changed = rx.changed() => {
+					if changed.is_err() {
+						break;
+					}
+					let pem = rx.borrow_and_update().clone();
+					let Some(pem) = pem else { continue };
+					let text = match std::str::from_utf8(&pem) {
+						Ok(t) => t,
+						Err(_) => {
+							tracing::warn!("quiche backend: renewed ACME cert PEM is not valid UTF-8");
+							continue;
+						}
+					};
+					let (certs, key) = split_pem(text);
+					if certs.is_empty() || key.is_empty() {
+						tracing::warn!("quiche backend: renewed ACME cert blob missing a cert or key block");
+						continue;
+					}
+					match store.update(certs.as_bytes(), key.as_bytes()) {
+						Ok(()) => tracing::info!("quiche backend: hot-reloaded renewed certificate"),
+						Err(e) => tracing::warn!("quiche backend: failed to hot-reload renewed certificate: {e}"),
+					}
+					// Keep the on-disk files current for the next restart.
+					let _ = std::fs::write(&cert_path, &certs);
+					let _ = std::fs::write(&key_path, &key);
+				}
+			}
+		}
+	});
 }
 
 /// Resolve the TLS certificate + key to on-disk PEM file paths for the quiche
 /// backend, handling ACME (`auto_ssl`), self-signed (`self_sign`), and explicit
-/// file paths. Returns `(cert_path, key_path)`.
-async fn resolve_quiche_cert_files(ctx: &Arc<TuicAppContext>) -> eyre::Result<(String, String)> {
+/// file paths.
+///
+/// Returns `(cert_path, key_path, acme_rx)` where `acme_rx` is `Some` only for
+/// ACME — the caller wires it to the listener's cert store for live rotation.
+type CertReceiver = tokio::sync::watch::Receiver<Option<wind_acme::CertPem>>;
+
+async fn resolve_quiche_cert_files(ctx: &Arc<TuicAppContext>) -> eyre::Result<(String, String, Option<CertReceiver>)> {
 	use std::time::Duration;
 
 	let cfg = &ctx.cfg;
@@ -345,36 +405,12 @@ async fn resolve_quiche_cert_files(ctx: &Arc<TuicAppContext>) -> eyre::Result<(S
 
 		// The quiche backend needs the cert on disk before it can listen, so wait
 		// for the first certificate (cached or freshly issued) and write it out.
+		// The `cert_rx` is handed back so the caller can hot-reload renewals into
+		// the running listener via its cert store.
 		let pem = wait_for_cert(&mut cert_rx, Duration::from_secs(120)).await?;
 		write_split_pem(&pem, &cert_path, &key_path)?;
 
-		// Keep the files refreshed on renewal so a restart always picks up the
-		// latest cert. NOTE: tokio-quiche reads the files once at listen time and
-		// does not hot-reload, so a live renewal only takes effect after restart.
-		let cert_path2 = cert_path.clone();
-		let key_path2 = key_path.clone();
-		let cancel = ctx.cancel.child_token();
-		tokio::spawn(async move {
-			loop {
-				tokio::select! {
-					_ = cancel.cancelled() => break,
-					changed = cert_rx.changed() => {
-						if changed.is_err() {
-							break;
-						}
-						let pem = cert_rx.borrow_and_update().clone();
-						if let Some(pem) = pem {
-							match write_split_pem(&pem, &cert_path2, &key_path2) {
-								Ok(()) => tracing::info!("refreshed quiche ACME cert files (restart to apply)"),
-								Err(e) => tracing::warn!("failed to refresh quiche ACME cert files: {e}"),
-							}
-						}
-					}
-				}
-			}
-		});
-
-		return Ok((path_to_string(&cert_path)?, path_to_string(&key_path)?));
+		return Ok((path_to_string(&cert_path)?, path_to_string(&key_path)?, Some(cert_rx)));
 	}
 
 	if cfg.tls.self_sign {
@@ -385,7 +421,7 @@ async fn resolve_quiche_cert_files(ctx: &Arc<TuicAppContext>) -> eyre::Result<(S
 		let (cert_pem, key_pem) = generate_self_signed_pem(&cfg.tls.hostname)?;
 		std::fs::write(&cert_path, cert_pem).wrap_err_with(|| format!("writing {}", cert_path.display()))?;
 		std::fs::write(&key_path, key_pem).wrap_err_with(|| format!("writing {}", key_path.display()))?;
-		return Ok((path_to_string(&cert_path)?, path_to_string(&key_path)?));
+		return Ok((path_to_string(&cert_path)?, path_to_string(&key_path)?, None));
 	}
 
 	// Explicit certificate / key file paths.
@@ -396,7 +432,7 @@ async fn resolve_quiche_cert_files(ctx: &Arc<TuicAppContext>) -> eyre::Result<(S
 			"backend.mode = \"quiche\" requires tls.certificate and tls.private_key paths, or tls.self_sign / tls.auto_ssl"
 		));
 	}
-	Ok((cert.into_owned(), key.into_owned()))
+	Ok((cert.into_owned(), key.into_owned(), None))
 }
 
 /// Wait for the ACME watch channel to yield a certificate, up to `timeout`.

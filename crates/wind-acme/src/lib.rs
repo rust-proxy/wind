@@ -5,7 +5,10 @@
 //! is only started when a certificate needs to be issued or renewed, and is
 //! shut down once the new certificate has been deployed.
 
-use std::{path::Path, path::PathBuf, sync::Arc};
+use std::{
+	path::{Path, PathBuf},
+	sync::Arc,
+};
 
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
@@ -107,11 +110,13 @@ pub async fn start_acme(
 
 /// Like [`start_acme`], but additionally returns a [`watch::Receiver`] that is
 /// updated with the certificate PEM blob (PKCS#8 private key + certificate
-/// chain) whenever a certificate is loaded from cache or freshly issued/renewed.
+/// chain) whenever a certificate is loaded from cache or freshly
+/// issued/renewed.
 ///
 /// The initial value is `None`; it becomes `Some` once a cached certificate is
 /// found or the first issuance completes. Consumers that need cert/key files
-/// (the tokio-quiche backend) can wait on this and materialise the blob to disk.
+/// (the tokio-quiche backend) can wait on this and materialise the blob to
+/// disk.
 pub async fn start_acme_with_cert(
 	cancel: CancellationToken,
 	hostname: &str,
