@@ -232,8 +232,7 @@ pub enum BackendMode {
 	#[default]
 	Quinn,
 	/// tokio-quiche-based backend (`wind-tuiche`). Experimental, and only
-	/// available when tuic-server is built with the `quiche` cargo feature
-	/// (64-bit targets only — tokio-quiche does not compile on 32-bit).
+	/// available when tuic-server is built with the `quiche` cargo feature.
 	Quiche,
 }
 

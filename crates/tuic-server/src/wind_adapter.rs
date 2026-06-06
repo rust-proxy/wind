@@ -42,8 +42,8 @@ use wind_core::{
 };
 use wind_socks::action::{Socks5Action, Socks5ActionOpts};
 use wind_tuic::quinn::inbound::{TuicInbound, TuicInboundOpts};
-// The quiche backend lives behind the `quiche` cargo feature (64-bit only;
-// enabled per target via `.github/target.toml`).
+// The quiche backend lives behind the `quiche` cargo feature (enabled per target
+// via `.github/target.toml`).
 #[cfg(feature = "quiche")]
 use wind_tuiche::{TuicheInbound, TuicheInboundBuilder};
 
@@ -60,7 +60,8 @@ use crate::{
 pub enum ServerInbound {
 	/// quinn-based backend (`wind-tuic`).
 	Tuic(TuicInbound),
-	/// tokio-quiche-based backend (`wind-tuiche`); 64-bit targets only.
+	/// tokio-quiche-based backend (`wind-tuiche`); requires the `quiche`
+	/// feature.
 	#[cfg(feature = "quiche")]
 	Tuiche(TuicheInbound),
 }
@@ -212,8 +213,8 @@ pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInb
 		#[cfg(not(feature = "quiche"))]
 		BackendMode::Quiche => {
 			return Err(eyre::eyre!(
-				"backend.mode = \"quiche\" requires this build to be compiled with the `quiche` feature (tokio-quiche is \
-				 64-bit only); rebuild with --features quiche, or use backend.mode = \"quinn\""
+				"backend.mode = \"quiche\" requires this build to be compiled with the `quiche` feature; rebuild with \
+				 --features quiche, or use backend.mode = \"quinn\""
 			));
 		}
 	};
