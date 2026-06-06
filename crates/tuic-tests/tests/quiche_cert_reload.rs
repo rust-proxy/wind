@@ -4,8 +4,9 @@
 //! client completes the QUIC/TLS handshake and reads the served leaf
 //! certificate via `Connection::peer_identity()`. We then push a *different*
 //! certificate B through `CertStore::update` and reconnect: the newly served
-//! certificate must change — proving the `ConnectionHook` + `select_certificate`
-//! callback path hot-reloads certs into the running listener with no restart.
+//! certificate must change — proving the `ConnectionHook` +
+//! `select_certificate` callback path hot-reloads certs into the running
+//! listener with no restart.
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -80,7 +81,8 @@ impl ServerCertVerifier for SkipVerify {
 	}
 }
 
-/// Generate a fresh self-signed cert for `localhost`, returning `(cert_pem, key_pem)`.
+/// Generate a fresh self-signed cert for `localhost`, returning `(cert_pem,
+/// key_pem)`.
 fn self_signed() -> (String, String) {
 	let c = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
 	(c.cert.pem(), c.signing_key.serialize_pem())

@@ -2,8 +2,8 @@
 //!
 //! Starts a `tuic-server` with `backend.mode = "quiche"` + a self-signed
 //! certificate, connects the quinn-based `tuic-client`, and relays TCP and UDP
-//! through the client's SOCKS5 proxy. This exercises the whole quiche path: QUIC
-//! handshake, RFC 5705 exporter authentication, the `ApplicationOverQuic`
+//! through the client's SOCKS5 proxy. This exercises the whole quiche path:
+//! QUIC handshake, RFC 5705 exporter authentication, the `ApplicationOverQuic`
 //! worker, and the channel-bridged TCP/UDP relay.
 //!
 //! `tuic_client::run` installs a process-global connection, so this file runs a
@@ -17,7 +17,9 @@ use std::{
 
 use serial_test::serial;
 use tokio::time::timeout;
-use tuic_tests::{run_tcp_echo_server, run_udp_echo_server, start_quiche_pair, test_tcp_through_socks5, test_udp_through_socks5};
+use tuic_tests::{
+	run_tcp_echo_server, run_udp_echo_server, start_quiche_pair, test_tcp_through_socks5, test_udp_through_socks5,
+};
 
 #[tokio::test]
 #[serial]
