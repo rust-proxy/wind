@@ -26,13 +26,14 @@ The **server** path implements the TUIC protocol on top of `tokio-quiche`'s
 
 The **client** (outbound) path is still a configuration-only placeholder.
 
-### Authentication limitation
+### Authentication
 
-TUIC derives its auth token from the TLS keying-material exporter (RFC 5705).
-`quiche` does not expose that exporter, so this backend **cannot
-cryptographically verify the token** — it gates on the UUID being a registered
-user instead. This is weaker than the quinn-based `wind-tuic` backend; treat the
-quiche backend as experimental and do not rely on token secrecy alone.
+TUIC derives its auth token from the TLS keying-material exporter (RFC 5705,
+label = UUID bytes, context = password). This backend recomputes it from the
+live BoringSSL session and compares in constant time, exactly like the quinn
+backend. quiche exposes the underlying `boring::ssl::SslRef` via
+`impl AsMut<SslRef> for Connection` when built with the `boringssl-boring-crate`
+feature (which `tokio-quiche` enables), so the token is fully verified.
 
 ## Features
 

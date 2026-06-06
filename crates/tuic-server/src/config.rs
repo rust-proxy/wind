@@ -231,8 +231,9 @@ pub enum BackendMode {
 	/// quinn-based backend (`wind-tuic`). The default, fully-featured backend.
 	#[default]
 	Quinn,
-	/// tokio-quiche-based backend (`wind-tuiche`). Experimental; see the
-	/// authentication caveat in the `wind-tuiche` crate docs.
+	/// tokio-quiche-based backend (`wind-tuiche`). Experimental. Requires
+	/// explicit `tls.certificate` / `tls.private_key` paths (no
+	/// ACME/self-sign).
 	Quiche,
 }
 

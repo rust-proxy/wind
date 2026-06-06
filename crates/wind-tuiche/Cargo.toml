@@ -28,6 +28,16 @@ tuic-core = { version = "0.1.1", path = "../tuic-core", default-features = false
 # rest of the workspace.
 tokio-quiche = "0.18"
 
+# Direct access to the BoringSSL `SSL` object behind the quiche connection (the
+# same `boring`/`quiche` build tokio-quiche uses) so we can call the RFC 5705
+# keying-material exporter for TUIC authentication. quiche exposes this via
+# `impl AsMut<boring::ssl::SslRef> for Connection` under boringssl-boring-crate.
+boring = { version = "4", default-features = false }
+boring-sys = { version = "4", default-features = false }
+# Provides the `ForeignTypeRef::as_ptr` used to reach the raw `SSL*` for the FFI
+# exporter call; version matched to boring's transitive dependency.
+foreign-types-shared = "0.3"
+
 # Async
 tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "sync", "io-util", "macros"] }
 tokio-util = { version = "0.7", default-features = false, features = ["codec"] }

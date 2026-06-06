@@ -5799,8 +5799,11 @@ dependencies = [
 name = "wind-tuiche"
 version = "0.1.1"
 dependencies = [
+ "boring",
+ "boring-sys",
  "bytes",
  "eyre",
+ "foreign-types-shared",
  "futures-util",
  "thiserror 2.0.18",
  "tokio",

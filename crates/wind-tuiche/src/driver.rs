@@ -16,14 +16,14 @@
 //!   datagrams.
 //! * **Auth / Heartbeat / Dissociate** are handled inline.
 //!
-//! ## Authentication limitation
+//! ## Authentication
 //!
 //! TUIC authenticates with a token derived from the TLS keying-material
-//! exporter (RFC 5705). `quiche` does **not** expose that exporter, so this
-//! backend cannot cryptographically verify the token. It instead gates on the
-//! UUID being a registered user. This is weaker than `wind-tuic` and is a known
-//! limitation of the quiche backend — do not use it where token secrecy is the
-//! only thing protecting the server.
+//! exporter (RFC 5705, label = UUID bytes, context = password). We recompute it
+//! from the live BoringSSL session and compare in constant time, exactly like
+//! the quinn backend. quiche exposes the underlying `boring::ssl::SslRef` via
+//! `impl AsMut<SslRef> for Connection` when built with `boringssl-boring-crate`
+//! (which tokio-quiche enables); see [`export_keying_material`].
 
 use std::collections::{HashMap, VecDeque};
 
@@ -77,6 +77,38 @@ fn boxed<E: std::error::Error + Send + Sync + 'static>(e: E) -> BoxErr {
 
 fn is_done(e: &quiche::Error) -> bool {
 	matches!(e, quiche::Error::Done)
+}
+
+/// Recompute a TUIC auth token from the live BoringSSL session via the RFC 5705
+/// keying-material exporter, returning the 32-byte token on success.
+///
+/// quiche exposes the underlying `boring::ssl::SslRef` through
+/// `impl AsMut<SslRef> for Connection` when built with `boringssl-boring-crate`
+/// (enabled by tokio-quiche). We call the BoringSSL FFI directly rather than
+/// the safe `SslRef::export_keying_material`, because the safe wrapper takes
+/// the label as `&str` while TUIC uses the raw (non-UTF-8) UUID bytes as the
+/// label.
+fn export_keying_material(qconn: &mut QuicheConnection, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+	use foreign_types_shared::ForeignTypeRef as _;
+
+	let ssl: &mut boring::ssl::SslRef = qconn.as_mut();
+	let mut out = [0u8; 32];
+	// SAFETY: `ssl.as_ptr()` yields a valid `SSL*` for the duration of the
+	// borrow; `out`/`label`/`context` are passed as (ptr, len) of valid slices
+	// and BoringSSL does not retain any of them past the call.
+	let rc = unsafe {
+		boring_sys::SSL_export_keying_material(
+			ssl.as_ptr(),
+			out.as_mut_ptr(),
+			out.len(),
+			label.as_ptr() as *const core::ffi::c_char,
+			label.len(),
+			context.as_ptr(),
+			context.len(),
+			1, // use_context = true
+		)
+	};
+	(rc == 1).then_some(out)
 }
 
 /// Per bidirectional (TCP CONNECT) stream state.
@@ -356,11 +388,11 @@ impl<C: InboundCallback> TuicheDriver<C> {
 		}
 
 		let data = self.uni.remove(&sid).unwrap_or_default();
-		self.handle_uni_command(data.freeze());
+		self.handle_uni_command(qconn, data.freeze());
 		Ok(())
 	}
 
-	fn handle_uni_command(&mut self, data: Bytes) {
+	fn handle_uni_command(&mut self, qconn: &mut QuicheConnection, data: Bytes) {
 		let mut buf = data;
 		let header = match decode_header(&mut buf, "uni") {
 			Ok(h) => h,
@@ -371,7 +403,7 @@ impl<C: InboundCallback> TuicheDriver<C> {
 		};
 		match header.command {
 			CmdType::Auth => match decode_command(CmdType::Auth, &mut buf, "uni auth") {
-				Ok(Command::Auth { uuid, token }) => self.handle_auth(uuid, token),
+				Ok(Command::Auth { uuid, token }) => self.handle_auth(qconn, uuid, token),
 				_ => debug!("malformed auth command"),
 			},
 			CmdType::Heartbeat => {}
@@ -396,15 +428,38 @@ impl<C: InboundCallback> TuicheDriver<C> {
 		}
 	}
 
-	fn handle_auth(&mut self, uuid: Uuid, _token: [u8; 32]) {
-		// NOTE: see the module-level "Authentication limitation". quiche does
-		// not expose the RFC 5705 exporter, so we cannot recompute / verify the
-		// token. Gate on the UUID being registered instead.
-		if self.users.contains_key(&uuid) {
+	fn handle_auth(&mut self, qconn: &mut QuicheConnection, uuid: Uuid, token: [u8; 32]) {
+		// TUIC's auth token is the RFC 5705 TLS keying-material exporter output
+		// with label = the UUID bytes and context = the user's password. We
+		// recompute it from the live BoringSSL session and compare in constant
+		// time. To avoid a timing/Err oracle that reveals whether a UUID exists,
+		// always run the exporter (against the real or a fixed dummy password)
+		// and a constant-time comparison; every failure path returns the same
+		// generic rejection. Mirrors `wind-tuic`'s `handle_auth`.
+		const DUMMY_PASSWORD: &[u8] = b"\x00\x00\x00\x00\x00\x00\x00\x00";
+		let (password, user_known): (&[u8], bool) = match self.users.get(&uuid) {
+			Some(pw) => (pw.as_slice(), true),
+			None => (DUMMY_PASSWORD, false),
+		};
+
+		let expected = export_keying_material(qconn, uuid.as_bytes(), password);
+
+		let token_ok = match &expected {
+			Some(exp) => {
+				let mut diff = 0u8;
+				for (a, b) in token.iter().zip(exp.iter()) {
+					diff |= a ^ b;
+				}
+				diff == 0
+			}
+			None => false,
+		};
+
+		if user_known && token_ok {
 			self.authed = true;
-			debug!(%uuid, "tuiche authenticated (UUID-only; token not verified on quiche backend)");
+			debug!(%uuid, "tuiche authenticated");
 		} else {
-			warn!(%uuid, "tuiche auth rejected: unknown UUID");
+			warn!(%uuid, "tuiche auth rejected");
 		}
 	}
 
