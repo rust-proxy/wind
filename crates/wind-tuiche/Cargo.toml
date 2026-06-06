@@ -38,11 +38,11 @@ thiserror = "2"
 # just the backend-agnostic re-exports (`proto`, `udp`) so the workspace still
 # builds; the actual QUIC backend is gated out (see `lib.rs`).
 [target.'cfg(target_pointer_width = "64")'.dependencies]
-# Pinned to 0.18 because 0.19 bumped its `serde_with` requirement to ^3.20,
-# which conflicts with `qlog 0.17` (pulled in via the Tipuch quinn fork's
-# `qlog` feature) that pins `serde_with` to ~3.17. tokio-quiche 0.18 also pins
-# ~3.17, so the two unify. 0.18 additionally tracks `quiche ^0.28`.
-tokio-quiche = "0.18"
+# tokio-quiche 0.19 tracks quiche ^0.29 and serde_with ^3.20. The quinn fork's
+# `qlog` feature (qlog 0.17 -> serde_with ~3.17) used to conflict with that, so
+# the `qlog` feature was dropped from the quinn deps (it was unused) — letting us
+# stay on the latest tokio-quiche.
+tokio-quiche = "0.19"
 # Direct access to the BoringSSL `SSL` object behind the quiche connection for
 # the RFC 5705 keying-material exporter used by TUIC authentication.
 boring = { version = "4", default-features = false }

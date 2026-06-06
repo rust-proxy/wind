@@ -41,7 +41,7 @@ uuid = { version = "1", default-features = false, features = ["serde", "std", "v
 sha2 = "0.10"
 
 # QUIC
-quinn = { workspace = true, default-features = false, features = ["runtime-tokio", "qlog"] }
+quinn = { workspace = true, default-features = false, features = ["runtime-tokio"] }
 quinn-congestions = { workspace = true }
 
 # Tokio/Async
