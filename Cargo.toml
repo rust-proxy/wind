@@ -24,8 +24,11 @@ quinn-congestions = { git = "https://github.com/proxy-rs/quinn-congestions.git",
 # Patch datagram-socket to fix build failure on musl targets with libc >= 0.2.169.
 # libc::msghdr gained private padding fields (__pad1, __pad2) that prevent
 # struct literal construction. Fix from: https://github.com/cloudflare/quiche/pull/2224
-# [patch.crates-io]
-# datagram-socket = { path = "patches/datagram-socket" }
+#
+# Pulled into the tree by tokio-quiche (wind-tuiche backend); enabled so musl
+# cross-compilation keeps building.
+[patch.crates-io]
+datagram-socket = { path = "patches/datagram-socket" }
 
 [profile.release]
 opt-level = 3
