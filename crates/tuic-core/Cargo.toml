@@ -18,6 +18,7 @@ wind-core = { version = "0.1.1", path = "../wind-core", default-features = false
 
 # Wire codecs
 bytes = "1"
+nom = "8"
 tokio-util = { version = "0.7", features = ["codec"] }
 num_enum = "0.7"
 snafu = "0.9"

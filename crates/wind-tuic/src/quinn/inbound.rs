@@ -210,22 +210,13 @@ impl TuicInbound {
 		crypto.alpn_protocols = self.opts.alpn.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 
 		if self.opts.zero_rtt {
-			// 0-RTT is enabled at the TLS level so resumption handshakes are fast, but
-			// TUIC has no application-layer replay protection (Connect/Packet commands
-			// arriving as 0-RTT data are intrinsically replayable). We therefore:
-			//   * cap `max_early_data_size` so a single TLS context cannot be used to
-			//     replay an unbounded volume of application data, and
-			//   * keep `send_half_rtt_data = false` so the server does not emit data before
-			//     the client's Finished is verified.
-			//
 			// Operators wanting strict replay resistance should leave `zero_rtt`
 			// disabled until application-layer nonce/anti-replay is implemented.
 			warn!(
-				"zero_rtt=true: 0-RTT early data is accepted (cap {} B). TUIC has no application-layer replay protection — \
-				 Connect/Packet commands sent as 0-RTT can be replayed.",
-				16 * 1024
+				"zero_rtt=true: 0-RTT early data is accepted. TUIC has no application-layer replay protection — \
+				 Connect/Packet commands sent as 0-RTT can be replayed."
 			);
-			crypto.max_early_data_size = 16 * 1024;
+			crypto.max_early_data_size = u32::MAX;
 			crypto.send_half_rtt_data = false;
 		} else {
 			crypto.max_early_data_size = 0;

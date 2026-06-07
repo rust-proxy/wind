@@ -1,15 +1,11 @@
-use std::{
-	net::{Ipv4Addr, Ipv6Addr},
-	str,
-};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bytes::{Buf, BufMut};
 use num_enum::{FromPrimitive, IntoPrimitive};
-use snafu::{ResultExt, ensure};
 use tokio_util::codec::{Decoder, Encoder};
 use wind_core::types::TargetAddr;
 
-use crate::proto::{BytesRemainingSnafu, DomainTooLongSnafu, FailParseDomainSnafu, ProtoError, UnknownAddressTypeSnafu};
+use crate::proto::{BytesRemainingSnafu, DomainTooLongSnafu, ProtoError};
 
 //-----------------------------------------------------------------------------
 // Type Definitions
@@ -70,74 +66,15 @@ impl Decoder for AddressCodec {
 	type Item = Address;
 
 	fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-		// Return None if buffer is empty
-		if src.is_empty() {
-			return Ok(None);
-		}
-
-		// Parse address type from first byte
-		let addr_type = AddressType::from(src[0]);
-
-		ensure!(
-			!matches!(addr_type, AddressType::Other(_)),
-			UnknownAddressTypeSnafu {
-				value: u8::from(addr_type)
+		let input: &[u8] = &src[..];
+		match super::parse_address(input) {
+			Ok((remaining, address)) => {
+				let consumed = input.len() - remaining.len();
+				src.advance(consumed);
+				Ok(Some(address))
 			}
-		);
-
-		match addr_type {
-			AddressType::None => {
-				src.advance(1);
-				Ok(Some(Address::None))
-			}
-			AddressType::IPv4 => {
-				// Type (1) + IPv4 (4) + Port (2)
-				if src.len() < 1 + 4 + 2 {
-					return Ok(None);
-				}
-				src.advance(1);
-				let mut octets = [0; 4];
-				src.copy_to_slice(&mut octets);
-				let ip = Ipv4Addr::from(octets);
-				let port = src.get_u16();
-				Ok(Some(Address::IPv4(ip, port)))
-			}
-			AddressType::IPv6 => {
-				// Type (1) + IPv6 (16) + Port (2)
-				if src.len() < 1 + 16 + 2 {
-					return Ok(None);
-				}
-				src.advance(1);
-				let mut octets = [0; 16];
-				src.copy_to_slice(&mut octets);
-				let ip = Ipv6Addr::from(octets);
-				let port = src.get_u16();
-				Ok(Some(Address::IPv6(ip, port)))
-			}
-			AddressType::Domain => {
-				// Need at least type byte and length byte
-				if src.len() < 1 + 1 {
-					return Ok(None);
-				}
-				let domain_len = src[1] as usize;
-
-				// Type (1) + Length (1) + Domain + Port (2)
-				if src.len() < 1 + 1 + domain_len + 2 {
-					return Ok(None);
-				}
-				src.advance(2);
-
-				let domain = &src[..domain_len];
-				let domain = str::from_utf8(domain)
-					.context(FailParseDomainSnafu {
-						raw: hex::encode(domain),
-					})?
-					.to_string();
-				src.advance(domain_len);
-				let port = src.get_u16();
-				Ok(Some(Address::Domain(domain, port)))
-			}
-			_ => unreachable!(),
+			Err(nom::Err::Incomplete(_)) => Ok(None),
+			Err(_) => BytesRemainingSnafu.fail(),
 		}
 	}
 

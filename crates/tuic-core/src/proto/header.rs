@@ -1,10 +1,9 @@
 use bytes::{Buf, BufMut};
 use num_enum::{FromPrimitive, IntoPrimitive};
-use snafu::ensure;
 use tokio_util::codec::{Decoder, Encoder};
 
-use super::{Command, VER};
-use crate::proto::{BytesRemainingSnafu, UnknownCommandTypeSnafu, VersionMismatchSnafu};
+use super::Command;
+use crate::proto::{BytesRemainingSnafu, VER};
 
 #[derive(Debug, Clone, Copy)]
 pub struct HeaderCodec;
@@ -39,26 +38,16 @@ impl Decoder for HeaderCodec {
 	type Item = Header;
 
 	fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-		if src.len() < 2 {
-			return Ok(None);
-		}
-		let ver = src.get_u8();
-		ensure!(
-			ver == VER,
-			VersionMismatchSnafu {
-				expect: VER,
-				current: ver
+		let input: &[u8] = &src[..];
+		match super::parse_header(input) {
+			Ok((remaining, header)) => {
+				let consumed = input.len() - remaining.len();
+				src.advance(consumed);
+				Ok(Some(header))
 			}
-		);
-
-		let cmd = CmdType::from(src.get_u8());
-
-		ensure!(
-			!matches!(cmd, CmdType::Other(..)),
-			UnknownCommandTypeSnafu { value: u8::from(cmd) }
-		);
-
-		Ok(Some(Header::new(cmd)))
+			Err(nom::Err::Incomplete(_)) => Ok(None),
+			Err(_) => BytesRemainingSnafu.fail(),
+		}
 	}
 
 	fn decode_eof(&mut self, buf: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
