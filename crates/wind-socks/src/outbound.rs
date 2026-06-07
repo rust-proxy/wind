@@ -60,7 +60,9 @@ impl AbstractOutbound for SocksOutbound {
 					.map_err(|e| eyre!(e))?;
 				p.request(Socks5Command::TCPConnect, socks_addr).await.map_err(|e| eyre!(e))?;
 				let mut p: Box<dyn AbstractTcpStream> = Box::new(p);
-				tokio::io::copy_bidirectional(&mut stream, &mut p).await?;
+				if let (_, _, Some(e)) = wind_core::io::copy_io(&mut stream, &mut p).await {
+					return Err(eyre!(e));
+				}
 				Ok::<(), eyre::Report>(())
 			};
 
@@ -70,12 +72,18 @@ impl AbstractOutbound for SocksOutbound {
 		} else {
 			// Direct connection to the SOCKS server
 			let tcp_stream = tokio::net::TcpStream::connect(self.opts.server_addr).await?;
+			// Disable Nagle on the hop to the SOCKS proxy (small-write latency).
+			if let Err(e) = tcp_stream.set_nodelay(true) {
+				tracing::debug!(error = %e, "failed to set TCP_NODELAY on socks5 outbound");
+			}
 			let mut p = Socks5Stream::use_stream(tcp_stream, auth, socks_config)
 				.await
 				.map_err(|e| eyre!(e))?;
 			p.request(Socks5Command::TCPConnect, socks_addr).await.map_err(|e| eyre!(e))?;
 			let mut proxy_stream: Box<dyn AbstractTcpStream> = Box::new(p);
-			tokio::io::copy_bidirectional(&mut stream, &mut proxy_stream).await?;
+			if let (_, _, Some(e)) = wind_core::io::copy_io(&mut stream, &mut proxy_stream).await {
+				return Err(eyre!(e));
+			}
 		}
 
 		Ok(())

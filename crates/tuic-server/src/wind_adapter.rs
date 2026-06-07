@@ -167,7 +167,6 @@ impl TuicRouter {
 	}
 }
 
-
 /// Build the DNS resolver selected by the configuration.
 fn build_resolver(cfg: &crate::Config) -> eyre::Result<Arc<dyn Resolver>> {
 	let default_ip_mode = cfg.outbound.default.ip_mode.unwrap_or(StackPrefer::V4first);
@@ -281,6 +280,10 @@ async fn create_quinn_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<TuicInb
 		initial_mtu: quinn.initial_mtu,
 		min_mtu: quinn.min_mtu,
 		gso: quinn.gso,
+		// `CongestionController` is a type alias for `wind_tuic::quinn::CongestionControl`,
+		// so the configured controller and initial window flow straight through.
+		congestion_control: quinn.congestion_control.controller,
+		initial_window: quinn.congestion_control.initial_window,
 	};
 	tracing::info!("Initializing quinn (wind-tuic) backend");
 	Ok(TuicInbound::new(wind_ctx, opts))

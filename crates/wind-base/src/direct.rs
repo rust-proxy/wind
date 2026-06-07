@@ -43,7 +43,7 @@ impl OutboundAction for DirectOutbound {
 		async move {
 			let target_sa = resolve_target(&target, self.resolver.as_ref()).await?;
 			let mut target_stream = connect_direct_tcp(target_sa, &self.opts).await?;
-			if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut target_stream).await {
+			if let (_, _, Some(e)) = wind_core::io::copy_io(&mut stream, &mut target_stream).await {
 				tracing::debug!(error = %e, "direct copy_bidirectional ended");
 			}
 			Ok(())
@@ -82,7 +82,17 @@ pub async fn connect_direct_tcp(addr: SocketAddr, opts: &DirectOutboundOpts) -> 
 		socket.bind_device(Some(dev.as_bytes()))?;
 	}
 
-	Ok(socket.connect(addr).await?)
+	let stream = socket.connect(addr).await?;
+	// Disable Nagle's algorithm. Proxied browser traffic is dominated by small
+	// writes (TLS records, HTTP request headers); with Nagle on, each small
+	// segment waits for the previous one to be ACKed, and interacts with the
+	// peer's delayed-ACK timer to add up to ~40 ms of latency per round trip —
+	// the classic "browsing feels laggy through the proxy" symptom. The QUIC
+	// inbound has no such buffering, so this is the only hop that needs it.
+	if let Err(e) = stream.set_nodelay(true) {
+		tracing::debug!(error = %e, "failed to set TCP_NODELAY on direct outbound");
+	}
+	Ok(stream)
 }
 
 async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>, udp_stream: UdpStream) -> eyre::Result<()> {
