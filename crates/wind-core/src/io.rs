@@ -1,21 +1,33 @@
 use tokio::io::{AsyncRead, AsyncWrite};
 
+/// Per-direction copy buffer size used by [`copy_io`].
+///
+/// `tokio::io::copy_bidirectional`'s default is only 8 KiB, which caps
+/// single-stream throughput over high bandwidth-delay-product links (a QUIC
+/// tunnel to a distant peer is exactly that): every 8 KiB requires a fresh
+/// read/write/wakeup cycle, so the relay can't keep enough bytes in flight to
+/// fill the congestion/flow-control window. 64 KiB lets each direction move an
+/// order of magnitude more data per syscall while staying well within typical
+/// stream receive windows.
+pub const RELAY_BUF_SIZE: usize = 64 * 1024;
+
 /// Bidirectionally relay bytes between two duplex streams until BOTH sides
 /// have closed.
 ///
-/// Delegates to [`tokio::io::copy_bidirectional`], which correctly handles
-/// half-close: when one direction sees EOF, it calls `shutdown()` on the
-/// opposite writer and continues pumping the remaining direction. The
-/// previous hand-rolled implementation broke out of the outer loop on the
-/// FIRST EOF, dropping any in-flight bytes flowing the other way — a common
-/// problem for HTTP, where a client sends its request and FINs while the
-/// server is still streaming the response.
+/// Delegates to [`tokio::io::copy_bidirectional_with_sizes`] (with
+/// [`RELAY_BUF_SIZE`] per direction), which correctly handles half-close: when
+/// one direction sees EOF, it calls `shutdown()` on the opposite writer and
+/// continues pumping the remaining direction. The previous hand-rolled
+/// implementation broke out of the outer loop on the FIRST EOF, dropping any
+/// in-flight bytes flowing the other way — a common problem for HTTP, where a
+/// client sends its request and FINs while the server is still streaming the
+/// response.
 pub async fn copy_io<A, B>(a: &mut A, b: &mut B) -> (usize, usize, Option<std::io::Error>)
 where
 	A: AsyncRead + AsyncWrite + Unpin + ?Sized,
 	B: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
-	match tokio::io::copy_bidirectional(a, b).await {
+	match tokio::io::copy_bidirectional_with_sizes(a, b, RELAY_BUF_SIZE, RELAY_BUF_SIZE).await {
 		Ok((a2b, b2a)) => (a2b as usize, b2a as usize, None),
 		Err(e) => (0, 0, Some(e)),
 	}

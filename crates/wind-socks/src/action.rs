@@ -33,7 +33,7 @@ impl OutboundAction for Socks5Action {
 		let span = tracing::debug_span!("socks5_tcp", target = %target, addr = %self.opts.addr);
 		async move {
 			let mut socks_stream = connect_socks5_tcp(&self.opts.addr, &target, &self.opts).await?;
-			if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut socks_stream).await {
+			if let (_, _, Some(e)) = wind_core::io::copy_io(&mut stream, &mut socks_stream).await {
 				tracing::debug!(error = %e, "socks5 copy_bidirectional ended");
 			}
 			Ok(())
@@ -76,6 +76,12 @@ async fn connect_socks5_tcp(
 			.await
 			.map_err(|e| eyre::eyre!("SOCKS5 connect failed: {}", e))?,
 	};
+
+	// Disable Nagle on the hop to the SOCKS proxy — the same small-write latency
+	// concern as the direct path (see `wind_base::direct::connect_direct_tcp`).
+	if let Err(e) = stream.get_socket_ref().set_nodelay(true) {
+		tracing::debug!(error = %e, "failed to set TCP_NODELAY on socks5 outbound");
+	}
 
 	Ok(stream)
 }

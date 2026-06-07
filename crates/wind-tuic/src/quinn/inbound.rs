@@ -28,7 +28,10 @@ use wind_core::{
 	udp::{UdpPacket, UdpStream as CoreUdpStream},
 };
 
-use crate::proto::{CmdType, Command};
+use crate::{
+	proto::{CmdType, Command},
+	quinn::CongestionControl,
+};
 
 async fn spawn_logged(label: &str, fut: impl std::future::Future<Output = eyre::Result<()>>) {
 	if let Err(err) = fut.await {
@@ -156,6 +159,14 @@ pub struct TuicInboundOpts {
 	pub min_mtu: u16,
 
 	pub gso: bool,
+
+	/// Congestion control algorithm for the QUIC transport.
+	pub congestion_control: CongestionControl,
+
+	/// Initial congestion window, in bytes. A larger value lets short-lived
+	/// connections (e.g. one TCP-over-QUIC stream per browser request) ramp out
+	/// of slow-start faster instead of trickling the first few round trips.
+	pub initial_window: u64,
 }
 
 impl Default for TuicInboundOpts {
@@ -177,6 +188,8 @@ impl Default for TuicInboundOpts {
 			initial_mtu: 1200,
 			min_mtu: 1200,
 			gso: true,
+			congestion_control: CongestionControl::Bbr,
+			initial_window: 1024 * 1024,
 		}
 	}
 }
@@ -239,11 +252,40 @@ impl TuicInbound {
 			))
 			.initial_mtu(self.opts.initial_mtu)
 			.min_mtu(self.opts.min_mtu)
-			.enable_segmentation_offload(self.opts.gso);
+			.enable_segmentation_offload(self.opts.gso)
+			.congestion_controller_factory(self.congestion_controller_factory());
 
 		config.transport_config(Arc::new(transport));
 
 		Ok(config)
+	}
+
+	/// Build the QUIC congestion-controller factory selected by
+	/// [`TuicInboundOpts::congestion_control`], applying the configured initial
+	/// window. Previously the server always used quinn's default (CUBIC with a
+	/// small initial window) and the operator's congestion-control settings
+	/// were silently ignored.
+	fn congestion_controller_factory(&self) -> Arc<dyn quinn::congestion::ControllerFactory + Send + Sync + 'static> {
+		let iw = self.opts.initial_window;
+		match self.opts.congestion_control {
+			// `quinn-congestions` provides a single BBR implementation; both the
+			// `bbr` and `bbr3` config aliases map to it.
+			CongestionControl::Bbr | CongestionControl::Bbr3 => {
+				let mut cfg = quinn_congestions::bbr::BbrConfig::default();
+				cfg.initial_window(iw);
+				Arc::new(cfg)
+			}
+			CongestionControl::Cubic => {
+				let mut cfg = quinn::congestion::CubicConfig::default();
+				cfg.initial_window(iw);
+				Arc::new(cfg)
+			}
+			CongestionControl::NewReno => {
+				let mut cfg = quinn::congestion::NewRenoConfig::default();
+				cfg.initial_window(iw);
+				Arc::new(cfg)
+			}
+		}
 	}
 }
 
