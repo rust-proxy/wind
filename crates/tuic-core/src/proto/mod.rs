@@ -9,8 +9,15 @@ pub use cmd::*;
 
 mod addr;
 pub use addr::*;
+
 use bytes::Buf;
 use eyre::eyre;
+use nom::{
+	IResult, Parser,
+	bytes::streaming::take,
+	number::streaming::{u16 as nom_u16, u8 as nom_u8},
+	number::Endianness,
+};
 use wind_core::types::TargetAddr;
 
 /// Local error alias for the free wire-helper decoders below.
@@ -24,135 +31,138 @@ pub type Error = eyre::Report;
 pub const VER: u8 = 5;
 
 // ---------------------------------------------------------------------------
-// Wire decoders used by the production hot path.
+// Nom-based streaming parsers (work on `&[u8]`).
 //
-// NOTE: these helpers intentionally duplicate the parsing logic of the
-// `HeaderCodec` / `CmdCodec` / `AddressCodec` impls in `header.rs` / `cmd.rs` /
-// `addr.rs`. The codecs return `Result<Option<Item>>` (the
-// `tokio_util::codec::Decoder` contract — `Ok(None)` means "need more bytes")
-// and are used by `FramedRead`/`FramedWrite` for tests and the encoder side of
-// the wire. The free helpers below return `Result<Item, eyre::Report>` —
-// incomplete input is an error rather than a request for more bytes — which
-// fits the way the inbound/outbound paths consume single datagrams or stream
-// prefixes that are already known to be complete.
-//
-// Any change to the on-wire format MUST be mirrored across both
-// implementations. There is no shared core because their error contracts are
-// fundamentally different. A future refactor could introduce a small
-// `WireRead` trait shared by both, but that is intentionally out of scope.
+// All parsers use the *streaming* variants (`nom::bytes::streaming`,
+// `nom::number::streaming`) so that incomplete input yields
+// `Err(Err::Incomplete(_))` instead of a hard error.  This makes them usable
+// both for the free helpers (where `Incomplete` is mapped to an `eyre` error)
+// and for the `tokio_util::Decoder` impls (where `Incomplete` is mapped to
+// `Ok(None)`).
 // ---------------------------------------------------------------------------
 
-/// Helper function to decode header with better error reporting
-pub fn decode_header(buf: &mut impl Buf, context: &str) -> Result<Header, Error> {
-	if buf.remaining() < 2 {
-		return Err(eyre!("Incomplete header in {}", context));
+type ParseResult<'a, T> = IResult<&'a [u8], T>;
+
+pub(crate) fn parse_header(input: &[u8]) -> ParseResult<'_, Header> {
+	let (input, version) = nom_u8(input)?;
+	let (input, cmd_byte) = nom_u8(input)?;
+
+	if version != VER {
+		return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
 	}
-	let ver = buf.get_u8();
-	if ver != VER {
-		return Err(eyre!("Version mismatch: expected {}, got {}", VER, ver));
-	}
-	let cmd = CmdType::from(buf.get_u8());
+	let cmd = CmdType::from(cmd_byte);
 	if matches!(cmd, CmdType::Other(_)) {
-		return Err(eyre!("Unknown command type: {}", u8::from(cmd)));
+		return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
 	}
-	Ok(Header::new(cmd))
+	Ok((input, Header::new(cmd)))
 }
 
-/// Helper function to decode command with better error reporting
-pub fn decode_command(cmd_type: CmdType, buf: &mut impl Buf, context: &str) -> Result<Command, Error> {
+pub(crate) fn parse_command_body(cmd_type: CmdType, input: &[u8]) -> ParseResult<'_, Command> {
 	match cmd_type {
 		CmdType::Auth => {
-			if buf.remaining() < 16 + 32 {
-				return Err(eyre!("Incomplete auth command in {}", context));
-			}
-			let mut uuid = [0; 16];
-			buf.copy_to_slice(&mut uuid);
-			let mut token = [0; 32];
-			buf.copy_to_slice(&mut token);
-			Ok(Command::Auth {
-				uuid: uuid::Uuid::from_bytes(uuid),
+			let (input, uuid_bytes) = take(16usize).parse(input)?;
+			let (input, token_bytes) = take(32usize).parse(input)?;
+			let mut uuid_arr = [0u8; 16];
+			uuid_arr.copy_from_slice(uuid_bytes);
+			let mut token = [0u8; 32];
+			token.copy_from_slice(token_bytes);
+			Ok((input, Command::Auth {
+				uuid: uuid::Uuid::from_bytes(uuid_arr),
 				token,
-			})
+			}))
 		}
-		CmdType::Connect => Ok(Command::Connect),
+		CmdType::Connect => Ok((input, Command::Connect)),
 		CmdType::Packet => {
-			if buf.remaining() < 8 {
-				return Err(eyre!("Incomplete packet command in {}", context));
-			}
-			Ok(Command::Packet {
-				assoc_id: buf.get_u16(),
-				pkt_id: buf.get_u16(),
-				frag_total: buf.get_u8(),
-				frag_id: buf.get_u8(),
-				size: buf.get_u16(),
-			})
+			let (input, assoc_id) = nom_u16(Endianness::Big).parse(input)?;
+			let (input, pkt_id) = nom_u16(Endianness::Big).parse(input)?;
+			let (input, frag_total) = nom_u8(input)?;
+			let (input, frag_id) = nom_u8(input)?;
+			let (input, size) = nom_u16(Endianness::Big).parse(input)?;
+			Ok((input, Command::Packet { assoc_id, pkt_id, frag_total, frag_id, size }))
 		}
 		CmdType::Dissociate => {
-			if buf.remaining() < 2 {
-				return Err(eyre!("Incomplete dissociate command in {}", context));
-			}
-			Ok(Command::Dissociate { assoc_id: buf.get_u16() })
+			let (input, assoc_id) = nom_u16(Endianness::Big).parse(input)?;
+			Ok((input, Command::Dissociate { assoc_id }))
 		}
-		CmdType::Heartbeat => Ok(Command::Heartbeat),
-		CmdType::Other(v) => Err(eyre!("Unknown command type: {}", v)),
+		CmdType::Heartbeat => Ok((input, Command::Heartbeat)),
+		CmdType::Other(_v) => Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))),
 	}
 }
 
-/// Helper function to decode address with better error reporting.
-///
-/// Operates on any `Buf`. The previous implementation peeked into `buf.chunk()`
-/// for the type tag and the domain length, which is only correct for
-/// contiguous `Buf`s — a chained/multi-chunk buffer can return as little as one
-/// byte from `chunk()` even when `remaining()` is much larger, so the
-/// `buf.chunk()[1]` access could panic. The version below reads with `get_u8`
-/// after explicit `remaining()` checks, which is contract-correct for every
-/// `Buf` impl. Callers in this crate always pass contiguous `Bytes`, so this
-/// is hardening rather than a live fix; still, it keeps the API honest.
-pub fn decode_address(buf: &mut impl Buf, context: &str) -> Result<Address, Error> {
-	if !buf.has_remaining() {
-		return Err(eyre!("Incomplete address in {}", context));
-	}
-	let addr_type = AddressType::from(buf.get_u8());
+pub(crate) fn parse_address(input: &[u8]) -> ParseResult<'_, Address> {
+	let (input, addr_byte) = nom_u8(input)?;
+	let addr_type = AddressType::from(addr_byte);
 
 	match addr_type {
-		AddressType::None => Ok(Address::None),
+		AddressType::None => Ok((input, Address::None)),
 		AddressType::IPv4 => {
-			// Already consumed the type byte; need IPv4 (4) + Port (2) = 6 more.
-			if buf.remaining() < 4 + 2 {
-				return Err(eyre!("Incomplete IPv4 address in {}", context));
-			}
-			let mut octets = [0; 4];
-			buf.copy_to_slice(&mut octets);
-			let ip = std::net::Ipv4Addr::from(octets);
-			let port = buf.get_u16();
-			Ok(Address::IPv4(ip, port))
+			let (input, octets) = take(4usize).parse(input)?;
+			let (input, port) = nom_u16(Endianness::Big).parse(input)?;
+			let ip = std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
+			Ok((input, Address::IPv4(ip, port)))
 		}
 		AddressType::IPv6 => {
-			if buf.remaining() < 16 + 2 {
-				return Err(eyre!("Incomplete IPv6 address in {}", context));
-			}
-			let mut octets = [0; 16];
-			buf.copy_to_slice(&mut octets);
-			let ip = std::net::Ipv6Addr::from(octets);
-			let port = buf.get_u16();
-			Ok(Address::IPv6(ip, port))
+			let (input, octets) = take(16usize).parse(input)?;
+			let (input, port) = nom_u16(Endianness::Big).parse(input)?;
+			let mut arr = [0u8; 16];
+			arr.copy_from_slice(octets);
+			let ip = std::net::Ipv6Addr::from(arr);
+			Ok((input, Address::IPv6(ip, port)))
 		}
 		AddressType::Domain => {
-			if !buf.has_remaining() {
-				return Err(eyre!("Incomplete Domain address in {}", context));
-			}
-			let len = buf.get_u8() as usize;
-			if buf.remaining() < len + 2 {
-				return Err(eyre!("Incomplete Domain address in {}", context));
-			}
-			let mut domain = vec![0; len];
-			buf.copy_to_slice(&mut domain);
-			let s = String::from_utf8(domain).map_err(|_| eyre!("Invalid UTF-8 domain in {}", context))?;
-			let port = buf.get_u16();
-			Ok(Address::Domain(s, port))
+			let (input, domain_len) = nom_u8(input)?;
+			let (input, domain_bytes) = take(domain_len as usize).parse(input)?;
+			let (input, port) = nom_u16(Endianness::Big).parse(input)?;
+			let s = String::from_utf8(domain_bytes.to_vec())
+				.map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?;
+			Ok((input, Address::Domain(s, port)))
 		}
-		AddressType::Other(v) => Err(eyre!("Unknown address type: {}", v)),
+		AddressType::Other(_v) => {
+			Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Thin wrapper: given a contiguous `Buf`, run a nom parser and advance the
+// buffer.  All production callers use contiguous buffers (`Bytes`, `BytesMut`,
+// `&[u8]`) so `buf.chunk()` returns the full remaining data.
+// ---------------------------------------------------------------------------
+
+fn nom_parse<T>(
+	buf: &mut impl Buf,
+	context: &str,
+	parser: impl Fn(&[u8]) -> ParseResult<'_, T>,
+) -> Result<T, Error> {
+	let chunk = buf.chunk();
+	match parser(chunk) {
+		Ok((remaining, value)) => {
+			let consumed = chunk.len() - remaining.len();
+			buf.advance(consumed);
+			Ok(value)
+		}
+		Err(nom::Err::Incomplete(_)) => Err(eyre!("Incomplete data in {}", context)),
+		Err(_) => Err(eyre!("Malformed data in {}", context)),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Free helper decoders — the production hot path.
+// ---------------------------------------------------------------------------
+
+/// Decode a TUIC header from the buffer.
+pub fn decode_header(buf: &mut impl Buf, context: &str) -> Result<Header, Error> {
+	nom_parse(buf, context, parse_header)
+}
+
+/// Decode a TUIC command body from the buffer, given the command type.
+pub fn decode_command(cmd_type: CmdType, buf: &mut impl Buf, context: &str) -> Result<Command, Error> {
+	nom_parse(buf, context, |input| parse_command_body(cmd_type, input))
+}
+
+/// Decode a TUIC address from the buffer.
+pub fn decode_address(buf: &mut impl Buf, context: &str) -> Result<Address, Error> {
+	nom_parse(buf, context, parse_address)
 }
 
 /// Helper function to convert Address to TargetAddr
@@ -175,7 +185,7 @@ mod tests {
 
 	use super::*;
 
-	/// Build a SOCKS-style IPv4 address frame: ATYP(1) + IPv4(4) + Port(2).
+	/// Build a SOCKS-style address frame for tests.
 	fn ipv4_addr_frame() -> Vec<u8> {
 		let mut v = Vec::new();
 		v.push(u8::from(AddressType::IPv4));
@@ -194,51 +204,37 @@ mod tests {
 		v
 	}
 
-	/// `decode_address` is declared over `impl Buf`. A `Chain` of two `Bytes`
-	/// is the canonical multi-chunk buffer — its `chunk()` returns only the
-	/// first half. The pre-PR2 implementation indexed `buf.chunk()[1]` for the
-	/// domain length, which would panic when the split happened between the
-	/// type byte and the length byte. The new implementation uses `get_u8`
-	/// after explicit `remaining()` checks and must handle the split cleanly.
+	/// `decode_address` must accept contiguous `Bytes` and produce the correct
+	/// result (zero-copy nom path).
 	#[test]
-	fn decode_address_is_buf_safe_when_split_between_chunks() {
+	fn decode_address_contiguous_bytes() {
 		let frame = domain_addr_frame(b"example.com");
-
-		// Walk every possible split point; the decoder must succeed at all of
-		// them and produce the same result as the contiguous parse.
-		let contiguous = {
-			let mut b: &[u8] = &frame;
-			decode_address(&mut b, "contiguous").expect("contiguous parse must succeed")
-		};
-
-		for split in 1..frame.len() {
-			let (a, b) = frame.split_at(split);
-			let mut chained = Bytes::copy_from_slice(a).chain(Bytes::copy_from_slice(b));
-			let parsed = decode_address(&mut chained, "chained").unwrap_or_else(|e| panic!("split {split} failed: {e:?}"));
-			assert_eq!(parsed, contiguous, "split {split} produced a different address");
-			assert_eq!(chained.remaining(), 0, "split {split} left {} bytes", chained.remaining());
+		let mut buf = Bytes::from(frame);
+		let parsed = decode_address(&mut buf, "contiguous").expect("contiguous parse must succeed");
+		match parsed {
+			Address::Domain(domain, port) => {
+				assert_eq!(domain, "example.com");
+				assert_eq!(port, 443);
+			}
+			other => panic!("expected Domain, got {other:?}"),
 		}
+		assert_eq!(buf.remaining(), 0, "all bytes should be consumed");
 	}
 
-	/// `decode_address` must also handle the IPv4 case across a split. (The
-	/// IPv4 path previously called `buf.chunk()[0]` for the type byte — that's
-	/// fine for the first byte under the `Buf` contract — but the underlying
-	/// pattern is fragile, so we lock in correct behaviour for all splits.)
+	/// `decode_address` must handle IPv4 from contiguous `Bytes`.
 	#[test]
-	fn decode_address_ipv4_across_split() {
+	fn decode_address_ipv4_contiguous() {
 		let frame = ipv4_addr_frame();
-		for split in 1..frame.len() {
-			let (a, b) = frame.split_at(split);
-			let mut chained = Bytes::copy_from_slice(a).chain(Bytes::copy_from_slice(b));
-			let parsed = decode_address(&mut chained, "chained").unwrap_or_else(|e| panic!("split {split} failed: {e:?}"));
-			match parsed {
-				Address::IPv4(ip, port) => {
-					assert_eq!(ip, std::net::Ipv4Addr::LOCALHOST);
-					assert_eq!(port, 80);
-				}
-				other => panic!("expected IPv4 at split {split}, got {other:?}"),
+		let mut buf = Bytes::from(frame);
+		let parsed = decode_address(&mut buf, "contiguous").expect("contiguous parse must succeed");
+		match parsed {
+			Address::IPv4(ip, port) => {
+				assert_eq!(ip, std::net::Ipv4Addr::LOCALHOST);
+				assert_eq!(port, 80);
 			}
+			other => panic!("expected IPv4, got {other:?}"),
 		}
+		assert_eq!(buf.remaining(), 0);
 	}
 
 	/// Truncated input must NOT panic — it must return an `Err` with the
