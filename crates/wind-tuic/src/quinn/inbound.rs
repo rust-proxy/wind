@@ -210,7 +210,6 @@ impl TuicInbound {
 		crypto.alpn_protocols = self.opts.alpn.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 
 		if self.opts.zero_rtt {
-			//
 			// Operators wanting strict replay resistance should leave `zero_rtt`
 			// disabled until application-layer nonce/anti-replay is implemented.
 			warn!(
