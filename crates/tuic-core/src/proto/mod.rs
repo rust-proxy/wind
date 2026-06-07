@@ -9,14 +9,15 @@ pub use cmd::*;
 
 mod addr;
 pub use addr::*;
-
 use bytes::Buf;
 use eyre::eyre;
 use nom::{
 	IResult, Parser,
 	bytes::streaming::take,
-	number::streaming::{u16 as nom_u16, u8 as nom_u8},
-	number::Endianness,
+	number::{
+		Endianness,
+		streaming::{u8 as nom_u8, u16 as nom_u16},
+	},
 };
 use wind_core::types::TargetAddr;
 
@@ -66,10 +67,13 @@ pub(crate) fn parse_command_body(cmd_type: CmdType, input: &[u8]) -> ParseResult
 			uuid_arr.copy_from_slice(uuid_bytes);
 			let mut token = [0u8; 32];
 			token.copy_from_slice(token_bytes);
-			Ok((input, Command::Auth {
-				uuid: uuid::Uuid::from_bytes(uuid_arr),
-				token,
-			}))
+			Ok((
+				input,
+				Command::Auth {
+					uuid: uuid::Uuid::from_bytes(uuid_arr),
+					token,
+				},
+			))
 		}
 		CmdType::Connect => Ok((input, Command::Connect)),
 		CmdType::Packet => {
@@ -78,7 +82,16 @@ pub(crate) fn parse_command_body(cmd_type: CmdType, input: &[u8]) -> ParseResult
 			let (input, frag_total) = nom_u8(input)?;
 			let (input, frag_id) = nom_u8(input)?;
 			let (input, size) = nom_u16(Endianness::Big).parse(input)?;
-			Ok((input, Command::Packet { assoc_id, pkt_id, frag_total, frag_id, size }))
+			Ok((
+				input,
+				Command::Packet {
+					assoc_id,
+					pkt_id,
+					frag_total,
+					frag_id,
+					size,
+				},
+			))
 		}
 		CmdType::Dissociate => {
 			let (input, assoc_id) = nom_u16(Endianness::Big).parse(input)?;
@@ -117,9 +130,7 @@ pub(crate) fn parse_address(input: &[u8]) -> ParseResult<'_, Address> {
 				.map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?;
 			Ok((input, Address::Domain(s, port)))
 		}
-		AddressType::Other(_v) => {
-			Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
-		}
+		AddressType::Other(_v) => Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))),
 	}
 }
 
@@ -129,11 +140,7 @@ pub(crate) fn parse_address(input: &[u8]) -> ParseResult<'_, Address> {
 // `&[u8]`) so `buf.chunk()` returns the full remaining data.
 // ---------------------------------------------------------------------------
 
-fn nom_parse<T>(
-	buf: &mut impl Buf,
-	context: &str,
-	parser: impl Fn(&[u8]) -> ParseResult<'_, T>,
-) -> Result<T, Error> {
+fn nom_parse<T>(buf: &mut impl Buf, context: &str, parser: impl Fn(&[u8]) -> ParseResult<'_, T>) -> Result<T, Error> {
 	let chunk = buf.chunk();
 	match parser(chunk) {
 		Ok((remaining, value)) => {
