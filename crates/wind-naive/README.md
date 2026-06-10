@@ -43,6 +43,7 @@ outbounds:
     username: "user"
     password: "pass"
     quic_enabled: true
+    quic_congestion_control: "bbr"                  # default|bbr|bbrv2|cubic|reno
     cronet_lib_path: "/usr/lib/libcronet.so.119"   # optional
 ```
 
@@ -56,7 +57,7 @@ outbounds:
 | `password` | `Option<String>` | `None` | Basic auth |
 | `concurrency` | `u32` | `1` | Cronet connection pool size |
 | `quic_enabled` | `bool` | `false` | Use QUIC instead of HTTP/2 |
-| `quic_congestion_control` | enum | `Default` | BBR / BbrV2 / Cubic / Reno |
+| `quic_congestion_control` | `String` | `default` | `default` / `bbr` / `bbrv2` / `cubic` / `reno` |
 | `trusted_root_certificates` | `Option<String>` | `None` | Custom CA PEM |
 | `ech_enabled` | `bool` | `false` | Encrypted Client Hello |
 | `extra_headers` | `HashMap<String,String>` | `{}` | Extra CONNECT headers |
@@ -123,6 +124,30 @@ NaiveOutbound (cronet-rs)
 │  │ read() / write()  │  │  ← blocking FFI calls
 │  └───────────────────┘  │
 └─────────────────────────┘
+```
+
+## UDP (UDP-over-TCP v2)
+
+NaiveProxy's classic protocol only tunnels **TCP** (an HTTP `CONNECT` byte
+stream). To carry UDP, `wind-naive` layers [sing-box's UDP-over-TCP **v2**
+framing](https://github.com/sagernet/sing/tree/main/common/uot) over a single
+CONNECT tunnel:
+
+- All datagrams for one UDP association are multiplexed over **one** tunnel,
+  opened to the magic authority `sp.v2.udp-over-tcp.arpa` (instead of a literal
+  TCP CONNECT per packet).
+- Each frame is `address ‖ u16 length ‖ payload`, so replies flow back to the
+  client (no more black-holed responses), and a single tunnel can fan out to
+  many destinations.
+
+> **Server requirement:** the upstream must understand UoT v2 (e.g. a sing-box
+> server with a `naive` inbound). A stock Chromium NaiveProxy server only speaks
+> TCP CONNECT and will reject the magic authority.
+
+```
+UdpStream ──frame──▶ [uplink chan] ──▶ ┌── std::thread (owns NaiveConn) ──┐
+UdpStream ◀─packet── [downlink chan] ◀─┤  write_all(frame) / read_packet  │ ──▶ [Naive/UoT server]
+                                       └──────────────────────────────────┘
 ```
 
 ## Building

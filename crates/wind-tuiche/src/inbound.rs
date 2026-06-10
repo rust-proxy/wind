@@ -112,8 +112,11 @@ impl AbstractInbound for TuicheInbound {
 				Ok(conn) => {
 					// Each connection gets its own TUIC protocol driver running on
 					// the tokio-quiche worker. `start` spawns the worker and
-					// returns a handle we don't need to retain.
-					let driver = TuicheDriver::new(cb.clone(), users.clone());
+					// returns a handle we don't need to retain. A per-connection
+					// span tags every driver log line (and the relay tasks it
+					// spawns) with the peer address, mirroring `wind-tuic`.
+					let span = tracing::info_span!("conn", peer = %conn.peer_addr());
+					let driver = TuicheDriver::new(cb.clone(), users.clone(), span);
 					conn.start(driver);
 				}
 				Err(e) => {

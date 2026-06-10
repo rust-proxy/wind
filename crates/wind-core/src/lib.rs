@@ -14,10 +14,12 @@ pub use outbound::*;
 pub use resolve::{Resolver, SystemResolver};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+pub mod quic;
 pub mod tcp;
 pub mod udp;
 pub mod utils;
 
+pub use quic::{QuicCongestionControl, parse_congestion_control};
 pub use utils::{StackPrefer, is_private_ip};
 
 #[cfg(test)]
