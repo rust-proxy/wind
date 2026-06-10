@@ -10,7 +10,7 @@ use std::{
 	sync::Arc,
 };
 
-use cronet_rs::naive_client::{NaiveClient, NaiveClientConfig, QuicCongestionControl};
+use cronet_rs::naive_client::{NaiveClient, NaiveClientConfig, QuicCongestionControl as CronetCongestionControl};
 use eyre::Context as _;
 use tokio::{
 	io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -18,11 +18,25 @@ use tokio::{
 };
 use tracing::{Instrument, info};
 use wind_core::{
-	AbstractOutbound,
+	AbstractOutbound, QuicCongestionControl,
 	tcp::AbstractTcpStream,
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
 };
+
+mod uot;
+
+/// Map the transport-agnostic [`QuicCongestionControl`] onto the `cronet-rs`
+/// representation expected by the underlying engine.
+fn to_cronet(cc: QuicCongestionControl) -> CronetCongestionControl {
+	match cc {
+		QuicCongestionControl::Default => CronetCongestionControl::Default,
+		QuicCongestionControl::Bbr => CronetCongestionControl::Bbr,
+		QuicCongestionControl::BbrV2 => CronetCongestionControl::BbrV2,
+		QuicCongestionControl::Cubic => CronetCongestionControl::Cubic,
+		QuicCongestionControl::Reno => CronetCongestionControl::Reno,
+	}
+}
 
 // ============================================================================
 // Options
@@ -136,7 +150,7 @@ impl NaiveOutbound {
 			extra_headers: opts.extra_headers.clone(),
 			trusted_root_certificates: opts.trusted_root_certificates.clone(),
 			quic_enabled: opts.quic_enabled,
-			quic_congestion_control: opts.quic_congestion_control,
+			quic_congestion_control: to_cronet(opts.quic_congestion_control),
 			ech_enabled: opts.ech_enabled,
 			..Default::default()
 		};
@@ -196,97 +210,163 @@ impl AbstractOutbound for NaiveOutbound {
 		naive_async_bridge(naive_conn, stream).await
 	}
 
-	// FIXME(PR3-followup): three known issues in this UDP path that aren't
-	// addressed here because they all require a Naive UDP multiplex protocol
-	// implementation, not just polish:
-	//   1. Every incoming packet `tokio::spawn`s a new task and a fresh
-	//      `udp_tunnel_tx` connection — full TLS+HTTP-CONNECT cost per datagram. A
-	//      small per-{src_addr,target} session pool would amortise that.
-	//   2. No spawn ceiling. A UDP flood from any inbound becomes an unbounded task
-	//      fan-out.
-	//   3. The `tx` half is discarded (`_tx`), so UDP replies are silently
-	//      black-holed. Needs a real receive demuxer.
-	// Until #1–#3 land, the only mitigation here is a `Semaphore` to bound
-	// concurrent tunnels; document the limitation rather than silently
-	// dropping packets.
+	/// Relay UDP through a **single** Naive CONNECT tunnel using UoT v2
+	/// framing.
+	///
+	/// NaiveProxy's classic protocol only tunnels TCP, so all datagrams for
+	/// this [`UdpStream`] are multiplexed over one CONNECT tunnel opened to
+	/// the UoT magic authority ([`uot::MAGIC_ADDRESS`]); each packet carries
+	/// its own destination/source address. This requires a UoT-v2-aware server
+	/// (e.g. sing-box's naive inbound) on the other end.
+	///
+	/// This replaces the previous per-datagram fire-and-forget design, which
+	/// paid a full TLS+CONNECT handshake per packet, could fan out unbounded
+	/// tasks, and silently black-holed every reply.
 	async fn handle_udp(&self, udp_stream: UdpStream, _via: Option<impl AbstractOutbound + Sized + Send>) -> eyre::Result<()> {
-		use tokio::sync::Semaphore;
+		let UdpStream { tx, mut rx } = udp_stream;
 
-		const MAX_CONCURRENT_UDP_TUNNELS: usize = 64;
-		let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_UDP_TUNNELS));
+		// Defer opening the tunnel until the first datagram so idle UDP
+		// associations cost nothing, and so the UoT request header can name a
+		// concrete destination.
+		let first = match rx.recv().await {
+			Some(p) => p,
+			None => return Ok(()),
+		};
 
-		let UdpStream { tx: _tx, mut rx } = udp_stream;
 		let client = self.client.clone();
+		// UoT signals via the CONNECT authority; the port is informational
+		// (the server matches on the magic host), so any value works.
+		let magic = format!("{}:443", uot::MAGIC_ADDRESS);
+		let naive_conn = tokio::task::spawn_blocking(move || -> eyre::Result<_> {
+			let guard = client.blocking_read();
+			guard
+				.dial_and_handshake(&magic)
+				.map_err(|e| eyre::eyre!("UoT CONNECT tunnel failed: {e}"))
+		})
+		.await
+		.context("Spawn blocking for UoT dial failed")??;
 
-		while let Some(packet) = rx.recv().await {
-			let UdpPacket {
-				source: _,
-				target,
-				payload,
-			} = packet;
-			let target_str = target.to_string();
-			let client = client.clone();
-			let payload_len = payload.len();
+		info!(target: "naive_udp", "UoT v{} tunnel established", uot::VERSION);
 
-			let permit = match permits.clone().try_acquire_owned() {
-				Ok(p) => p,
-				Err(_) => {
-					tracing::warn!(
-						target = %target_str,
-						bytes = payload_len,
-						"[NAIVE:UDP] {MAX_CONCURRENT_UDP_TUNNELS} concurrent tunnels in flight; dropping packet",
-					);
-					continue;
-				}
-			};
-
-			tokio::spawn(
-				async move {
-					let _permit = permit; // released on drop
-					if let Err(e) = udp_tunnel_tx(client, &target_str, &payload).await {
-						tracing::warn!(target = %target_str, error = %e, "[NAIVE:UDP] tunnel failed");
-					} else {
-						info!(target = %target_str, bytes = payload_len, "[NAIVE:UDP] sent {payload_len} bytes via tunnel");
-					}
-				}
-				.in_current_span(),
-			);
-		}
-
-		Ok(())
+		naive_uot_bridge(naive_conn, first, rx, tx).await
 	}
 }
 
 // ============================================================================
-// UDP-over-TCP
+// UDP-over-TCP (UoT v2) bridge
 // ============================================================================
 
-/// Send a single UDP payload through a short-lived CONNECT tunnel.
-async fn udp_tunnel_tx(client: Arc<tokio::sync::RwLock<NaiveClient>>, target: &str, payload: &[u8]) -> eyre::Result<()> {
-	let target = target.to_string();
-	let data = payload.to_vec();
+/// Bridge a [`UdpStream`] across a blocking
+/// [`cronet_rs::naive_conn::NaiveConn`] using UoT v2 framing.
+///
+/// A dedicated **std::thread** owns the `NaiveConn` (the Cronet C API requires
+/// stream operations from a single thread) and relays framed bytes through
+/// bounded `mpsc` channels:
+///
+/// * uplink — async `rx` → frame → channel → thread `write_all`s the bytes
+/// * downlink — thread reads/parses frames → channel → async sends to `tx`
+///
+/// Like the TCP bridge, the thread interleaves "drain pending writes, then one
+/// blocking framed read" on a single handle. While it is blocked awaiting a
+/// downlink frame, freshly queued uplink packets wait for the next read to
+/// return — an inherent limitation of the blocking, non-splittable handle.
+async fn naive_uot_bridge(
+	mut naive: cronet_rs::naive_conn::NaiveConn,
+	first: UdpPacket,
+	mut rx: mpsc::Receiver<UdpPacket>,
+	tx: mpsc::Sender<UdpPacket>,
+) -> eyre::Result<()> {
+	const QUEUE: usize = 64;
+	let (uplink_tx, mut uplink_rx) = mpsc::channel::<Vec<u8>>(QUEUE);
+	let (downlink_tx, mut downlink_rx) = mpsc::channel::<UdpPacket>(QUEUE);
 
-	// Read-lock (parallel dials are fine).
-	let client_dial = client.clone();
-	let mut naive_conn = tokio::task::spawn_blocking(move || -> eyre::Result<_> {
-		let guard = client_dial.blocking_read();
-		guard
-			.dial_and_handshake(&target)
-			.map_err(|e| eyre::eyre!("UDP CONNECT tunnel to {target} failed: {e}"))
-	})
-	.await
-	.context("Spawn blocking for UDP dial failed")??;
+	// Coalesce the one-shot request header and the first datagram into the
+	// opening write.
+	let mut initial = uot::encode_request(&first.target)?;
+	uot::encode_packet_into(&mut initial, &first.target, &first.payload)?;
 
-	tokio::task::spawn_blocking(move || -> eyre::Result<()> {
-		naive_conn
-			.write_all(&data)
-			.map_err(|e| eyre::eyre!("UDP tunnel write failed: {e}"))?;
-		naive_conn.flush().map_err(|e| eyre::eyre!("UDP tunnel flush failed: {e}"))?;
-		// Drop closes the tunnel.
-		Ok(())
-	})
-	.await
-	.context("Spawn blocking for UDP write failed")?
+	// ── I/O thread (owns NaiveConn) ──────────────────────────────────────
+	let io_handle = std::thread::Builder::new()
+		.name("wind-naive-uot-io".into())
+		.spawn(move || {
+			if naive.write_all(&initial).is_err() {
+				return;
+			}
+			let _ = naive.flush();
+
+			loop {
+				// Drain any queued uplink frames (non-blocking).
+				let mut wrote = false;
+				while let Ok(frame) = uplink_rx.try_recv() {
+					if naive.write_all(&frame).is_err() {
+						return;
+					}
+					wrote = true;
+				}
+				if wrote {
+					let _ = naive.flush();
+				}
+
+				// Block on one downlink frame.
+				match uot::read_packet(&mut naive) {
+					Ok((source, payload)) => {
+						let packet = UdpPacket {
+							source: Some(source.clone()),
+							target: source,
+							payload: payload.into(),
+						};
+						if downlink_tx.blocking_send(packet).is_err() {
+							return;
+						}
+					}
+					Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+						tracing::debug!("UoT tunnel EOF");
+						return;
+					}
+					Err(e) => {
+						tracing::debug!(error = %e, "UoT tunnel read error");
+						return;
+					}
+				}
+			}
+		})
+		.expect("spawn wind-naive-uot-io thread");
+
+	// ── Uplink: async rx → framed bytes → io thread ──────────────────────
+	let uplink = async move {
+		while let Some(packet) = rx.recv().await {
+			match uot::encode_packet(&packet.target, &packet.payload) {
+				Ok(frame) => {
+					if uplink_tx.send(frame).await.is_err() {
+						break;
+					}
+				}
+				Err(e) => {
+					tracing::warn!(target = %packet.target, error = %e, "dropping un-encodable UDP packet");
+				}
+			}
+		}
+	};
+
+	// ── Downlink: io thread → async tx ───────────────────────────────────
+	let downlink = async move {
+		while let Some(packet) = downlink_rx.recv().await {
+			if tx.send(packet).await.is_err() {
+				break;
+			}
+		}
+	};
+
+	tokio::select! {
+		_ = uplink => {}
+		_ = downlink => {}
+	}
+
+	// Do not `join` the I/O thread: it may be parked in a blocking read with no
+	// downlink traffic. Dropping the channels makes its next write fail and the
+	// `NaiveConn` is cancelled when the thread finally unwinds and drops it.
+	drop(io_handle);
+	Ok(())
 }
 
 // ============================================================================
@@ -325,14 +405,6 @@ async fn naive_async_bridge(
 				loop {
 					// Drain pending writes.
 					while let Ok(data) = naive_write_rx.try_recv() {
-						if naive.write_all(&data).is_err() {
-							return;
-						}
-						let _ = naive.flush();
-					}
-
-					// Re-check after flush.
-					if let Ok(data) = naive_write_rx.try_recv() {
 						if naive.write_all(&data).is_err() {
 							return;
 						}
@@ -404,7 +476,8 @@ async fn naive_async_bridge(
 // libcronet loader
 // ============================================================================
 
-/// Default search paths for `libcronet`.
+/// Default search paths for `libcronet` (dynamic loading only).
+#[cfg(feature = "dynamic")]
 const CRONET_SEARCH_PATHS: &[&str] = &[
 	"libcronet.so",   // system LD_LIBRARY_PATH
 	"./libcronet.so", // CWD
@@ -417,6 +490,22 @@ const CRONET_SEARCH_PATHS: &[&str] = &[
 /// If `path` is `Some(...)`, that exact path is tried first.  On failure, or
 /// when `path` is `None`, the default search paths are tried.
 fn load_cronet(path: Option<String>) -> eyre::Result<()> {
+	// With `static-link`, libcronet is linked at compile time — there is nothing
+	// to dlopen, so skip the search entirely.
+	#[cfg(not(feature = "dynamic"))]
+	{
+		let _ = path;
+		return Ok(());
+	}
+
+	#[cfg(feature = "dynamic")]
+	{
+		load_cronet_dynamic(path)
+	}
+}
+
+#[cfg(feature = "dynamic")]
+fn load_cronet_dynamic(path: Option<String>) -> eyre::Result<()> {
 	use cronet_rs::sys::load_library;
 
 	let paths: Vec<&str> = if let Some(ref p) = path {

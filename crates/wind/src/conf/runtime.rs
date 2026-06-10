@@ -84,11 +84,15 @@ impl OutboundRuntime {
 					password: n.password.clone(),
 					concurrency: n.concurrency,
 					quic_enabled: n.quic_enabled,
+					quic_congestion_control: n
+						.quic_congestion_control
+						.as_deref()
+						.map(|s| wind_core::parse_congestion_control(s).expect("invalid quic_congestion_control in config"))
+						.unwrap_or(wind_core::QuicCongestionControl::Default),
 					trusted_root_certificates: n.trusted_root_certificates.clone(),
 					ech_enabled: n.ech_enabled,
 					extra_headers: n.extra_headers.clone(),
 					cronet_lib_path: n.cronet_lib_path.clone(),
-					..Default::default()
 				}),
 			},
 		}

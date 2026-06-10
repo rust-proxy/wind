@@ -209,10 +209,16 @@ pub struct NaiveOutboundConfig {
 	#[serde(default)]
 	pub password: Option<String>,
 
+	#[serde(default = "default_concurrency")]
 	pub concurrency: u32,
 
 	#[serde(default)]
 	pub quic_enabled: bool,
+
+	/// QUIC congestion-control algorithm: `default`, `bbr`, `bbrv2`, `cubic`,
+	/// or `reno`. Only meaningful when `quic_enabled` is true.
+	#[serde(default)]
+	pub quic_congestion_control: Option<String>,
 
 	#[serde(default)]
 	pub trusted_root_certificates: Option<String>,
@@ -245,6 +251,9 @@ fn default_localhost() -> String {
 }
 fn default_h3_alpn() -> Vec<String> {
 	vec!["h3".into()]
+}
+fn default_concurrency() -> u32 {
+	1
 }
 
 // ============================================================================
