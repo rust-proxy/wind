@@ -112,7 +112,8 @@ pub(crate) fn build(cfg: &DnsConfig) -> Result<Option<HickoryResolver>> {
 	Ok(Some(HickoryResolver::new(resolver, cfg.stack_prefer)))
 }
 
-/// Factory: given a resolved IP and optional SNI, produce a [`NameServerConfig`].
+/// Factory: given a resolved IP and optional SNI, produce a
+/// [`NameServerConfig`].
 type MakeNameServer = fn(IpAddr, Option<String>) -> NameServerConfig;
 
 /// Parse a DNS server URL or bare address into a [`NameServerConfig`].
@@ -206,11 +207,7 @@ mod tests {
 		// `udp_and_tcp` yields both a UDP and a TCP connection.
 		assert_eq!(ns.connections.len(), 2);
 		assert!(ns.connections.iter().all(|c| c.port == 53));
-		assert!(
-			ns.connections
-				.iter()
-				.any(|c| matches!(c.protocol, ProtocolConfig::Udp))
-		);
+		assert!(ns.connections.iter().any(|c| matches!(c.protocol, ProtocolConfig::Udp)));
 	}
 
 	#[test]
