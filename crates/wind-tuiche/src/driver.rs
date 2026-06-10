@@ -36,7 +36,7 @@ use tokio_quiche::{
 	quiche::{self, Shutdown},
 };
 use tokio_util::codec::{Decoder, Encoder};
-use tracing::{debug, trace, warn};
+use tracing::{Instrument as _, Span, debug, trace, warn};
 use tuic_core::{
 	proto::{
 		Address, AddressCodec, CmdCodec, CmdType, Command, Header, HeaderCodec, address_to_target, decode_address,
@@ -178,6 +178,11 @@ enum ParseOutcome {
 pub struct TuicheDriver<C: InboundCallback> {
 	callback: C,
 	users: std::sync::Arc<HashMap<Uuid, Vec<u8>>>,
+	/// Per-connection tracing span (`conn{peer=…}`). Entered in the
+	/// `ApplicationOverQuic` callbacks so every inline log line is tagged with
+	/// the peer, and used as the parent of the per-stream/per-association spans
+	/// on the relay tasks we spawn.
+	span: Span,
 	established: bool,
 	authed: bool,
 	buffer: Vec<u8>,
@@ -191,11 +196,12 @@ pub struct TuicheDriver<C: InboundCallback> {
 }
 
 impl<C: InboundCallback> TuicheDriver<C> {
-	pub fn new(callback: C, users: std::sync::Arc<HashMap<Uuid, Vec<u8>>>) -> Self {
+	pub fn new(callback: C, users: std::sync::Arc<HashMap<Uuid, Vec<u8>>>, span: Span) -> Self {
 		let (udp_resp_tx, udp_resp_rx) = mpsc::channel(UDP_RESP_CAP);
 		Self {
 			callback,
 			users,
+			span,
 			established: false,
 			authed: false,
 			buffer: vec![0u8; READ_BUF_SIZE],
@@ -338,11 +344,15 @@ impl<C: InboundCallback> TuicheDriver<C> {
 		let qstream = QuicheStream::new(to_proxy_rx, from_proxy_tx);
 
 		let cb = self.callback.clone();
-		tokio::spawn(async move {
-			if let Err(e) = cb.handle_tcpstream(target, qstream).await {
-				debug!("tuiche TCP relay ended: {e}");
+		let span = tracing::debug_span!(parent: &self.span, "tcp", stream = sid, target = %target);
+		tokio::spawn(
+			async move {
+				if let Err(e) = cb.handle_tcpstream(target, qstream).await {
+					debug!("tuiche TCP relay ended: {e}");
+				}
 			}
-		});
+			.instrument(span),
+		);
 
 		self.waiters.push(WaitTcpBack::new(sid, from_proxy_rx));
 
@@ -488,8 +498,12 @@ impl<C: InboundCallback> TuicheDriver<C> {
 		let (to_outbound_tx, to_outbound_rx) = mpsc::channel::<UdpPacket>(UDP_OUTBOUND_CAP);
 		let (from_outbound_tx, from_outbound_rx) = mpsc::channel::<UdpPacket>(UDP_OUTBOUND_CAP);
 
+		// All three per-association tasks share one `udp{assoc_id}` span parented
+		// to the connection span, so their logs group under the connection's peer.
+		let span = tracing::debug_span!(parent: &self.span, "udp", assoc_id);
+
 		// Reassembly task: raw fragments -> complete packets -> outbound relay.
-		tokio::spawn(udp_reassembly_task(assoc_id, frag_rx, to_outbound_tx));
+		tokio::spawn(udp_reassembly_task(assoc_id, frag_rx, to_outbound_tx).instrument(span.clone()));
 
 		// Relay task: hand the UdpStream to the wind-core callback.
 		let cb = self.callback.clone();
@@ -497,23 +511,29 @@ impl<C: InboundCallback> TuicheDriver<C> {
 			tx: from_outbound_tx,
 			rx: to_outbound_rx,
 		};
-		tokio::spawn(async move {
-			if let Err(e) = cb.handle_udpstream(core_stream).await {
-				debug!(assoc_id, "tuiche UDP relay ended: {e}");
+		tokio::spawn(
+			async move {
+				if let Err(e) = cb.handle_udpstream(core_stream).await {
+					debug!(assoc_id, "tuiche UDP relay ended: {e}");
+				}
 			}
-		});
+			.instrument(span.clone()),
+		);
 
 		// Forwarder: tag the callback's response packets with the association id
 		// and funnel them to the worker's single response channel.
 		let resp_tx = self.udp_resp_tx.clone();
 		let mut from_outbound_rx = from_outbound_rx;
-		tokio::spawn(async move {
-			while let Some(pkt) = from_outbound_rx.recv().await {
-				if resp_tx.send((assoc_id, pkt)).await.is_err() {
-					break;
+		tokio::spawn(
+			async move {
+				while let Some(pkt) = from_outbound_rx.recv().await {
+					if resp_tx.send((assoc_id, pkt)).await.is_err() {
+						break;
+					}
 				}
 			}
-		});
+			.instrument(span),
+		);
 
 		self.udp.insert(
 			assoc_id,
@@ -621,6 +641,8 @@ impl<C: InboundCallback> TuicheDriver<C> {
 
 impl<C: InboundCallback> ApplicationOverQuic for TuicheDriver<C> {
 	fn on_conn_established(&mut self, qconn: &mut QuicheConnection, _info: &HandshakeInfo) -> QuicResult<()> {
+		let span = self.span.clone();
+		let _enter = span.enter();
 		self.established = true;
 		debug!(trace = qconn.trace_id(), "tuiche connection established");
 		Ok(())
@@ -648,6 +670,10 @@ impl<C: InboundCallback> ApplicationOverQuic for TuicheDriver<C> {
 				_ = std::future::pending::<()>() => unreachable!(),
 			}
 		};
+		// Enter the connection span only for the synchronous handling below; a
+		// span guard must never be held across the `.await` in the select above.
+		let span = self.span.clone();
+		let _enter = span.enter();
 		match ev {
 			Ev::Tcp(b) => self.handle_back(b),
 			Ev::Udp((assoc_id, packet)) => {
@@ -659,6 +685,8 @@ impl<C: InboundCallback> ApplicationOverQuic for TuicheDriver<C> {
 	}
 
 	fn process_reads(&mut self, qconn: &mut QuicheConnection) -> QuicResult<()> {
+		let span = self.span.clone();
+		let _enter = span.enter();
 		self.drain_datagrams(qconn);
 
 		let ids: Vec<u64> = qconn.readable().collect();
@@ -674,6 +702,8 @@ impl<C: InboundCallback> ApplicationOverQuic for TuicheDriver<C> {
 	}
 
 	fn process_writes(&mut self, qconn: &mut QuicheConnection) -> QuicResult<()> {
+		let span = self.span.clone();
+		let _enter = span.enter();
 		// Flush queued response datagrams.
 		while let Some(dg) = self.out_datagrams.front() {
 			match qconn.dgram_send(dg.as_ref()) {
