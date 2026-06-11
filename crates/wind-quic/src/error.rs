@@ -3,7 +3,7 @@
 //! Both backends funnel their connection/stream errors into [`QuicError`]. The
 //! variants are deliberately the ones TUIC (and similar protocols) actually
 //! branch on — clean local/peer shutdown, idle timeout, stream reset — plus
-//! catch-alls for everything else.
+//! catch-all variants for everything else.
 
 use thiserror::Error;
 
