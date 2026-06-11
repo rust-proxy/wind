@@ -3,7 +3,7 @@ name = "tuic-core"
 version.workspace = true
 repository.workspace = true
 edition.workspace = true
-description = "Backend-agnostic TUIC protocol codecs and state machine shared by wind-tuic and wind-tuiche"
+description = "Backend-agnostic TUIC protocol codecs and state machine shared by wind-tuic's quinn and quiche backends"
 license = "MIT OR Apache-2.0"
 
 [features]

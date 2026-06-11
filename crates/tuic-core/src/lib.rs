@@ -1,5 +1,5 @@
-//! Backend-agnostic TUIC protocol primitives shared by the quinn-based
-//! [`wind-tuic`] crate and the tokio-quiche-based [`wind-tuiche`] crate.
+//! Backend-agnostic TUIC protocol primitives shared by the `wind-tuic` crate's
+//! quinn and quiche (tokio-quiche) backends.
 //!
 //! This crate deliberately has **no QUIC backend dependency**. It contains:
 //!
@@ -10,7 +10,8 @@
 //!   ([`FragmentReassemblyBuffer`](udp::FragmentReassemblyBuffer)).
 //!
 //! The backend-specific glue (opening QUIC streams, sending datagrams, the
-//! connection lifecycle) lives in the `wind-tuic` / `wind-tuiche` crates.
+//! connection lifecycle) lives in the `wind-tuic` crate, generic over the
+//! `wind-quic` QUIC abstraction.
 
 pub mod proto;
 pub mod udp;

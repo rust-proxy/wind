@@ -151,7 +151,9 @@ async fn quiche_loopback() {
 	let (server_tls, client_tls, transport) = configs(&cert, &key);
 
 	let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-	let mut acceptor = quiche::bind_server(addr, &server_tls, &transport).await.expect("bind_server");
+	let mut acceptor = quiche::bind_server(addr, &server_tls, &transport, None)
+		.await
+		.expect("bind_server");
 	let local = acceptor.local_addr();
 
 	let server_fut = async move { acceptor.accept().await.expect("server conn") };

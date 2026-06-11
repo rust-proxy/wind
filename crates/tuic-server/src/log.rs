@@ -28,7 +28,6 @@ pub fn init(config: &Config) -> Result<LogGuards> {
 			("wind_socks", LevelFilter::from(config.log_level)),
 			("wind_acme", LevelFilter::from(config.log_level)),
 			("wind_base", LevelFilter::from(config.log_level)),
-			("wind_tuiche", LevelFilter::from(config.log_level)),
 			("wind_dns", LevelFilter::from(config.log_level)),
 		])
 		.with_default(max(LogLevel::Info, config.log_level));

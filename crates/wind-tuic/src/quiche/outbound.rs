@@ -1,18 +1,19 @@
-//! TUIC outbound client implementation backed by `tokio-quiche`.
+//! TUIC outbound client — quiche backend.
 //!
-//! The live connection path is not yet wired up: a future implementation will
-//! establish the QUIC connection with [`tokio_quiche::quic::connect`] and then
-//! drive the TUIC client state machine on top of it. For now this mirrors the
-//! placeholder status of the previous quiche backend in `wind-tuic` — the
-//! builder validates and stores the connection parameters.
+//! The builder validates and stores connection parameters. A live client path
+//! (handshake via [`wind_quic::quiche::connect`] driving the shared
+//! [`crate::client`] / [`crate::proto`] code) is not yet wired up — this
+//! mirrors the placeholder status carried over from `wind-tuiche`. The quiche
+//! server is the production path; quiche clients are exercised via the quinn
+//! client today.
 
 use std::{net::SocketAddr, time::Duration};
 
 use uuid::Uuid;
 
-use crate::{Result, utils::ConnectionOpts};
+use crate::{Result, quiche::utils::ConnectionOpts};
 
-/// TUIC client implementation using the `tokio-quiche` backend.
+/// TUIC client using the quiche backend (configuration-only placeholder).
 #[allow(dead_code)]
 pub struct TuicheOutbound {
 	server_addr: SocketAddr,
@@ -23,7 +24,7 @@ pub struct TuicheOutbound {
 }
 
 impl TuicheOutbound {
-	/// Create a new TUIC client builder
+	/// Create a new TUIC client builder.
 	pub fn builder() -> TuicheOutboundBuilder {
 		TuicheOutboundBuilder::new()
 	}
@@ -42,7 +43,7 @@ pub struct TuicheOutboundBuilder {
 }
 
 impl TuicheOutboundBuilder {
-	/// Create a new builder
+	/// Create a new builder.
 	pub fn new() -> Self {
 		Self {
 			server_addr: None,
@@ -56,55 +57,55 @@ impl TuicheOutboundBuilder {
 		}
 	}
 
-	/// Set the server address
+	/// Set the server address.
 	pub fn server_addr(mut self, addr: SocketAddr) -> Self {
 		self.server_addr = Some(addr);
 		self
 	}
 
-	/// Set the server name (SNI)
+	/// Set the server name (SNI).
 	pub fn server_name(mut self, name: String) -> Self {
 		self.server_name = Some(name);
 		self
 	}
 
-	/// Set the user UUID
+	/// Set the user UUID.
 	pub fn uuid(mut self, uuid: Uuid) -> Self {
 		self.uuid = Some(uuid);
 		self
 	}
 
-	/// Set the password
+	/// Set the password.
 	pub fn password(mut self, password: String) -> Self {
 		self.password = Some(password);
 		self
 	}
 
-	/// Set maximum idle time
+	/// Set maximum idle time.
 	pub fn max_idle_time(mut self, time: Duration) -> Self {
 		self.max_idle_time = time;
 		self
 	}
 
-	/// Set connection timeout
+	/// Set connection timeout.
 	pub fn connect_timeout(mut self, timeout: Duration) -> Self {
 		self.connect_timeout = timeout;
 		self
 	}
 
-	/// Enable or disable certificate verification
+	/// Enable or disable certificate verification.
 	pub fn verify_certificate(mut self, verify: bool) -> Self {
 		self.verify_certificate = verify;
 		self
 	}
 
-	/// Set connection options
+	/// Set connection options.
 	pub fn connection_opts(mut self, opts: ConnectionOpts) -> Self {
 		self.opts = opts;
 		self
 	}
 
-	/// Build the client
+	/// Build the client.
 	pub fn build(self) -> Result<TuicheOutbound> {
 		let server_addr = self.server_addr.ok_or_else(|| eyre::eyre!("Server address not set"))?;
 		let server_name = self.server_name.ok_or_else(|| eyre::eyre!("Server name not set"))?;

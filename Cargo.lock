@@ -5340,7 +5340,6 @@ dependencies = [
  "wind-dns",
  "wind-socks",
  "wind-tuic",
- "wind-tuiche",
 ]
 
 [[package]]
@@ -5367,7 +5366,6 @@ dependencies = [
  "uuid",
  "wind-core",
  "wind-tuic",
- "wind-tuiche",
 ]
 
 [[package]]
@@ -5810,6 +5808,7 @@ dependencies = [
 name = "wind-quic"
 version = "0.1.1"
 dependencies = [
+ "arc-swap",
  "aws-lc-rs",
  "boring",
  "boring-sys",
@@ -5910,27 +5909,7 @@ dependencies = [
  "tuic-core",
  "uuid",
  "wind-core",
-]
-
-[[package]]
-name = "wind-tuiche"
-version = "0.1.1"
-dependencies = [
- "arc-swap",
- "boring",
- "boring-sys",
- "bytes",
- "eyre",
- "foreign-types-shared",
- "futures-util",
- "thiserror 2.0.18",
- "tokio",
- "tokio-quiche",
- "tokio-util",
- "tracing",
- "tuic-core",
- "uuid",
- "wind-core",
+ "wind-quic",
 ]
 
 [[package]]

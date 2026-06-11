@@ -1,38 +1,48 @@
+//! Backend-agnostic TUIC client plumbing.
+//!
+//! [`ClientTaskExt::handle_incoming`] spawns the accept loops (datagram / bi /
+//! uni) for an established [`QuicConnection`] and returns receive channels the
+//! outbound poll loop drains. Written once against the trait; the concrete
+//! `TuicOutbound` (currently quinn-only) drives it.
+
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use crossfire::{AsyncRx, SendTimeoutError, spsc};
-use quinn::{RecvStream, SendStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, info, warn};
 use wind_core::AppContext;
+use wind_quic::QuicConnection;
 
 use crate::Error;
 
-/// Size of the single-producer single-consumer buffer for QUIC streams.
-/// Larger buffers reduce backpressure stalls on bursty workloads at the cost
-/// of a small amount of extra memory per connection.
+/// Size of the single-producer single-consumer buffer for QUIC streams. Larger
+/// buffers reduce backpressure stalls on bursty workloads at the cost of a
+/// small amount of extra memory per connection.
 const SPSC_BUFFER_SIZE: usize = 64;
 
-type IncomingRx = (
+/// Receivers returned by [`ClientTaskExt::handle_incoming`]: datagrams,
+/// incoming bidirectional streams, and incoming unidirectional streams.
+type IncomingRx<C> = (
 	AsyncRx<spsc::Array<Bytes>>,
-	AsyncRx<spsc::Array<(SendStream, RecvStream)>>,
-	AsyncRx<spsc::Array<RecvStream>>,
+	AsyncRx<spsc::Array<(<C as QuicConnection>::SendStream, <C as QuicConnection>::RecvStream)>>,
+	AsyncRx<spsc::Array<<C as QuicConnection>::RecvStream>>,
 );
 
-/// Generic helper to spawn a task that handles incoming items from a QUIC
-/// connection and forwards them to a channel
-async fn spawn_handler<T, F, Fut>(
+/// Spawn a task that drives an `accept`-style call and forwards each accepted
+/// item to a channel.
+async fn spawn_handler<C, T, F, Fut>(
 	ctx: Arc<AppContext>,
-	connection: quinn::Connection,
+	connection: C,
 	cancel_token: CancellationToken,
 	accept_fn: F,
 	name: &'static str,
 ) -> AsyncRx<spsc::Array<T>>
 where
+	C: QuicConnection,
 	T: Send + Unpin + 'static,
-	F: Fn(quinn::Connection) -> Fut + Send + 'static,
-	Fut: std::future::Future<Output = Result<T, quinn::ConnectionError>> + Send,
+	F: Fn(C) -> Fut + Send + 'static,
+	Fut: std::future::Future<Output = Result<T, wind_quic::QuicError>> + Send,
 {
 	let (tx, rx) = spsc::bounded_async(SPSC_BUFFER_SIZE);
 
@@ -50,12 +60,9 @@ where
 						};
 
 						info!("Accepted new {}", name);
-						// Distinguish a closed channel (consumer permanently
-						// gone — we must exit) from a slow consumer (transient
-						// back-pressure — drop the item and keep accepting).
-						// Previously both bailed out of the accept loop, so a
-						// single slow downstream pinned every future incoming
-						// stream/datagram on this connection.
+						// Distinguish a closed channel (consumer permanently gone —
+						// exit) from a slow consumer (transient back-pressure — drop
+						// the item and keep accepting).
 						match tx.send_timeout(item, Duration::from_secs(1)).await {
 							Ok(()) => {}
 							Err(SendTimeoutError::Disconnected(_)) => {
@@ -81,13 +88,16 @@ where
 	rx
 }
 
-pub trait ClientTaskExt {
-	async fn handle_incoming(&self, ctx: Arc<AppContext>, cancel_token: CancellationToken) -> Result<IncomingRx, Error>;
+pub trait ClientTaskExt: QuicConnection {
+	fn handle_incoming(
+		&self,
+		ctx: Arc<AppContext>,
+		cancel_token: CancellationToken,
+	) -> impl std::future::Future<Output = Result<IncomingRx<Self>, Error>> + Send;
 }
 
-impl ClientTaskExt for quinn::Connection {
-	async fn handle_incoming(&self, ctx: Arc<AppContext>, cancel_token: CancellationToken) -> Result<IncomingRx, Error> {
-		// Spawn task for handling datagrams
+impl<C: QuicConnection> ClientTaskExt for C {
+	async fn handle_incoming(&self, ctx: Arc<AppContext>, cancel_token: CancellationToken) -> Result<IncomingRx<Self>, Error> {
 		let datagram_rx = spawn_handler(
 			ctx.clone(),
 			self.clone(),
@@ -97,7 +107,6 @@ impl ClientTaskExt for quinn::Connection {
 		)
 		.await;
 
-		// Spawn task for handling bidirectional streams
 		let bi_rx = spawn_handler(
 			ctx.clone(),
 			self.clone(),
@@ -107,7 +116,6 @@ impl ClientTaskExt for quinn::Connection {
 		)
 		.await;
 
-		// Spawn task for handling unidirectional streams
 		let uni_rx = spawn_handler(
 			ctx.clone(),
 			self.clone(),
@@ -117,8 +125,6 @@ impl ClientTaskExt for quinn::Connection {
 		)
 		.await;
 
-		// Return the tuple of receivers for datagrams, bidirectional, and
-		// unidirectional streams
 		Ok((datagram_rx, bi_rx, uni_rx))
 	}
 }

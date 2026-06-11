@@ -41,11 +41,11 @@ use wind_core::{
 	utils::{StackPrefer, is_private_ip},
 };
 use wind_socks::action::{Socks5Action, Socks5ActionOpts};
-use wind_tuic::quinn::inbound::{TuicInbound, TuicInboundOpts};
 // The quiche backend lives behind the `quiche` cargo feature (enabled per target
 // via `.github/target.toml`).
 #[cfg(feature = "quiche")]
-use wind_tuiche::{TuicheInbound, TuicheInboundBuilder};
+use wind_tuic::quiche::{TuicheInbound, TuicheInboundBuilder};
+use wind_tuic::quinn::inbound::{TuicInbound, TuicInboundOpts};
 
 // `CongestionController` is only referenced by the quiche backend wiring.
 #[cfg(feature = "quiche")]
@@ -302,19 +302,19 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 	let (cert, key, acme_rx) = resolve_quiche_cert_files(ctx).await?;
 
 	let congestion_control = match quiche.congestion_control.controller {
-		CongestionController::Cubic => wind_tuiche::CongestionControl::Cubic,
-		CongestionController::Bbr | CongestionController::Bbr3 => wind_tuiche::CongestionControl::Bbr,
-		CongestionController::NewReno => wind_tuiche::CongestionControl::Reno,
+		CongestionController::Cubic => wind_tuic::quiche::CongestionControl::Cubic,
+		CongestionController::Bbr | CongestionController::Bbr3 => wind_tuic::quiche::CongestionControl::Bbr,
+		CongestionController::NewReno => wind_tuic::quiche::CongestionControl::Reno,
 	};
 
-	let opts = wind_tuiche::ConnectionOpts {
+	let opts = wind_tuic::quiche::ConnectionOpts {
 		max_idle_timeout: quiche.max_idle_time,
 		max_concurrent_bi_streams: quiche.max_concurrent_bi_streams,
 		max_concurrent_uni_streams: quiche.max_concurrent_uni_streams,
 		send_window: quiche.send_window,
 		receive_window: quiche.receive_window,
 		congestion_control,
-		udp_relay_mode: wind_tuiche::UdpRelayMode::Datagram,
+		udp_relay_mode: wind_tuic::quiche::UdpRelayMode::Datagram,
 		enable_0rtt: quiche.zero_rtt,
 	};
 
@@ -340,13 +340,13 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 }
 
 /// Background task: on every ACME (re)issuance, hot-reload the certificate into
-/// the running quiche listener via its [`CertStore`](wind_tuiche::CertStore)
-/// and refresh the on-disk PEM files (so a restart also picks up the latest
-/// cert).
+/// the running quiche listener via its
+/// [`CertStore`](wind_tuic::quiche::CertStore) and refresh the on-disk PEM
+/// files (so a restart also picks up the latest cert).
 #[cfg(feature = "quiche")]
 fn spawn_quiche_cert_reload(
 	ctx: &Arc<TuicAppContext>,
-	store: wind_tuiche::CertStore,
+	store: wind_tuic::quiche::CertStore,
 	mut rx: tokio::sync::watch::Receiver<Option<wind_acme::CertPem>>,
 	cert_path: String,
 	key_path: String,

@@ -32,6 +32,7 @@ quiche = [
     "dep:boring",
     "dep:boring-sys",
     "dep:foreign-types-shared",
+    "dep:arc-swap",
 ]
 
 [dependencies]
@@ -62,6 +63,7 @@ tokio-quiche = { version = "0.19", optional = true }
 boring = { version = "4", default-features = false, optional = true }
 boring-sys = { version = "4", default-features = false, optional = true }
 foreign-types-shared = { version = "0.3", optional = true }
+arc-swap = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
