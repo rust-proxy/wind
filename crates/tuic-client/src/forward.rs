@@ -10,9 +10,10 @@ use std::{
 use bytes::Bytes;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, UdpSocket};
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, warn};
 use wind_core::{
-	AbstractOutbound,
+	AbstractOutbound, AppContext,
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
 };
@@ -36,16 +37,19 @@ fn next_assoc_id() -> u16 {
 // hot path. The local `sessions: HashMap<SocketAddr, UdpForwardSession>`
 // in `run_udp_forwarder` is the only routing table in use.
 
-pub async fn start(tcp: Vec<TcpForward>, udp: Vec<UdpForward>) {
+/// Spawn the configured TCP/UDP forwarders into `ctx.tasks`, each driven by a
+/// child of `ctx.token` so shutdown stops the accept/recv loops and aborts
+/// in-flight per-connection tasks.
+pub async fn start(tcp: Vec<TcpForward>, udp: Vec<UdpForward>, ctx: &Arc<AppContext>) {
 	for entry in tcp {
-		tokio::spawn(run_tcp_forwarder(entry));
+		ctx.tasks.spawn(run_tcp_forwarder(entry, ctx.token.child_token()));
 	}
 	for entry in udp {
-		tokio::spawn(run_udp_forwarder(entry));
+		ctx.tasks.spawn(run_udp_forwarder(entry, ctx.token.child_token()));
 	}
 }
 
-async fn run_tcp_forwarder(entry: TcpForward) {
+async fn run_tcp_forwarder(entry: TcpForward, cancel: CancellationToken) {
 	let listener = match create_tcp_listener(entry.listen) {
 		Ok(l) => l,
 		Err(err) => {
@@ -60,13 +64,28 @@ async fn run_tcp_forwarder(entry: TcpForward) {
 		remote = entry.remote
 	);
 	loop {
-		match listener.accept().await {
-			Ok((inbound, peer)) => {
-				let remote = entry.remote.clone();
-				let span = tracing::info_span!("forward_tcp", peer = %peer);
-				tokio::spawn(handle_tcp_conn(inbound, remote).instrument(span));
+		tokio::select! {
+			_ = cancel.cancelled() => {
+				info!("[forward-tcp] cancellation received, shutting down");
+				break;
 			}
-			Err(err) => warn!("[forward-tcp] accept error: {err}"),
+			res = listener.accept() => match res {
+				Ok((inbound, peer)) => {
+					let remote = entry.remote.clone();
+					let span = tracing::info_span!("forward_tcp", peer = %peer);
+					let conn_cancel = cancel.child_token();
+					tokio::spawn(
+						async move {
+							tokio::select! {
+								_ = conn_cancel.cancelled() => {}
+								_ = handle_tcp_conn(inbound, remote) => {}
+							}
+						}
+						.instrument(span),
+					);
+				}
+				Err(err) => warn!("[forward-tcp] accept error: {err}"),
+			}
 		}
 	}
 }
@@ -121,7 +140,7 @@ struct UdpForwardSession {
 	last_seen: std::time::Instant,
 }
 
-async fn run_udp_forwarder(entry: UdpForward) {
+async fn run_udp_forwarder(entry: UdpForward, cancel: CancellationToken) {
 	let socket = match UdpSocket::bind(entry.listen).await {
 		Ok(s) => s,
 		Err(err) => {
@@ -153,6 +172,12 @@ async fn run_udp_forwarder(entry: UdpForward) {
 
 	loop {
 		tokio::select! {
+			_ = cancel.cancelled() => {
+				info!("[forward-udp] cancellation received, shutting down");
+				// Dropping `sessions` drops every `tx_to_out`, which closes the
+				// per-session relay tasks' inbound channels so they exit cleanly.
+				break;
+			}
 			recv = socket.recv_from(&mut buf) => match recv {
 				Ok((n, src_addr)) => {
 					let pkt = Bytes::copy_from_slice(&buf[..n]);

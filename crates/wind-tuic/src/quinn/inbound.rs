@@ -222,7 +222,10 @@ impl AbstractInbound for TuicInbound {
 					let remote = incoming.remote_address();
 					let span = tracing::info_span!("conn", peer = %remote);
 
-					tokio::spawn(spawn_logged(
+					// Spawn into the shared TaskTracker so the context owner can
+					// drain connection handlers on shutdown (e.g. wind's
+					// `tasks.close()` + `tasks.wait()` after cancelling).
+					self.ctx.tasks.spawn(spawn_logged(
 						"Connection handler",
 						handle_connection(incoming, users, auth_timeout, zero_rtt, cb, conn_cancel),
 					).instrument(span));

@@ -14,6 +14,7 @@ use rustls::{
 };
 use sha2::{Digest, Sha256};
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 #[derive(Debug)]
@@ -24,7 +25,7 @@ pub struct CertResolver {
 	hash: ArcSwap<[u8; 32]>,
 }
 impl CertResolver {
-	pub async fn new(cert_path: &Path, key_path: &Path, interval: Duration) -> Result<Arc<Self>> {
+	pub async fn new(cert_path: &Path, key_path: &Path, interval: Duration, cancel: CancellationToken) -> Result<Arc<Self>> {
 		let cert_key = load_cert_key(cert_path, key_path).await?;
 		let hash = Self::calc_hash(cert_path, key_path).await?;
 		let resolver = Arc::new(Self {
@@ -33,20 +34,24 @@ impl CertResolver {
 			cert_key: ArcSwap::new(cert_key),
 			hash: ArcSwap::new(Arc::new(hash)),
 		});
-		// Start file watcher in background
+		// Start file watcher in background; exits on `cancel` so the task does
+		// not outlive the server when used as a library.
 		let resolver_clone = resolver.clone();
 		tokio::spawn(async move {
-			if let Err(e) = resolver_clone.start_watch(interval).await {
+			if let Err(e) = resolver_clone.start_watch(interval, cancel).await {
 				warn!("Certificate watcher exited with error: {e}");
 			}
 		});
 		Ok(resolver)
 	}
 
-	async fn start_watch(&self, interval: Duration) -> Result<()> {
+	async fn start_watch(&self, interval: Duration, cancel: CancellationToken) -> Result<()> {
 		let mut interval = tokio::time::interval(interval);
 		loop {
-			interval.tick().await;
+			tokio::select! {
+				_ = cancel.cancelled() => return Ok(()),
+				_ = interval.tick() => {}
+			}
 
 			// Treat I/O errors here as transient (the cert file may be in the
 			// middle of an ACME-driven `rename`, the directory may be missing
@@ -322,9 +327,14 @@ mod tests {
 		let (cert_der, key_der) = generate_test_cert_der()?;
 		let (cert_file, key_file) = create_temp_cert_file(&cert_der, &key_der).await;
 
-		let resolver = CertResolver::new(cert_file.path(), key_file.path(), Duration::from_secs(10))
-			.await
-			.unwrap();
+		let resolver = CertResolver::new(
+			cert_file.path(),
+			key_file.path(),
+			Duration::from_secs(10),
+			CancellationToken::new(),
+		)
+		.await
+		.unwrap();
 
 		let certified_key = resolver.cert_key.load_full();
 		assert!(!certified_key.cert.is_empty());
@@ -341,7 +351,7 @@ mod tests {
 		tokio::fs::write(&cert_path, &cert_pem.as_bytes()).await.unwrap();
 		tokio::fs::write(&key_path, &key_pem.as_bytes()).await.unwrap();
 
-		let resolver = CertResolver::new(&cert_path, &key_path, Duration::from_micros(100))
+		let resolver = CertResolver::new(&cert_path, &key_path, Duration::from_micros(100), CancellationToken::new())
 			.await
 			.unwrap();
 
@@ -372,7 +382,13 @@ mod tests {
 		let load_result = load_cert_key(cert_file.path(), key_file.path()).await;
 		assert!(load_result.is_err());
 
-		let resolver_result = CertResolver::new(cert_file.path(), key_file.path(), Duration::from_secs(10)).await;
+		let resolver_result = CertResolver::new(
+			cert_file.path(),
+			key_file.path(),
+			Duration::from_secs(10),
+			CancellationToken::new(),
+		)
+		.await;
 		assert!(resolver_result.is_err());
 	}
 

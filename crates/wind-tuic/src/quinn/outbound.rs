@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, info, warn};
 use uuid::Uuid;
 use wind_core::{AbstractOutbound, AppContext, tcp::AbstractTcpStream, types::TargetAddr};
-use wind_quic::quinn::QuinnConnection;
+use wind_quic::{QuicConnection as _, quinn::QuinnConnection};
 
 use crate::{
 	Error,
@@ -129,6 +129,10 @@ impl TuicOutbound {
 				tokio::select! {
 					_ = cancel_token.cancelled() => {
 						info!(target: "tuic_out", "Heartbeat poll cancelled");
+						// Tell the server we are going away so it can reap the
+						// connection immediately instead of waiting out its idle
+						// timeout.
+						connection.close(0, b"client shutdown");
 						return Ok(());
 					}
 					_ = hb_interval.tick() => {

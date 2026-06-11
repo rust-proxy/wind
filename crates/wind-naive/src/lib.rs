@@ -465,7 +465,13 @@ async fn naive_async_bridge(
 			}
 		}
 
-		let _ = io_handle.join();
+		// Do not `join` the I/O thread from this async task: it may be parked in
+		// a blocking `naive.read()` with no traffic, and `join()` would pin a
+		// tokio worker thread until the remote finally speaks or times out.
+		// Dropping the channels instead makes the thread's next send/recv fail,
+		// and the `NaiveConn` is cancelled when the thread unwinds and drops it
+		// (same strategy as the UoT relay above).
+		drop(io_handle);
 		Ok(())
 	}
 	.instrument(span)

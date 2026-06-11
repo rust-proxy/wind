@@ -45,6 +45,10 @@ pub struct SocksInbound {
 impl AbstractInbound for SocksInbound {
 	async fn listen(&self, cb: &impl InboundCallback) -> eyre::Result<()> {
 		let listener = TcpListener::bind(self.opts.listen_addr).await?;
+		// Track per-connection tasks so shutdown can wait for them instead of
+		// leaving in-flight sessions to be killed by runtime teardown. Each task
+		// also gets a child token so cancellation aborts the session promptly.
+		let conn_tasks = tokio_util::task::TaskTracker::new();
 		loop {
 			tokio::select! {
 				_ = self.cancel.cancelled() => {
@@ -62,10 +66,19 @@ impl AbstractInbound for SocksInbound {
 
 					let opts = self.opts.clone();
 					let cb = cb.clone();
-					tokio::spawn(
+					let conn_cancel = self.cancel.child_token();
+					conn_tasks.spawn(
 						async move {
-							if let Err(err) = handle_income(opts, stream, client_addr, cb).await {
-								error!(target: "socks_in_handler" , "{:}", err);
+							let handler_cancel = conn_cancel.clone();
+							tokio::select! {
+								_ = conn_cancel.cancelled() => {
+									info!(target: "socks_in_handler", "session aborted by shutdown");
+								}
+								res = handle_income(opts, stream, client_addr, cb, handler_cancel) => {
+									if let Err(err) = res {
+										error!(target: "socks_in_handler" , "{:}", err);
+									}
+								}
 							}
 						}
 						.in_current_span(),
@@ -73,6 +86,8 @@ impl AbstractInbound for SocksInbound {
 				}
 			};
 		}
+		conn_tasks.close();
+		conn_tasks.wait().await;
 		Ok(())
 	}
 }
@@ -93,6 +108,7 @@ async fn handle_income(
 	stream: TcpStream,
 	client_addr: SocketAddr,
 	cb: impl InboundCallback,
+	cancel: CancellationToken,
 ) -> Result<(), Error> {
 	let proto = match &opts.auth {
 		AuthMode::NoAuth => Socks5ServerProtocol::accept_no_auth(stream).await.context(SocksSnafu)?,
@@ -155,10 +171,18 @@ async fn handle_income(
 				};
 
 				let cb = cb.clone();
+				// Detached from the session task, so it needs its own cancel
+				// guard — otherwise it would outlive shutdown until runtime drop.
+				let udp_cancel = cancel.clone();
 				tokio::spawn(
 					async move {
-						if let Err(e) = cb.handle_udpstream(udp_stream).await {
-							error!(target: "socks_in_handler", "UDP association error: {}", e);
+						tokio::select! {
+							_ = udp_cancel.cancelled() => {}
+							res = cb.handle_udpstream(udp_stream) => {
+								if let Err(e) = res {
+									error!(target: "socks_in_handler", "UDP association error: {}", e);
+								}
+							}
 						}
 					}
 					.in_current_span(),

@@ -14,6 +14,7 @@ use socks5_server::{
 	auth::{NoAuth, Password},
 };
 use tokio::{net::TcpListener, sync::RwLock as AsyncRwLock};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{Instrument, debug, info, warn};
 
 use crate::{config::Local, error::Error};
@@ -111,20 +112,43 @@ impl Server {
 		})
 	}
 
-	pub async fn start() {
+	/// Accept SOCKS5 connections until `cancel` fires, then wait for in-flight
+	/// session tasks to wind down (each gets a child token, so cancellation
+	/// aborts handshakes and relays promptly).
+	pub async fn start(cancel: CancellationToken) {
 		let server = SERVER.get().unwrap();
 
 		warn!("[socks5] server started, listening on {}", server.inner.local_addr().unwrap());
 
+		let conn_tasks = TaskTracker::new();
 		loop {
-			match server.inner.accept().await {
-				Ok((conn, addr)) => {
-					let span = tracing::info_span!("socks5", peer = %addr);
-					tokio::spawn(Self::handle_socks5_conn(server, conn).instrument(span));
+			tokio::select! {
+				_ = cancel.cancelled() => {
+					info!("[socks5] cancellation received, shutting down");
+					break;
 				}
-				Err(err) => warn!("[socks5] failed to establish connection: {err}"),
+				res = server.inner.accept() => match res {
+					Ok((conn, addr)) => {
+						let span = tracing::info_span!("socks5", peer = %addr);
+						let conn_cancel = cancel.child_token();
+						conn_tasks.spawn(
+							async move {
+								tokio::select! {
+									_ = conn_cancel.cancelled() => {
+										debug!("session aborted by shutdown");
+									}
+									_ = Self::handle_socks5_conn(server, conn) => {}
+								}
+							}
+							.instrument(span),
+						);
+					}
+					Err(err) => warn!("[socks5] failed to establish connection: {err}"),
+				}
 			}
 		}
+		conn_tasks.close();
+		conn_tasks.wait().await;
 	}
 
 	async fn handle_socks5_conn(server: &Server, conn: socks5_server::IncomingConnection) {

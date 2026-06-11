@@ -70,6 +70,11 @@ impl AbstractInbound for TuicheInbound {
 		// accept loop *and* winds down every spawned connection handler, whose
 		// `serve_connection` closes its QUIC connection on cancellation.
 		let root_cancel = self.cancel.clone();
+		// Track connection handlers so shutdown can wait for them to finish
+		// closing — `serve_connection` returns right after issuing `conn.close`,
+		// and waiting here keeps the tokio-quiche workers alive long enough to
+		// flush the CONNECTION_CLOSE frames before the caller drops the runtime.
+		let conn_tasks = tokio_util::task::TaskTracker::new();
 
 		info!("wind-tuic (quiche) listening loop started");
 
@@ -92,8 +97,11 @@ impl AbstractInbound for TuicheInbound {
 			let users = users.clone();
 			let cb = cb.clone();
 			let cancel = root_cancel.child_token();
-			tokio::spawn(crate::server::serve_connection(conn, remote, users, AUTH_TIMEOUT, cb, cancel).instrument(span));
+			conn_tasks.spawn(crate::server::serve_connection(conn, remote, users, AUTH_TIMEOUT, cb, cancel).instrument(span));
 		}
+
+		conn_tasks.close();
+		conn_tasks.wait().await;
 
 		Ok(())
 	}
