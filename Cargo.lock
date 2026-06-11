@@ -5807,6 +5807,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind-quic"
+version = "0.1.1"
+dependencies = [
+ "aws-lc-rs",
+ "boring",
+ "boring-sys",
+ "bytes",
+ "color-eyre",
+ "eyre",
+ "foreign-types-shared",
+ "futures-util",
+ "pin-project",
+ "quinn 0.12.0",
+ "quinn-congestions",
+ "rcgen 0.14.8",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-platform-verifier",
+ "tempfile",
+ "test-log",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-quiche",
+ "tokio-util",
+ "tracing",
+ "wind-core",
+]
+
+[[package]]
 name = "wind-socks"
 version = "0.1.1"
 dependencies = [
