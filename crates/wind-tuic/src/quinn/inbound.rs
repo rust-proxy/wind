@@ -234,6 +234,13 @@ impl AbstractInbound for TuicInbound {
 			}
 		}
 
+		// Close every remaining connection (CONNECTION_CLOSE, code 0) and wait
+		// for the close packets to flush. Without this, returning here lets the
+		// caller drop the runtime while close frames are still queued, so peers
+		// only learn about the shutdown via idle timeout.
+		endpoint.close(VarInt::from_u32(0), b"server shutdown");
+		endpoint.wait_idle().await;
+
 		Ok(())
 	}
 }

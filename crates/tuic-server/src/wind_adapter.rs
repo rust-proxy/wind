@@ -318,11 +318,15 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 		enable_0rtt: quiche.zero_rtt,
 	};
 
+	// Wire the binary's cancel token into the inbound so ctrl-c actually stops
+	// the accept loop and closes live connections (mirrors the quinn backend,
+	// which derives its token from `ctx.cancel` via `wind_ctx`).
 	let mut builder = TuicheInboundBuilder::new()
 		.listen_addr(cfg.server)
 		.connection_opts(opts)
 		.certificate_path(cert.clone())
-		.private_key_path(key.clone());
+		.private_key_path(key.clone())
+		.cancel_token(ctx.cancel.child_token());
 	for (uuid, pwd) in &cfg.users {
 		builder = builder.user(*uuid, pwd.clone());
 	}

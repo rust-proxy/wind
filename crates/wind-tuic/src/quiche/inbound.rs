@@ -37,6 +37,9 @@ pub struct TuicheInbound {
 	/// Hot-swappable certificate served to every handshake; update via
 	/// [`TuicheInbound::cert_store`] for live rotation (e.g. ACME renewal).
 	cert_store: CertStore,
+	/// Root cancellation token: cancelling it stops the accept loop and tears
+	/// down every live connection (each gets a child token).
+	cancel: CancellationToken,
 }
 
 impl TuicheInbound {
@@ -62,13 +65,28 @@ impl AbstractInbound for TuicheInbound {
 		let mut acceptor = bind_server(self.listen_addr, &tls, &transport, Some(&self.cert_store)).await?;
 
 		let users = Arc::new(self.users.clone());
-		// quiche has no external cancellation source here; each connection runs
-		// until the peer disconnects.
-		let root_cancel = CancellationToken::new();
+		// Root of every per-connection token: cancelling `self.cancel` (e.g. from
+		// a ctrl-c handler via `TuicheInboundBuilder::cancel_token`) stops the
+		// accept loop *and* winds down every spawned connection handler, whose
+		// `serve_connection` closes its QUIC connection on cancellation.
+		let root_cancel = self.cancel.clone();
 
 		info!("wind-tuic (quiche) listening loop started");
 
-		while let Some(conn) = acceptor.accept().await {
+		loop {
+			let conn = tokio::select! {
+				_ = root_cancel.cancelled() => {
+					info!("wind-tuic (quiche) inbound shutting down");
+					break;
+				}
+				maybe_conn = acceptor.accept() => {
+					let Some(conn) = maybe_conn else {
+						info!("wind-tuic (quiche) acceptor closed; shutting down listen loop");
+						break;
+					};
+					conn
+				}
+			};
 			let remote = conn.peer_addr().unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
 			let span = tracing::info_span!("conn", peer = %remote);
 			let users = users.clone();
@@ -88,6 +106,7 @@ pub struct TuicheInboundBuilder {
 	cert_path: Option<String>,
 	private_key_path: Option<String>,
 	opts: ConnectionOpts,
+	cancel: Option<CancellationToken>,
 }
 
 impl TuicheInboundBuilder {
@@ -99,7 +118,16 @@ impl TuicheInboundBuilder {
 			cert_path: None,
 			private_key_path: None,
 			opts: ConnectionOpts::default(),
+			cancel: None,
 		}
+	}
+
+	/// Set the cancellation token driving graceful shutdown. Cancelling it stops
+	/// the accept loop and closes every live connection. Defaults to a fresh
+	/// token (i.e. the server only stops when the acceptor closes).
+	pub fn cancel_token(mut self, cancel: CancellationToken) -> Self {
+		self.cancel = Some(cancel);
+		self
 	}
 
 	/// Set the listen address.
@@ -161,6 +189,7 @@ impl TuicheInboundBuilder {
 			cert_path,
 			private_key_path,
 			cert_store,
+			cancel: self.cancel.unwrap_or_default(),
 		})
 	}
 }
