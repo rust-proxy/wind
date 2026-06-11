@@ -222,7 +222,10 @@ impl AbstractInbound for TuicInbound {
 					let remote = incoming.remote_address();
 					let span = tracing::info_span!("conn", peer = %remote);
 
-					tokio::spawn(spawn_logged(
+					// Spawn into the shared TaskTracker so the context owner can
+					// drain connection handlers on shutdown (e.g. wind's
+					// `tasks.close()` + `tasks.wait()` after cancelling).
+					self.ctx.tasks.spawn(spawn_logged(
 						"Connection handler",
 						handle_connection(incoming, users, auth_timeout, zero_rtt, cb, conn_cancel),
 					).instrument(span));
@@ -233,6 +236,13 @@ impl AbstractInbound for TuicInbound {
 				}
 			}
 		}
+
+		// Close every remaining connection (CONNECTION_CLOSE, code 0) and wait
+		// for the close packets to flush. Without this, returning here lets the
+		// caller drop the runtime while close frames are still queued, so peers
+		// only learn about the shutdown via idle timeout.
+		endpoint.close(VarInt::from_u32(0), b"server shutdown");
+		endpoint.wait_idle().await;
 
 		Ok(())
 	}

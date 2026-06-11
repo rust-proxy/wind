@@ -1,9 +1,10 @@
-use std::{process, str::FromStr};
+use std::{process, str::FromStr, time::Duration};
 
 use chrono::{Offset, TimeZone};
 use clap::Parser;
 #[cfg(feature = "jemallocator")]
 use tikv_jemallocator::Jemalloc;
+use tokio_util::sync::CancellationToken;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tuic_client::config::{Cli, Config, EnvState};
@@ -51,5 +52,44 @@ async fn main() -> eyre::Result<()> {
 				)),
 		)
 		.try_init()?;
-	tuic_client::run(cfg).await
+	// Own the cancel token here so the ctrl-c branch can trigger a graceful
+	// shutdown: stop the SOCKS5/forwarder accept loops, close the TUIC
+	// connection (the server learns we left instead of waiting out its idle
+	// timeout), and drain background tasks — same structure as tuic-server.
+	let cancel = CancellationToken::new();
+	let mut client = tokio::spawn(tuic_client::run_with_cancel(cfg, cancel.clone()));
+
+	tokio::select! {
+		res = &mut client => {
+			match res {
+				Ok(Ok(())) => {}
+				Ok(Err(err)) => {
+					tracing::error!("Client exited with error: {err}");
+					return Err(err);
+				}
+				Err(join_err) => {
+					tracing::error!("Client task panicked or was cancelled: {join_err}");
+					return Err(eyre::eyre!("Client task panicked or was cancelled: {join_err}"));
+				}
+			}
+		}
+		res = tokio::signal::ctrl_c() => {
+			if let Err(err) = res {
+				tracing::error!("Failed to listen for Ctrl-C: {err}");
+				return Err(eyre::eyre!("Failed to listen for Ctrl-C: {err}"));
+			}
+			tracing::info!("Received Ctrl-C, shutting down.");
+			cancel.cancel();
+
+			// Give in-flight sessions up to 10 seconds to drain before dropping
+			// out of main and letting runtime teardown abort the rest.
+			match tokio::time::timeout(Duration::from_secs(10), client).await {
+				Ok(Ok(Ok(()))) => {}
+				Ok(Ok(Err(err))) => tracing::warn!("Client drained with error: {err}"),
+				Ok(Err(join_err)) => tracing::warn!("Client task drain join error: {join_err}"),
+				Err(_) => tracing::warn!("Client did not drain within 10s of Ctrl-C; aborting outstanding tasks"),
+			}
+		}
+	}
+	Ok(())
 }

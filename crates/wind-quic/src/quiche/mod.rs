@@ -142,7 +142,17 @@ pub async fn bind_server(
 	let (conn_tx, conn_rx) = mpsc::unbounded_channel();
 
 	tokio::spawn(async move {
-		while let Some(item) = stream.next().await {
+		loop {
+			let item = tokio::select! {
+				// All `QuicheAcceptor`s dropped — stop accepting and drop the
+				// listener stream so the underlying socket/router shut down
+				// instead of accepting connections nobody will ever serve.
+				_ = conn_tx.closed() => break,
+				item = stream.next() => match item {
+					Some(item) => item,
+					None => break,
+				},
+			};
 			match item {
 				Ok(conn) => {
 					let peer = conn.peer_addr();
