@@ -32,6 +32,11 @@ jobs:
       rustflags: ""
       enable-tmate: false
       only-clippy-tests-on-pr: false
+      # GitHub caps the per-repo Actions cache at 10 GB and each matrix target
+      # keeps its own sccache directory, so size each one at 10 GB / number of
+      # active targets in .github/target.toml (currently 12) ≈ 850M. Re-derive
+      # when targets are added or removed.
+      sccache-max-size: "850M"
 
   release:
     name: Release
