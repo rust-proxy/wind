@@ -122,9 +122,9 @@ impl TuicheInboundBuilder {
 		}
 	}
 
-	/// Set the cancellation token driving graceful shutdown. Cancelling it stops
-	/// the accept loop and closes every live connection. Defaults to a fresh
-	/// token (i.e. the server only stops when the acceptor closes).
+	/// Set the cancellation token driving graceful shutdown. Cancelling it
+	/// stops the accept loop and closes every live connection. Defaults to a
+	/// fresh token (i.e. the server only stops when the acceptor closes).
 	pub fn cancel_token(mut self, cancel: CancellationToken) -> Self {
 		self.cancel = Some(cancel);
 		self
