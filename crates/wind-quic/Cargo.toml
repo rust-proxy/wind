@@ -1,0 +1,71 @@
+[package]
+name = "wind-quic"
+version.workspace = true
+repository.workspace = true
+edition.workspace = true
+description = "Backend-agnostic QUIC abstraction unifying quinn and quiche for the wind proxy framework"
+license = "MIT OR Apache-2.0"
+
+[features]
+# No backend is selected by default; consumers opt into one (or both). The
+# crate's own tests run with `--features quinn,quiche`.
+default = []
+
+# quinn backend. Bundles the rustls + aws-lc-rs crypto stack so `--features
+# quinn` is self-sufficient (a default crypto provider is available), mirroring
+# wind-tuic's `default = [..., "quinn", "aws-lc-rs"]`.
+quinn = [
+    "dep:quinn",
+    "dep:quinn-congestions",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls-platform-verifier",
+    "dep:aws-lc-rs",
+    "rustls/aws-lc-rs",
+    "quinn/rustls-aws-lc-rs",
+    "aws-lc-rs/prebuilt-nasm",
+]
+
+# quiche / tokio-quiche backend.
+quiche = [
+    "dep:tokio-quiche",
+    "dep:boring",
+    "dep:boring-sys",
+    "dep:foreign-types-shared",
+]
+
+[dependencies]
+wind-core = { version = "0.1.1", path = "../wind-core", default-features = false }
+
+# Async
+tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "sync", "io-util", "macros"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# Utilities
+bytes = "1"
+eyre = "0.6"
+thiserror = "2"
+tracing = "0.1"
+pin-project = "1"
+
+# QUIC with quinn
+quinn = { workspace = true, default-features = false, features = ["runtime-tokio"], optional = true }
+quinn-congestions = { workspace = true, optional = true }
+rustls = { version = "0.23", default-features = false, optional = true }
+rustls-pemfile = { version = "2", optional = true }
+rustls-platform-verifier = { version = "0.7", default-features = false, optional = true }
+aws-lc-rs = { version = "*", default-features = false, optional = true }
+
+# QUIC with quiche / tokio-quiche
+tokio-quiche = { version = "0.19", optional = true }
+boring = { version = "4", default-features = false, optional = true }
+boring-sys = { version = "4", default-features = false, optional = true }
+foreign-types-shared = { version = "0.3", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
+rcgen = "0.14"
+tempfile = "3"
+test-log = { version = "0.2", features = ["trace"] }
+color-eyre = { version = "0.6", default-features = false }
