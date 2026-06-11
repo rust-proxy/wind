@@ -12,11 +12,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, info, warn};
 use uuid::Uuid;
 use wind_core::{AbstractOutbound, AppContext, tcp::AbstractTcpStream, types::TargetAddr};
+use wind_quic::quinn::QuinnConnection;
 
 use crate::{
 	Error,
+	client::ClientTaskExt,
 	proto::{ClientProtoExt, UdpStream as TuicUdpStream},
-	quinn::task::ClientTaskExt,
 };
 
 pub struct TuicOutboundOpts {
@@ -37,10 +38,10 @@ pub struct TuicOutbound {
 	pub peer_addr: SocketAddr,
 	pub sni: String,
 	pub opts: TuicOutboundOpts,
-	pub connection: quinn::Connection,
+	pub connection: QuinnConnection,
 	pub udp_assoc_counter: AtomicU16,
 	pub token: CancellationToken,
-	pub udp_session: Cache<u16, Arc<TuicUdpStream>>,
+	pub udp_session: Cache<u16, Arc<TuicUdpStream<QuinnConnection>>>,
 }
 
 impl TuicOutbound {
@@ -83,10 +84,13 @@ impl TuicOutbound {
 
 		let endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(TokioRuntime))?;
 		endpoint.set_default_client_config(client_config);
-		let connection = endpoint
+		let raw_conn = endpoint
 			.connect(peer_addr, &server_name)
 			.map_err(|e| eyre::eyre!("Failed to connect to {} ({}): {}", peer_addr, server_name, e))?
 			.await?;
+		// Wrap in the backend-agnostic handle so the shared client/proto code
+		// (auth, heartbeat, TCP/UDP relay) drives it.
+		let connection = QuinnConnection::new(raw_conn);
 
 		connection.send_auth(&opts.auth.0, &opts.auth.1).await?;
 

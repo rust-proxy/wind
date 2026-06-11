@@ -8,12 +8,17 @@
 pub mod conn;
 pub mod driver;
 pub mod stream;
+pub mod tls;
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::{
+	net::{Ipv4Addr, SocketAddr},
+	sync::Arc,
+};
 
 pub use conn::QuicheConnection;
 use futures_util::StreamExt as _;
 pub use stream::{QuicheRecv, QuicheSend};
+pub use tls::CertStore;
 use tokio::{net::UdpSocket, sync::mpsc};
 use tokio_quiche::{
 	ConnectionParams,
@@ -27,7 +32,7 @@ use tracing::warn;
 use crate::{
 	config::{CertSource, ClientTlsConfig, ServerTlsConfig, TransportConfig},
 	error::QuicError,
-	quiche::driver::BridgeDriver,
+	quiche::{driver::BridgeDriver, tls::CertReloadHook},
 };
 
 /// Map the shared congestion-control selector onto a quiche cc-algorithm name.
@@ -86,10 +91,19 @@ impl QuicheAcceptor {
 ///
 /// The quiche backend loads TLS credentials from file paths, so `tls_cfg` must
 /// use [`CertSource::PemPaths`].
+///
+/// When `cert_store` is `Some`, a per-handshake [`ConnectionHook`] serves the
+/// store's *current* certificate, enabling live rotation (e.g. ACME renewal)
+/// without restarting the listener. The certificate files in `tls_cfg` are
+/// still required by tokio-quiche's API, but the hook supersedes them for the
+/// actual TLS context.
+///
+/// [`ConnectionHook`]: tokio_quiche::quic::ConnectionHook
 pub async fn bind_server(
 	addr: SocketAddr,
 	tls_cfg: &ServerTlsConfig,
 	transport: &TransportConfig,
+	cert_store: Option<&CertStore>,
 ) -> Result<QuicheAcceptor, QuicError> {
 	let (cert, key) = match &tls_cfg.cert {
 		CertSource::PemPaths { cert, key } => (cert.clone(), key.clone()),
@@ -107,6 +121,10 @@ pub async fn bind_server(
 		.local_addr()
 		.map_err(|e| QuicError::Endpoint(format!("local_addr: {e}")))?;
 
+	let hooks = Hooks {
+		connection_hook: cert_store.map(|s| Arc::new(CertReloadHook::new(s.clone())) as _),
+	};
+
 	let params = ConnectionParams::new_server(
 		quic_settings(transport),
 		TlsCertificatePaths {
@@ -114,7 +132,7 @@ pub async fn bind_server(
 			private_key: &key,
 			kind: CertificateKind::X509,
 		},
-		Hooks { connection_hook: None },
+		hooks,
 	);
 
 	let mut listeners = tokio_quiche::listen([socket], params, DefaultMetrics)

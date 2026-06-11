@@ -1,9 +1,8 @@
-//! Hot-reloadable TLS for the tokio-quiche backend.
+//! Hot-reloadable TLS for the quiche backend.
 //!
 //! tokio-quiche loads the certificate into the BoringSSL `SSL_CTX` **once** at
-//! `listen()` time (see `tokio_quiche::settings::config`) and reuses that
-//! context for every connection, so a renewed certificate on disk is never
-//! picked up without a restart.
+//! `listen()` time and reuses that context for every connection, so a renewed
+//! certificate on disk is never picked up without a restart.
 //!
 //! We work around this through the only TLS customization seam tokio-quiche
 //! exposes — [`ConnectionHook::create_custom_ssl_context_builder`]. The hook
@@ -13,9 +12,11 @@
 //! handshakes with no listener restart; in-flight connections keep the
 //! certificate they negotiated.
 //!
-//! Note: the cert is installed on the per-connection `SslRef` (not by swapping
-//! the whole `SSL_CTX`), so quiche's own QUIC TLS method on the context stays
-//! intact.
+//! This is pure QUIC-TLS infrastructure (boring-based) — independent of any
+//! application protocol — so it lives in `wind-quic` and is shared by every
+//! quiche-backed server. `wind-quic` exposes it so quiche servers can opt into
+//! live certificate rotation (e.g. ACME renewal); quinn/rustls has no
+//! equivalent seam.
 
 use std::sync::Arc;
 
@@ -82,13 +83,13 @@ impl CertStore {
 
 /// A [`ConnectionHook`] that serves the current certificate from a
 /// [`CertStore`] via a per-handshake `select_certificate` callback, enabling
-/// live cert rotation on the tokio-quiche backend.
-pub struct CertReloadHook {
+/// live cert rotation on the quiche backend.
+pub(crate) struct CertReloadHook {
 	store: CertStore,
 }
 
 impl CertReloadHook {
-	pub fn new(store: CertStore) -> Self {
+	pub(crate) fn new(store: CertStore) -> Self {
 		Self { store }
 	}
 }

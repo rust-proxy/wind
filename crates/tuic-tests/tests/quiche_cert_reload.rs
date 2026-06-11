@@ -22,7 +22,7 @@ use rustls::{
 	pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use wind_core::{AbstractInbound, InboundCallback, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
-use wind_tuiche::TuicheInboundBuilder;
+use wind_tuic::quiche::TuicheInboundBuilder;
 
 // ---- a no-op inbound callback (TLS handshake is all we need) --------------
 
