@@ -182,7 +182,10 @@ pub async fn serve_connection<C, CB>(
 			return;
 		}
 		Err(_) => {
-			warn!("connection from {} opened no stream within {:?}; closing", remote_addr, auth_timeout);
+			warn!(
+				"connection from {} opened no stream within {:?}; closing",
+				remote_addr, auth_timeout
+			);
 			conn.close(0, b"timeout");
 			return;
 		}
@@ -206,7 +209,10 @@ pub async fn serve_connection<C, CB>(
 			return;
 		}
 		let _ = &masq; // used only by the masquerade branch; silence unused warning
-		tracing::debug!("connection from {} is not TUIC and masquerade is disabled; closing", remote_addr);
+		tracing::debug!(
+			"connection from {} is not TUIC and masquerade is disabled; closing",
+			remote_addr
+		);
 		conn.close(0, b"");
 		return;
 	}
@@ -364,8 +370,7 @@ pub async fn serve_connection<C, CB>(
 		let conn = connection.clone();
 		let cb = callback.clone();
 		tokio::spawn(
-			spawn_logged("Uni stream", handle_uni_stream(conn, first_uni, cb))
-				.instrument(tracing::debug_span!("uni_stream")),
+			spawn_logged("Uni stream", handle_uni_stream(conn, first_uni, cb)).instrument(tracing::debug_span!("uni_stream")),
 		);
 	}
 

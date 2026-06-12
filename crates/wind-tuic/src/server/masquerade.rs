@@ -1,10 +1,10 @@
 //! HTTP/3 masquerade: serve non-TUIC (real HTTP/3) clients as a reverse proxy.
 //!
-//! When the connection classifier in [`super`] decides a peer is speaking actual
-//! HTTP/3 rather than TUIC (its first stream byte isn't the TUIC version `0x05`),
-//! it hands the connection here. We run a real HTTP/3 server over the
-//! backend-agnostic [`wind_quic::h3_adapter`] and reverse-proxy every request to
-//! a configured upstream site with a `reqwest` client, relaying the response
+//! When the connection classifier in [`super`] decides a peer is speaking
+//! actual HTTP/3 rather than TUIC (its first stream byte isn't the TUIC version
+//! `0x05`), it hands the connection here. We run a real HTTP/3 server over the
+//! backend-agnostic [`wind_quic::h3_adapter`] and reverse-proxy every request
+//! to a configured upstream site with a `reqwest` client, relaying the response
 //! back. To an active prober the server is indistinguishable from a normal
 //! HTTP/3 web server.
 
@@ -175,8 +175,8 @@ where
 	Ok(Bytes::from(body))
 }
 
-/// Point the request at the backend: keep the backend's scheme/host/port, append
-/// the incoming path and query.
+/// Point the request at the backend: keep the backend's scheme/host/port,
+/// append the incoming path and query.
 fn rewrite_target(backend: &Url, uri: &http::Uri) -> eyre::Result<Url> {
 	let path_and_query = uri.path_and_query().map(|v| v.as_str()).unwrap_or("/");
 	let mut target = backend.clone();
@@ -194,8 +194,8 @@ fn is_forwardable(name: &HeaderName) -> bool {
 			| "keep-alive"
 			| "proxy-connection"
 			| "transfer-encoding"
-			| "upgrade" | "te"
-			| "trailer" | "host"
-			| "content-length"
+			| "upgrade"
+			| "te" | "trailer"
+			| "host" | "content-length"
 	)
 }

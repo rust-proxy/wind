@@ -8,17 +8,18 @@
 //! quiche backend.
 //!
 //! Only the **server** surface is implemented: accepting peer-initiated uni
-//! (control / QPACK) and bidi (request) streams, and opening our own uni streams
-//! (control / QPACK). The classifier in `wind-tuic` peeks the first byte of the
-//! peer's control stream; that consumed byte is replayed via
+//! (control / QPACK) and bidi (request) streams, and opening our own uni
+//! streams (control / QPACK). The classifier in `wind-tuic` peeks the first
+//! byte of the peer's control stream; that consumed byte is replayed via
 //! [`PrefixedRecv`](crate::PrefixedRecv) and the (boxed) stream is handed to
 //! [`server_connection`] as the first stream the adapter yields.
 //!
 //! The bridge is mechanical: our streams are `AsyncRead`/`AsyncWrite`, while
 //! `h3::quic` is poll- and `Buf`-based. Recv streams read into a scratch buffer
-//! and hand back `Bytes`; send streams buffer one `WriteBuf` and drain it through
-//! `poll_write`. Our `QuicConnection` accept/open methods are `async fn`, so each
-//! is driven as a boxed in-flight future stored on the connection/opener.
+//! and hand back `Bytes`; send streams buffer one `WriteBuf` and drain it
+//! through `poll_write`. Our `QuicConnection` accept/open methods are `async
+//! fn`, so each is driven as a boxed in-flight future stored on the
+//! connection/opener.
 
 use std::{
 	future::Future,
@@ -257,8 +258,8 @@ impl RecvStream for H3Bidi {
 }
 
 impl BidiStream<Bytes> for H3Bidi {
-	type SendStream = H3Send;
 	type RecvStream = H3Recv;
+	type SendStream = H3Send;
 
 	fn split(self) -> (Self::SendStream, Self::RecvStream) {
 		(self.send, self.recv)
@@ -326,8 +327,8 @@ impl<C: QuicConnection> OpenStreams<Bytes> for H3Conn<C> {
 }
 
 impl<C: QuicConnection> Connection<Bytes> for H3Conn<C> {
-	type RecvStream = H3Recv;
 	type OpenStreams = H3Opener<C>;
+	type RecvStream = H3Recv;
 
 	fn poll_accept_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, ConnectionErrorIncoming>> {
 		if let Some(recv) = self.first_recv.take() {
@@ -335,9 +336,7 @@ impl<C: QuicConnection> Connection<Bytes> for H3Conn<C> {
 		}
 		let poll = {
 			let conn = &self.conn;
-			let fut = self
-				.accept_recv_fut
-				.get_or_insert_with(|| boxed_accept_uni(conn.clone()));
+			let fut = self.accept_recv_fut.get_or_insert_with(|| boxed_accept_uni(conn.clone()));
 			fut.as_mut().poll(cx)
 		};
 		match poll {

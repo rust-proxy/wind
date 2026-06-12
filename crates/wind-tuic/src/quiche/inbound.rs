@@ -40,8 +40,8 @@ pub struct TuicheInbound {
 	/// Root cancellation token: cancelling it stops the accept loop and tears
 	/// down every live connection (each gets a child token).
 	cancel: CancellationToken,
-	/// HTTP/3 masquerade config; when `Some`, non-TUIC connections are served as
-	/// a reverse-proxy HTTP/3 web server.
+	/// HTTP/3 masquerade config; when `Some`, non-TUIC connections are served
+	/// as a reverse-proxy HTTP/3 web server.
 	masquerade: Option<crate::server::MasqueradeConfig>,
 }
 
@@ -138,8 +138,8 @@ impl TuicheInboundBuilder {
 		}
 	}
 
-	/// Enable the HTTP/3 masquerade: non-TUIC connections are reverse-proxied to
-	/// the configured upstream site instead of being dropped.
+	/// Enable the HTTP/3 masquerade: non-TUIC connections are reverse-proxied
+	/// to the configured upstream site instead of being dropped.
 	pub fn masquerade(mut self, masquerade: Option<crate::server::MasqueradeConfig>) -> Self {
 		self.masquerade = masquerade;
 		self

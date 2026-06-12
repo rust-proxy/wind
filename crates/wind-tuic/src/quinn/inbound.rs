@@ -70,9 +70,9 @@ pub struct TuicInboundOpts {
 	/// of slow-start faster instead of trickling the first few round trips.
 	pub initial_window: u64,
 
-	/// HTTP/3 masquerade. When `Some`, connections that aren't TUIC (their first
-	/// stream byte isn't `0x05`) are served as a reverse-proxy HTTP/3 web server
-	/// instead of being dropped.
+	/// HTTP/3 masquerade. When `Some`, connections that aren't TUIC (their
+	/// first stream byte isn't `0x05`) are served as a reverse-proxy HTTP/3
+	/// web server instead of being dropped.
 	pub masquerade: Option<crate::server::MasqueradeConfig>,
 }
 

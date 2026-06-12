@@ -87,8 +87,9 @@ pub struct Config {
 	pub users: HashMap<Uuid, String>,
 	pub tls: TlsConfig,
 
-	/// HTTP/3 masquerade: reverse-proxy non-TUIC (HTTP/3 probe) connections to a
-	/// real upstream site so the server is indistinguishable from a web server.
+	/// HTTP/3 masquerade: reverse-proxy non-TUIC (HTTP/3 probe) connections to
+	/// a real upstream site so the server is indistinguishable from a web
+	/// server.
 	#[serde(default)]
 	pub masquerade: MasqueradeConfig,
 
@@ -264,10 +265,10 @@ pub struct TlsConfig {
 
 /// HTTP/3 masquerade configuration.
 ///
-/// When `enabled`, a connection that isn't TUIC (its first stream byte isn't the
-/// TUIC version `0x05` — i.e. an active prober speaking real HTTP/3) is served as
-/// a reverse proxy to `upstream`, so the server is indistinguishable from a
-/// normal HTTP/3 website instead of resetting the connection.
+/// When `enabled`, a connection that isn't TUIC (its first stream byte isn't
+/// the TUIC version `0x05` — i.e. an active prober speaking real HTTP/3) is
+/// served as a reverse proxy to `upstream`, so the server is indistinguishable
+/// from a normal HTTP/3 website instead of resetting the connection.
 #[derive(Deserialize, Serialize, Educe)]
 #[educe(Default)]
 #[serde(default, deny_unknown_fields)]

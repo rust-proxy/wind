@@ -4,12 +4,13 @@
 //! A real HTTP/3 GET against the (quinn) `tuic-server` must come back as the
 //! reverse-proxied upstream response — proving a non-TUIC client is served like
 //! a genuine web server rather than reset. Exercises the whole path: QUIC
-//! handshake, first-byte classification (`0x05` vs not), the `h3::quic` adapter,
-//! the `h3` server, and the reqwest reverse proxy to the upstream.
+//! handshake, first-byte classification (`0x05` vs not), the `h3::quic`
+//! adapter, the `h3` server, and the reqwest reverse proxy to the upstream.
 //!
 //! Opt-in (pulls reqwest's experimental HTTP/3 stack + needs the `--cfg
 //! reqwest_unstable` rustc flag; without it the test is cfg'd out):
-//!   RUSTFLAGS="--cfg reqwest_unstable" cargo test -p tuic-tests --features h3-masquerade-test
+//!   RUSTFLAGS="--cfg reqwest_unstable" cargo test -p tuic-tests --features
+//! h3-masquerade-test
 #![cfg(all(feature = "h3-masquerade-test", reqwest_unstable, target_pointer_width = "64"))]
 
 use std::{collections::HashMap, net::SocketAddr, time::Duration};

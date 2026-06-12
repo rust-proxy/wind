@@ -18,8 +18,8 @@ use tokio::io::{AsyncRead, ReadBuf};
 use crate::traits::QuicRecvStream;
 
 /// Wraps a recv stream so a buffered `prefix` is yielded before the inner
-/// stream's own data. Once the prefix is drained, reads delegate straight to the
-/// inner stream.
+/// stream's own data. Once the prefix is drained, reads delegate straight to
+/// the inner stream.
 pub struct PrefixedRecv<R> {
 	prefix: Bytes,
 	inner: R,
