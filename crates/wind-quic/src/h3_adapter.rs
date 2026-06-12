@@ -11,8 +11,11 @@
 //! (control / QPACK) and bidi (request) streams, and opening our own uni
 //! streams (control / QPACK). The classifier in `wind-tuic` peeks the first
 //! byte of the peer's control stream; that consumed byte is replayed via
-//! [`PrefixedRecv`](crate::PrefixedRecv) and the (boxed) stream is handed to
-//! [`server_connection`] as the first stream the adapter yields.
+//! [`PrefixedRecv`](crate::PrefixedRecv), which the adapter hands to
+//! [`server_connection`] as the first stream it yields. Every recv stream is a
+//! `PrefixedRecv` (with an empty prefix when none was consumed), so the adapter
+//! is generic over the backend's concrete stream types — no boxing or dynamic
+//! dispatch.
 //!
 //! The bridge is mechanical: our streams are `AsyncRead`/`AsyncWrite`, while
 //! `h3::quic` is poll- and `Buf`-based. Recv streams read into a scratch buffer
@@ -34,7 +37,7 @@ use h3::quic::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::{QuicConnection, QuicError, QuicRecvStream, QuicSendStream};
+use crate::{PrefixedRecv, QuicConnection, QuicError, QuicRecvStream, QuicSendStream};
 
 /// Scratch buffer size for a single `poll_data` read.
 const RECV_CHUNK: usize = 16 * 1024;
@@ -49,7 +52,7 @@ type BoxBiFut<C> = BoxFut<Result<(<C as QuicConnection>::SendStream, <C as QuicC
 /// Build an HTTP/3 server connection over `conn`, yielding `first_control` (the
 /// peer's control stream, with its peeked byte already replayed) as the first
 /// accepted recv stream.
-pub fn server_connection<C: QuicConnection>(conn: C, first_control: Box<dyn QuicRecvStream>) -> H3Conn<C> {
+pub fn server_connection<C: QuicConnection>(conn: C, first_control: PrefixedRecv<C::RecvStream>) -> H3Conn<C> {
 	H3Conn {
 		conn,
 		first_recv: Some(H3Recv::new(first_control)),
@@ -80,15 +83,16 @@ fn stream_err(e: QuicError) -> StreamErrorIncoming {
 // Recv stream
 // ---------------------------------------------------------------------------
 
-/// `h3::quic::RecvStream` over a boxed [`QuicRecvStream`].
-pub struct H3Recv {
-	inner: Box<dyn QuicRecvStream>,
+/// `h3::quic::RecvStream` over the backend's recv stream (wrapped in
+/// [`PrefixedRecv`] so a peeked control-stream byte can be replayed).
+pub struct H3Recv<C: QuicConnection> {
+	inner: PrefixedRecv<C::RecvStream>,
 	id: u64,
 	scratch: Vec<u8>,
 }
 
-impl H3Recv {
-	fn new(inner: Box<dyn QuicRecvStream>) -> Self {
+impl<C: QuicConnection> H3Recv<C> {
+	fn new(inner: PrefixedRecv<C::RecvStream>) -> Self {
 		let id = inner.id();
 		Self {
 			inner,
@@ -96,9 +100,14 @@ impl H3Recv {
 			scratch: vec![0u8; RECV_CHUNK],
 		}
 	}
+
+	/// Wrap a freshly-accepted stream that needs no replayed prefix.
+	fn passthrough(recv: C::RecvStream) -> Self {
+		Self::new(PrefixedRecv::new(Bytes::new(), recv))
+	}
 }
 
-impl RecvStream for H3Recv {
+impl<C: QuicConnection> RecvStream for H3Recv<C> {
 	type Buf = Bytes;
 
 	fn poll_data(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Self::Buf>, StreamErrorIncoming>> {
@@ -131,17 +140,17 @@ impl RecvStream for H3Recv {
 // Send stream
 // ---------------------------------------------------------------------------
 
-/// `h3::quic::SendStream` over a boxed [`QuicSendStream`].
-pub struct H3Send {
-	inner: Box<dyn QuicSendStream>,
+/// `h3::quic::SendStream` over the backend's send stream.
+pub struct H3Send<C: QuicConnection> {
+	inner: C::SendStream,
 	id: u64,
 	/// At most one `WriteBuf` is buffered at a time; `poll_ready`/`poll_finish`
 	/// drain it through the underlying `AsyncWrite`.
 	pending: Option<WriteBuf<Bytes>>,
 }
 
-impl H3Send {
-	fn new(inner: Box<dyn QuicSendStream>) -> Self {
+impl<C: QuicConnection> H3Send<C> {
+	fn new(inner: C::SendStream) -> Self {
 		let id = inner.id();
 		Self {
 			inner,
@@ -174,7 +183,7 @@ impl H3Send {
 	}
 }
 
-impl SendStream<Bytes> for H3Send {
+impl<C: QuicConnection> SendStream<Bytes> for H3Send<C> {
 	fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
 		self.poll_flush_pending(cx)
 	}
@@ -214,12 +223,12 @@ impl SendStream<Bytes> for H3Send {
 // ---------------------------------------------------------------------------
 
 /// `h3::quic::BidiStream` joining an [`H3Send`] and an [`H3Recv`].
-pub struct H3Bidi {
-	send: H3Send,
-	recv: H3Recv,
+pub struct H3Bidi<C: QuicConnection> {
+	send: H3Send<C>,
+	recv: H3Recv<C>,
 }
 
-impl SendStream<Bytes> for H3Bidi {
+impl<C: QuicConnection> SendStream<Bytes> for H3Bidi<C> {
 	fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
 		self.send.poll_ready(cx)
 	}
@@ -241,7 +250,7 @@ impl SendStream<Bytes> for H3Bidi {
 	}
 }
 
-impl RecvStream for H3Bidi {
+impl<C: QuicConnection> RecvStream for H3Bidi<C> {
 	type Buf = Bytes;
 
 	fn poll_data(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Self::Buf>, StreamErrorIncoming>> {
@@ -257,12 +266,19 @@ impl RecvStream for H3Bidi {
 	}
 }
 
-impl BidiStream<Bytes> for H3Bidi {
-	type RecvStream = H3Recv;
-	type SendStream = H3Send;
+impl<C: QuicConnection> BidiStream<Bytes> for H3Bidi<C> {
+	type RecvStream = H3Recv<C>;
+	type SendStream = H3Send<C>;
 
 	fn split(self) -> (Self::SendStream, Self::RecvStream) {
 		(self.send, self.recv)
+	}
+}
+
+fn into_bidi<C: QuicConnection>((send, recv): (C::SendStream, C::RecvStream)) -> H3Bidi<C> {
+	H3Bidi {
+		send: H3Send::new(send),
+		recv: H3Recv::passthrough(recv),
 	}
 }
 
@@ -279,8 +295,8 @@ pub struct H3Opener<C: QuicConnection> {
 }
 
 impl<C: QuicConnection> OpenStreams<Bytes> for H3Opener<C> {
-	type BidiStream = H3Bidi;
-	type SendStream = H3Send;
+	type BidiStream = H3Bidi<C>;
+	type SendStream = H3Send<C>;
 
 	fn poll_open_bidi(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::BidiStream, StreamErrorIncoming>> {
 		poll_open_bidi(&self.conn, &mut self.open_bi_fut, cx)
@@ -302,7 +318,7 @@ impl<C: QuicConnection> OpenStreams<Bytes> for H3Opener<C> {
 /// `h3::quic::Connection` over a [`QuicConnection`] handle.
 pub struct H3Conn<C: QuicConnection> {
 	conn: C,
-	first_recv: Option<H3Recv>,
+	first_recv: Option<H3Recv<C>>,
 	accept_recv_fut: Option<BoxFut<Result<C::RecvStream, QuicError>>>,
 	accept_bi_fut: Option<BoxBiFut<C>>,
 	open_uni_fut: Option<BoxFut<Result<C::SendStream, QuicError>>>,
@@ -310,8 +326,8 @@ pub struct H3Conn<C: QuicConnection> {
 }
 
 impl<C: QuicConnection> OpenStreams<Bytes> for H3Conn<C> {
-	type BidiStream = H3Bidi;
-	type SendStream = H3Send;
+	type BidiStream = H3Bidi<C>;
+	type SendStream = H3Send<C>;
 
 	fn poll_open_bidi(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::BidiStream, StreamErrorIncoming>> {
 		poll_open_bidi(&self.conn, &mut self.open_bi_fut, cx)
@@ -328,7 +344,7 @@ impl<C: QuicConnection> OpenStreams<Bytes> for H3Conn<C> {
 
 impl<C: QuicConnection> Connection<Bytes> for H3Conn<C> {
 	type OpenStreams = H3Opener<C>;
-	type RecvStream = H3Recv;
+	type RecvStream = H3Recv<C>;
 
 	fn poll_accept_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, ConnectionErrorIncoming>> {
 		if let Some(recv) = self.first_recv.take() {
@@ -342,7 +358,7 @@ impl<C: QuicConnection> Connection<Bytes> for H3Conn<C> {
 		match poll {
 			Poll::Ready(res) => {
 				self.accept_recv_fut = None;
-				Poll::Ready(res.map(|r| H3Recv::new(Box::new(r))).map_err(conn_err))
+				Poll::Ready(res.map(H3Recv::passthrough).map_err(conn_err))
 			}
 			Poll::Pending => Poll::Pending,
 		}
@@ -390,18 +406,11 @@ fn boxed_accept_bi<C: QuicConnection>(conn: C) -> BoxBiFut<C> {
 	Box::pin(async move { conn.accept_bi().await })
 }
 
-fn into_bidi<S: QuicSendStream, R: QuicRecvStream>((send, recv): (S, R)) -> H3Bidi {
-	H3Bidi {
-		send: H3Send::new(Box::new(send)),
-		recv: H3Recv::new(Box::new(recv)),
-	}
-}
-
 fn poll_open_send<C: QuicConnection>(
 	conn: &C,
 	slot: &mut Option<BoxFut<Result<C::SendStream, QuicError>>>,
 	cx: &mut Context<'_>,
-) -> Poll<Result<H3Send, StreamErrorIncoming>> {
+) -> Poll<Result<H3Send<C>, StreamErrorIncoming>> {
 	let poll = {
 		let fut = slot.get_or_insert_with(|| {
 			let conn = conn.clone();
@@ -412,7 +421,7 @@ fn poll_open_send<C: QuicConnection>(
 	match poll {
 		Poll::Ready(res) => {
 			*slot = None;
-			Poll::Ready(res.map(|s| H3Send::new(Box::new(s))).map_err(stream_err))
+			Poll::Ready(res.map(H3Send::new).map_err(stream_err))
 		}
 		Poll::Pending => Poll::Pending,
 	}
@@ -422,7 +431,7 @@ fn poll_open_bidi<C: QuicConnection>(
 	conn: &C,
 	slot: &mut Option<BoxBiFut<C>>,
 	cx: &mut Context<'_>,
-) -> Poll<Result<H3Bidi, StreamErrorIncoming>> {
+) -> Poll<Result<H3Bidi<C>, StreamErrorIncoming>> {
 	let poll = {
 		let fut = slot.get_or_insert_with(|| {
 			let conn = conn.clone();

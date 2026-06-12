@@ -203,7 +203,7 @@ pub async fn serve_connection<C, CB>(
 		if let Some(cfg) = masq.as_ref() {
 			let prefixed = wind_quic::PrefixedRecv::new(bytes::Bytes::copy_from_slice(&first_byte), first_uni);
 			info!("connection from {} is not TUIC; serving HTTP/3 masquerade", remote_addr);
-			if let Err(e) = masquerade::run_masquerade(conn, Box::new(prefixed), cfg, cancel).await {
+			if let Err(e) = masquerade::run_masquerade(conn, prefixed, cfg, cancel).await {
 				tracing::debug!("masquerade for {} ended: {e:?}", remote_addr);
 			}
 			return;

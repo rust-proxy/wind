@@ -17,7 +17,7 @@ use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use wind_quic::{
-	QuicConnection, QuicRecvStream,
+	PrefixedRecv, QuicConnection,
 	h3_adapter::{self, H3Conn},
 };
 
@@ -50,7 +50,7 @@ fn client() -> Client {
 /// disconnects or `cancel` fires.
 pub async fn run_masquerade<C: QuicConnection>(
 	conn: C,
-	first_control: Box<dyn QuicRecvStream>,
+	first_control: PrefixedRecv<C::RecvStream>,
 	cfg: &MasqueradeConfig,
 	cancel: CancellationToken,
 ) -> eyre::Result<()> {
