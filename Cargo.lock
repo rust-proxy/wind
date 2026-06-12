@@ -1816,6 +1816,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3"
+version = "0.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be"
+dependencies = [
+ "bytes",
+ "fastrand",
+ "futures-util",
+ "http",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5817,6 +5831,7 @@ dependencies = [
  "eyre",
  "foreign-types-shared",
  "futures-util",
+ "h3",
  "pin-project",
  "quinn 0.12.0",
  "quinn-congestions",
@@ -5889,6 +5904,12 @@ dependencies = [
  "enum_dispatch",
  "eyre",
  "futures-util",
+ "h3",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "moka",
  "pin-project",
  "portable-atomic",

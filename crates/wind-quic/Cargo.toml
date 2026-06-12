@@ -35,6 +35,11 @@ quiche = [
     "dep:arc-swap",
 ]
 
+# HTTP/3 masquerade adapter: an `h3::quic` server surface over `QuicConnection`,
+# used by the TUIC server to pose as a real HTTP/3 web server for non-TUIC
+# clients. Backend-agnostic, so it works over either the quinn or quiche backend.
+h3 = ["dep:h3"]
+
 [dependencies]
 wind-core = { version = "0.1.1", path = "../wind-core", default-features = false }
 
@@ -57,6 +62,9 @@ rustls = { version = "0.23", default-features = false, optional = true }
 rustls-pemfile = { version = "2", optional = true }
 rustls-platform-verifier = { version = "0.7", default-features = false, optional = true }
 aws-lc-rs = { version = "*", default-features = false, optional = true }
+
+# HTTP/3 (masquerade) — transport-agnostic h3 over the `QuicConnection` adapter.
+h3 = { version = "0.0.8", optional = true }
 
 # QUIC with quiche / tokio-quiche
 tokio-quiche = { version = "0.19", optional = true }

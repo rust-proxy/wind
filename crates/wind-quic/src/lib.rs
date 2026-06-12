@@ -33,11 +33,17 @@
 
 pub mod config;
 pub mod error;
+pub mod prefixed;
 pub mod traits;
 
 pub use config::{CertSource, ClientTlsConfig, ServerTlsConfig, TransportConfig};
 pub use error::{QuicError, Result};
+pub use prefixed::PrefixedRecv;
 pub use traits::{QuicConnection, QuicRecvStream, QuicSendStream};
+
+/// HTTP/3 `h3::quic` adapter over [`QuicConnection`] (masquerade support).
+#[cfg(feature = "h3")]
+pub mod h3_adapter;
 // Re-export the shared congestion-control selector so consumers configure the
 // transport without depending on `wind-core` directly.
 pub use wind_core::quic::QuicCongestionControl;

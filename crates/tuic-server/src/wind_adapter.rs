@@ -284,6 +284,9 @@ async fn create_quinn_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<TuicInb
 		// so the configured controller and initial window flow straight through.
 		congestion_control: quinn.congestion_control.controller,
 		initial_window: quinn.congestion_control.initial_window,
+		masquerade: cfg.masquerade.enabled.then(|| wind_tuic::server::MasqueradeConfig {
+			upstream: cfg.masquerade.upstream.clone(),
+		}),
 	};
 	tracing::info!("Initializing quinn (wind-tuic) backend");
 	Ok(TuicInbound::new(wind_ctx, opts))
@@ -326,6 +329,9 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 		.connection_opts(opts)
 		.certificate_path(cert.clone())
 		.private_key_path(key.clone())
+		.masquerade(cfg.masquerade.enabled.then(|| wind_tuic::server::MasqueradeConfig {
+			upstream: cfg.masquerade.upstream.clone(),
+		}))
 		.cancel_token(ctx.cancel.child_token());
 	for (uuid, pwd) in &cfg.users {
 		builder = builder.user(*uuid, pwd.clone());

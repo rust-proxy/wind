@@ -31,6 +31,22 @@ use wind_quic::{QuicConnection, QuicError};
 
 use crate::proto::{CmdType, Command, UdpStream};
 
+#[cfg(feature = "masquerade")]
+mod masquerade;
+
+/// Configuration for the HTTP/3 masquerade.
+///
+/// Kept dependency-free (just the upstream URL) so it threads through the
+/// always-compiled [`serve_connection`] even when the `masquerade` feature is
+/// off. The actual reverse-proxy engine lives in the feature-gated
+/// [`masquerade`] module.
+#[derive(Clone, Debug)]
+pub struct MasqueradeConfig {
+	/// Upstream site to reverse-proxy non-TUIC HTTP/3 requests to,
+	/// e.g. `https://example.com`.
+	pub upstream: String,
+}
+
 async fn spawn_logged(label: &str, fut: impl std::future::Future<Output = eyre::Result<()>>) {
 	if let Err(err) = fut.await {
 		error!("{label} error: {err:?}");
@@ -142,10 +158,63 @@ pub async fn serve_connection<C, CB>(
 	auth_timeout: Duration,
 	callback: CB,
 	cancel: CancellationToken,
+	masq: Option<MasqueradeConfig>,
 ) where
 	C: QuicConnection,
 	CB: InboundCallback,
 {
+	// --- Classify the connection: real TUIC vs HTTP/3 masquerade ---
+	//
+	// Both negotiate the `h3` ALPN, so the discriminator is the first byte of the
+	// first uni stream: every TUIC stream begins with the version byte `0x05`
+	// (`proto::VER`); a real HTTP/3 client's first uni stream is its control
+	// stream, beginning with the stream-type varint `0x00`. Peeking it here (and
+	// replaying it via `PrefixedRecv`) keeps both the TUIC parser and the h3
+	// adapter able to read the stream from byte 0.
+	let first_uni = tokio::select! {
+		_ = cancel.cancelled() => return,
+		r = tokio::time::timeout(auth_timeout, conn.accept_uni()) => r,
+	};
+	let mut first_uni = match first_uni {
+		Ok(Ok(s)) => s,
+		Ok(Err(e)) => {
+			tracing::debug!("connection from {} closed before first stream: {e:?}", remote_addr);
+			return;
+		}
+		Err(_) => {
+			warn!("connection from {} opened no stream within {:?}; closing", remote_addr, auth_timeout);
+			conn.close(0, b"timeout");
+			return;
+		}
+	};
+
+	let mut first_byte = [0u8; 1];
+	if let Err(e) = first_uni.read_exact(&mut first_byte).await {
+		tracing::debug!("connection from {} closed reading first byte: {e}", remote_addr);
+		return;
+	}
+
+	if first_byte[0] != crate::proto::VER {
+		// Not TUIC → HTTP/3 masquerade (when enabled), otherwise drop.
+		#[cfg(feature = "masquerade")]
+		if let Some(cfg) = masq.as_ref() {
+			let prefixed = wind_quic::PrefixedRecv::new(bytes::Bytes::copy_from_slice(&first_byte), first_uni);
+			info!("connection from {} is not TUIC; serving HTTP/3 masquerade", remote_addr);
+			if let Err(e) = masquerade::run_masquerade(conn, Box::new(prefixed), cfg, cancel).await {
+				tracing::debug!("masquerade for {} ended: {e:?}", remote_addr);
+			}
+			return;
+		}
+		let _ = &masq; // used only by the masquerade branch; silence unused warning
+		tracing::debug!("connection from {} is not TUIC and masquerade is disabled; closing", remote_addr);
+		conn.close(0, b"");
+		return;
+	}
+
+	// TUIC: re-wrap the first uni stream so the peeked version byte is replayed to
+	// the Auth parser.
+	let first_uni = wind_quic::PrefixedRecv::new(bytes::Bytes::copy_from_slice(&first_byte), first_uni);
+
 	let udp_root_cancel = cancel.child_token();
 
 	// Eviction listener fires for both explicit `remove()` (via Dissociate) and
@@ -288,6 +357,18 @@ pub async fn serve_connection<C, CB>(
 		);
 	}
 
+	// Process the first uni stream already accepted during classification — for
+	// TUIC this is the Auth stream (with its peeked version byte replayed).
+	// Subsequent uni streams are handled by the acceptor loop above.
+	{
+		let conn = connection.clone();
+		let cb = callback.clone();
+		tokio::spawn(
+			spawn_logged("Uni stream", handle_uni_stream(conn, first_uni, cb))
+				.instrument(tracing::debug_span!("uni_stream")),
+		);
+	}
+
 	// Exit on either server shutdown or peer disconnect.
 	tokio::select! {
 		_ = cancel.cancelled() => {
@@ -303,7 +384,7 @@ pub async fn serve_connection<C, CB>(
 
 async fn handle_uni_stream<C: QuicConnection, CB: InboundCallback>(
 	ctx: Arc<InboundCtx<C>>,
-	mut recv: C::RecvStream,
+	mut recv: impl AsyncRead + Unpin + Send + 'static,
 	callback: CB,
 ) -> eyre::Result<()> {
 	let mut header_buf = [0u8; 2];

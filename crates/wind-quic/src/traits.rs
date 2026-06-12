@@ -24,12 +24,21 @@ pub trait QuicSendStream: AsyncWrite + Unpin + Send + 'static {
 
 	/// Abruptly reset the stream with `code`, discarding unsent data.
 	fn reset(&mut self, code: u64);
+
+	/// The QUIC stream id of this send half.
+	///
+	/// Needed by protocol layers (e.g. the HTTP/3 masquerade's `h3::quic`
+	/// adapter) that must report stream ids to the peer.
+	fn id(&self) -> u64;
 }
 
 /// The receive half of a QUIC stream.
 pub trait QuicRecvStream: AsyncRead + Unpin + Send + 'static {
 	/// Ask the peer to stop sending, with error `code`.
 	fn stop(&mut self, code: u64);
+
+	/// The QUIC stream id of this recv half.
+	fn id(&self) -> u64;
 }
 
 /// A cheaply-cloneable handle to an established QUIC connection.
