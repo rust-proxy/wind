@@ -9,13 +9,14 @@
 //!
 //! Only the **server** surface is implemented: accepting peer-initiated uni
 //! (control / QPACK) and bidi (request) streams, and opening our own uni
-//! streams (control / QPACK). The classifier in `wind-tuic` peeks the first
-//! byte of the peer's control stream; that consumed byte is replayed via
-//! [`PrefixedRecv`](crate::PrefixedRecv), which the adapter hands to
-//! [`server_connection`] as the first stream it yields. Every recv stream is a
-//! `PrefixedRecv` (with an empty prefix when none was consumed), so the adapter
-//! is generic over the backend's concrete stream types — no boxing or dynamic
-//! dispatch.
+//! streams (control / QPACK). The classifier in `wind-tuic` races the peer's
+//! first uni/bi stream and peeks a couple of bytes to decide TUIC vs HTTP/3;
+//! whichever stream it consumed for an h3 connection is handed back (with the
+//! peeked bytes replayed via [`PrefixedRecv`](crate::PrefixedRecv)) as
+//! `first_uni` / `first_bidi`, so the adapter yields it before accepting
+//! anything new. Every recv stream is a `PrefixedRecv` (with an empty prefix
+//! when none was consumed), so the adapter is generic over the backend's
+//! concrete stream types — no boxing or dynamic dispatch.
 //!
 //! The bridge is mechanical: our streams are `AsyncRead`/`AsyncWrite`, while
 //! `h3::quic` is poll- and `Buf`-based. Recv streams read into a scratch buffer
@@ -49,13 +50,25 @@ type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 /// `type_complexity` lint when written inline in every slot/signature.
 type BoxBiFut<C> = BoxFut<Result<(<C as QuicConnection>::SendStream, <C as QuicConnection>::RecvStream), QuicError>>;
 
-/// Build an HTTP/3 server connection over `conn`, yielding `first_control` (the
-/// peer's control stream, with its peeked byte already replayed) as the first
-/// accepted recv stream.
-pub fn server_connection<C: QuicConnection>(conn: C, first_control: PrefixedRecv<C::RecvStream>) -> H3Conn<C> {
+/// Build an HTTP/3 server connection over `conn`.
+///
+/// The classifier in `wind-tuic` races the connection's first uni/bi stream to
+/// decide TUIC vs HTTP/3, consuming a couple of bytes to peek. Whichever stream
+/// it consumed for an h3 connection is handed back here as `first_uni` and/or
+/// `first_bidi` (with the peeked bytes replayed via [`PrefixedRecv`]), so the
+/// h3 server yields it before accepting anything new — nothing is lost.
+pub fn server_connection<C: QuicConnection>(
+	conn: C,
+	first_uni: Option<PrefixedRecv<C::RecvStream>>,
+	first_bidi: Option<(C::SendStream, PrefixedRecv<C::RecvStream>)>,
+) -> H3Conn<C> {
 	H3Conn {
 		conn,
-		first_recv: Some(H3Recv::new(first_control)),
+		first_recv: first_uni.map(H3Recv::new),
+		first_bidi: first_bidi.map(|(send, recv)| H3Bidi {
+			send: H3Send::new(send),
+			recv: H3Recv::new(recv),
+		}),
 		accept_recv_fut: None,
 		accept_bi_fut: None,
 		open_uni_fut: None,
@@ -319,6 +332,7 @@ impl<C: QuicConnection> OpenStreams<Bytes> for H3Opener<C> {
 pub struct H3Conn<C: QuicConnection> {
 	conn: C,
 	first_recv: Option<H3Recv<C>>,
+	first_bidi: Option<H3Bidi<C>>,
 	accept_recv_fut: Option<BoxFut<Result<C::RecvStream, QuicError>>>,
 	accept_bi_fut: Option<BoxBiFut<C>>,
 	open_uni_fut: Option<BoxFut<Result<C::SendStream, QuicError>>>,
@@ -365,6 +379,9 @@ impl<C: QuicConnection> Connection<Bytes> for H3Conn<C> {
 	}
 
 	fn poll_accept_bidi(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::BidiStream, ConnectionErrorIncoming>> {
+		if let Some(bidi) = self.first_bidi.take() {
+			return Poll::Ready(Ok(bidi));
+		}
 		let poll = {
 			let conn = &self.conn;
 			let fut = self.accept_bi_fut.get_or_insert_with(|| boxed_accept_bi(conn.clone()));

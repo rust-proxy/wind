@@ -1,8 +1,9 @@
 //! HTTP/3 masquerade: serve non-TUIC (real HTTP/3) clients as a reverse proxy.
 //!
 //! When the connection classifier in [`super`] decides a peer is speaking
-//! actual HTTP/3 rather than TUIC (its first stream byte isn't the TUIC version
-//! `0x05`), it hands the connection here. We run a real HTTP/3 server over the
+//! actual HTTP/3 rather than TUIC (its first stream's leading bytes aren't
+//! valid TUIC framing), it hands the connection here. We run a real HTTP/3
+//! server over the
 //! backend-agnostic [`wind_quic::h3_adapter`] and reverse-proxy every request
 //! to a configured upstream site with a `reqwest` client, relaying the response
 //! back. To an active prober the server is indistinguishable from a normal
@@ -45,19 +46,21 @@ fn client() -> Client {
 		.clone()
 }
 
-/// Run the HTTP/3 masquerade server over `conn`. `first_control` is the peer's
-/// first stream (its peeked byte already replayed). Returns when the peer
+/// Run the HTTP/3 masquerade server over `conn`. `first_uni` / `first_bidi` are
+/// the stream the classifier already consumed to peek (with its bytes
+/// replayed), if any, so the h3 server doesn't lose it. Returns when the peer
 /// disconnects or `cancel` fires.
 pub async fn run_masquerade<C: QuicConnection>(
 	conn: C,
-	first_control: PrefixedRecv<C::RecvStream>,
+	first_uni: Option<PrefixedRecv<C::RecvStream>>,
+	first_bidi: Option<(C::SendStream, PrefixedRecv<C::RecvStream>)>,
 	cfg: &MasqueradeConfig,
 	cancel: CancellationToken,
 ) -> eyre::Result<()> {
 	let backend = Url::parse(&cfg.upstream).map_err(|e| eyre::eyre!("invalid masquerade upstream {:?}: {e}", cfg.upstream))?;
 	let client = client();
 
-	let adapter = h3_adapter::server_connection(conn, first_control);
+	let adapter = h3_adapter::server_connection(conn, first_uni, first_bidi);
 	let mut h3conn = h3::server::Connection::new(adapter)
 		.await
 		.map_err(|e| eyre::eyre!("h3 server setup failed: {e}"))?;
