@@ -11,7 +11,15 @@
 //! (the reference behavior) and the replacement for the bespoke `wind-tuiche`
 //! driver.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+	collections::HashMap,
+	net::SocketAddr,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+	time::Duration,
+};
 
 use arc_swap::ArcSwapOption;
 use eyre::Context as _;
@@ -147,23 +155,21 @@ impl<C: QuicConnection> Clone for UdpSession<C> {
 /// would let one authenticated peer pin a large amount of background work.
 const MAX_UDP_SESSIONS_PER_CONN: u64 = 1024;
 
-/// The first thing a freshly-handshaked peer sends, raced across all three
-/// transports to classify the connection — the TUIC `Auth` is **not**
-/// guaranteed to arrive first (a `Connect` bidi, a heartbeat datagram, or QUIC
-/// reordering can beat it), so we cannot assume the first event is a uni `Auth`
-/// stream.
-enum FirstEvent<C: QuicConnection> {
-	Uni(C::RecvStream),
-	Bi(C::SendStream, C::RecvStream),
-	Datagram(bytes::Bytes),
+/// Per-connection senders for the lazily-started HTTP/3 masquerade. The
+/// per-stream router pushes streams it classified as h3 here; `run_masquerade`
+/// (spawned parked) pulls them after `go` fires on the first one. `None`
+/// everywhere when the masquerade is disabled or not compiled in.
+#[cfg_attr(not(feature = "masquerade"), allow(dead_code))]
+struct H3Senders<C: QuicConnection> {
+	uni_tx: mpsc::UnboundedSender<wind_quic::PrefixedRecv<C::RecvStream>>,
+	bidi_tx: mpsc::UnboundedSender<(C::SendStream, wind_quic::PrefixedRecv<C::RecvStream>)>,
+	go: Arc<Notify>,
 }
 
-/// A first event classified as TUIC, with the peeked header bytes replayed for
-/// the stream variants, handed to the matching handler.
-enum TuicFirst<C: QuicConnection> {
+/// A non-TUIC stream handed to the h3 masquerade by the per-stream router.
+enum H3Stream<C: QuicConnection> {
 	Uni(wind_quic::PrefixedRecv<C::RecvStream>),
 	Bi(C::SendStream, wind_quic::PrefixedRecv<C::RecvStream>),
-	Datagram(bytes::Bytes),
 }
 
 /// Whether a 2-byte prefix is TUIC framing: `[VER, CmdType]` with `CmdType` in
@@ -180,31 +186,58 @@ async fn read_prefix<R: AsyncRead + Unpin>(recv: &mut R) -> Option<[u8; 2]> {
 	recv.read_exact(&mut prefix).await.ok().map(|_| prefix)
 }
 
-/// Hand a non-TUIC connection to the HTTP/3 masquerade (when enabled), passing
-/// any first stream the classifier already consumed so the h3 server can replay
-/// it. Closes the connection when the masquerade is disabled or compiled out.
-async fn dispatch_masquerade<C: QuicConnection>(
+/// Build this connection's HTTP/3 masquerade router: two channels feeding a
+/// **parked** `run_masquerade` task (it only builds the h3 server once the
+/// router wakes it on the first h3 stream). Returns `None` (and spawns nothing)
+/// when the masquerade is disabled.
+#[cfg(feature = "masquerade")]
+fn spawn_h3_router<C: QuicConnection>(
 	conn: C,
-	masq: Option<&MasqueradeConfig>,
-	first_uni: Option<wind_quic::PrefixedRecv<C::RecvStream>>,
-	first_bidi: Option<(C::SendStream, wind_quic::PrefixedRecv<C::RecvStream>)>,
-	remote_addr: SocketAddr,
+	masq: Option<MasqueradeConfig>,
 	cancel: CancellationToken,
+) -> Option<Arc<H3Senders<C>>> {
+	let cfg = masq?;
+	let (uni_tx, uni_rx) = mpsc::unbounded_channel();
+	let (bidi_tx, bidi_rx) = mpsc::unbounded_channel();
+	let go = Arc::new(Notify::new());
+	tokio::spawn(masquerade::run_masquerade(conn, uni_rx, bidi_rx, go.clone(), cfg, cancel));
+	Some(Arc::new(H3Senders { uni_tx, bidi_tx, go }))
+}
+
+/// No router when the masquerade isn't compiled in.
+#[cfg(not(feature = "masquerade"))]
+fn spawn_h3_router<C: QuicConnection>(
+	_conn: C,
+	_masq: Option<MasqueradeConfig>,
+	_cancel: CancellationToken,
+) -> Option<Arc<H3Senders<C>>> {
+	None
+}
+
+/// Route a stream the classifier decided is **not** TUIC: hand it to the h3
+/// masquerade (waking the parked server), or close the connection if the
+/// masquerade is off.
+fn route_non_tuic<C: QuicConnection>(
+	ctx: &InboundCtx<C>,
+	h3: Option<&Arc<H3Senders<C>>>,
+	active: &AtomicBool,
+	stream: H3Stream<C>,
 ) {
-	#[cfg(feature = "masquerade")]
-	if let Some(cfg) = masq {
-		info!("connection from {} is not TUIC; serving HTTP/3 masquerade", remote_addr);
-		if let Err(e) = masquerade::run_masquerade(conn, first_uni, first_bidi, cfg, cancel).await {
-			tracing::debug!("masquerade for {} ended: {e:?}", remote_addr);
+	if let Some(s) = h3 {
+		active.store(true, Ordering::Relaxed);
+		match stream {
+			H3Stream::Uni(recv) => {
+				let _ = s.uni_tx.send(recv);
+			}
+			H3Stream::Bi(send, recv) => {
+				let _ = s.bidi_tx.send((send, recv));
+			}
 		}
-		return;
+		s.go.notify_one();
+	} else {
+		drop(stream);
+		ctx.conn.close(0, b"");
 	}
-	let _ = (masq, first_uni, first_bidi, cancel);
-	tracing::debug!(
-		"connection from {} is not TUIC and masquerade is disabled; closing",
-		remote_addr
-	);
-	conn.close(0, b"");
 }
 
 /// Drive an established TUIC connection: spawn the auth-timeout guard and the
@@ -223,66 +256,6 @@ pub async fn serve_connection<C, CB>(
 	C: QuicConnection,
 	CB: InboundCallback,
 {
-	// --- Classify the connection: real TUIC vs HTTP/3 masquerade ---
-	//
-	// Both negotiate the `h3` ALPN, so we inspect the first thing the peer sends.
-	// The first event may be a uni stream, a bidi stream, or a datagram (the TUIC
-	// `Auth` is not guaranteed to arrive first), so race all three. We then peek
-	// the first two bytes: TUIC framing is `[VER, CmdType]` (see `is_tuic_prefix`),
-	// while an HTTP/3 client's streams begin with an h3 stream-type / frame-type
-	// byte. The peeked bytes are replayed via `PrefixedRecv` so neither the TUIC
-	// parser nor the h3 adapter loses any data.
-	let first = tokio::select! {
-		_ = cancel.cancelled() => return,
-		r = tokio::time::timeout(auth_timeout, async {
-			tokio::select! {
-				res = conn.accept_uni() => res.map(FirstEvent::<C>::Uni),
-				res = conn.accept_bi() => res.map(|(s, r)| FirstEvent::<C>::Bi(s, r)),
-				res = conn.read_datagram() => res.map(FirstEvent::<C>::Datagram),
-			}
-		}) => r,
-	};
-	let first = match first {
-		Ok(Ok(ev)) => ev,
-		Ok(Err(e)) => {
-			tracing::debug!("connection from {} closed before first event: {e:?}", remote_addr);
-			return;
-		}
-		Err(_) => {
-			// Nothing within the window: classification is impossible, so fall back
-			// to the masquerade (a silent prober still sees a web server) or close.
-			return dispatch_masquerade(conn, masq.as_ref(), None, None, remote_addr, cancel).await;
-		}
-	};
-
-	let tuic_first: TuicFirst<C> = match first {
-		FirstEvent::Uni(mut recv) => {
-			let Some(prefix) = read_prefix(&mut recv).await else { return };
-			let recv = wind_quic::PrefixedRecv::new(bytes::Bytes::copy_from_slice(&prefix), recv);
-			if is_tuic_prefix(prefix) {
-				TuicFirst::Uni(recv)
-			} else {
-				return dispatch_masquerade(conn, masq.as_ref(), Some(recv), None, remote_addr, cancel).await;
-			}
-		}
-		FirstEvent::Bi(send, mut recv) => {
-			let Some(prefix) = read_prefix(&mut recv).await else { return };
-			let recv = wind_quic::PrefixedRecv::new(bytes::Bytes::copy_from_slice(&prefix), recv);
-			if is_tuic_prefix(prefix) {
-				TuicFirst::Bi(send, recv)
-			} else {
-				return dispatch_masquerade(conn, masq.as_ref(), None, Some((send, recv)), remote_addr, cancel).await;
-			}
-		}
-		FirstEvent::Datagram(dg) => {
-			if dg.len() >= 2 && is_tuic_prefix([dg[0], dg[1]]) {
-				TuicFirst::Datagram(dg)
-			} else {
-				return dispatch_masquerade(conn, masq.as_ref(), None, None, remote_addr, cancel).await;
-			}
-		}
-	};
-
 	let udp_root_cancel = cancel.child_token();
 
 	// Eviction listener fires for both explicit `remove()` (via Dissociate) and
@@ -308,15 +281,24 @@ pub async fn serve_connection<C, CB>(
 		udp_root_cancel,
 	});
 
-	// Authentication timeout: close the connection if no UUID is set in time.
+	// Per-connection HTTP/3 masquerade router: a parked `run_masquerade` task plus
+	// two channels the acceptor loops feed. `None` when masquerade is disabled.
+	// `h3_active` flips true once any stream classifies as h3 so the auth-timeout
+	// guard knows not to close what is actually an HTTP/3 connection.
+	let h3 = spawn_h3_router(connection.conn.clone(), masq, cancel.clone());
+	let h3_active = Arc::new(AtomicBool::new(false));
+
+	// Authentication timeout: close the connection if it never authenticated AND
+	// never turned out to be an HTTP/3 (masquerade) connection.
 	{
 		let conn_auth = connection.clone();
 		let auth_cancel = cancel.clone();
+		let active = h3_active.clone();
 		tokio::spawn(
 			async move {
 				tokio::select! {
 					_ = tokio::time::sleep(auth_timeout) => {
-						if conn_auth.uuid.load().is_none() {
+						if conn_auth.uuid.load().is_none() && !active.load(Ordering::Relaxed) {
 							warn!("Connection from {} authentication timeout", remote_addr);
 							conn_auth.conn.close(0, b"auth timeout");
 						}
@@ -334,10 +316,11 @@ pub async fn serve_connection<C, CB>(
 	// cache) is dropped instead of leaking until server shutdown.
 	let acceptor_cancel = cancel.child_token();
 
-	// Datagram acceptor. Pre-auth datagrams are handled inline (serially) so an
-	// unauthenticated peer can't spawn unbounded tasks parked on `auth_notify`;
-	// once authed, each datagram is dispatched in parallel so a slow outbound
-	// queue can't block the read loop.
+	// Datagram acceptor. Classify each datagram by its first two bytes: TUIC
+	// datagrams (heartbeat / native-mode UDP) are handled inline pre-auth (so an
+	// unauthenticated peer can't spawn unbounded tasks parked on `auth_notify`)
+	// and spawned post-auth; non-TUIC datagrams are dropped — the masquerade
+	// serves no QUIC datagrams.
 	{
 		let conn = connection.clone();
 		let cb = callback.clone();
@@ -352,6 +335,9 @@ pub async fn serve_connection<C, CB>(
 						let conn = conn.clone();
 						let cb = cb.clone();
 						async move {
+							if datagram.len() < 2 || !is_tuic_prefix([datagram[0], datagram[1]]) {
+								return;
+							}
 							if conn.uuid.load().is_some() {
 								tokio::spawn(
 									spawn_logged("Datagram", handle_datagram(conn, datagram, cb))
@@ -369,11 +355,16 @@ pub async fn serve_connection<C, CB>(
 		);
 	}
 
-	// Uni stream acceptor.
+	// Uni stream acceptor. Every accepted stream reads its 2-byte prefix and
+	// routes itself: TUIC (`is_tuic_prefix`) → `handle_uni_stream`, otherwise →
+	// the h3 masquerade (or close). The peeked bytes are replayed via
+	// `PrefixedRecv` so the chosen handler reads from byte 0.
 	{
 		let conn = connection.clone();
 		let cb = callback.clone();
 		let uni_cancel = acceptor_cancel.clone();
+		let h3 = h3.clone();
+		let active = h3_active.clone();
 		tokio::spawn(
 			async move {
 				acceptor_loop(
@@ -383,10 +374,23 @@ pub async fn serve_connection<C, CB>(
 					|recv| {
 						let conn = conn.clone();
 						let cb = cb.clone();
+						let h3 = h3.clone();
+						let active = active.clone();
 						async move {
 							tokio::spawn(
-								spawn_logged("Uni stream", handle_uni_stream(conn, recv, cb))
-									.instrument(tracing::debug_span!("uni_stream")),
+								async move {
+									let mut recv = recv;
+									let Some(prefix) = read_prefix(&mut recv).await else { return };
+									let recv = wind_quic::PrefixedRecv::new(bytes::Bytes::copy_from_slice(&prefix), recv);
+									if is_tuic_prefix(prefix) {
+										if let Err(e) = handle_uni_stream(conn, recv, cb).await {
+											error!("Uni stream error: {e:?}");
+										}
+									} else {
+										route_non_tuic(&conn, h3.as_ref(), &active, H3Stream::Uni(recv));
+									}
+								}
+								.instrument(tracing::debug_span!("uni_stream")),
 							);
 						}
 					},
@@ -397,11 +401,13 @@ pub async fn serve_connection<C, CB>(
 		);
 	}
 
-	// Bi stream acceptor.
+	// Bi stream acceptor — same per-stream classify + route.
 	{
 		let conn = connection.clone();
 		let cb = callback.clone();
 		let bi_cancel = acceptor_cancel.clone();
+		let h3 = h3.clone();
+		let active = h3_active.clone();
 		tokio::spawn(
 			async move {
 				acceptor_loop(
@@ -411,10 +417,23 @@ pub async fn serve_connection<C, CB>(
 					|(send, recv)| {
 						let conn = conn.clone();
 						let cb = cb.clone();
+						let h3 = h3.clone();
+						let active = active.clone();
 						async move {
 							tokio::spawn(
-								spawn_logged("Bi stream", handle_bi_stream(conn, send, recv, cb))
-									.instrument(tracing::debug_span!("bi_stream")),
+								async move {
+									let mut recv = recv;
+									let Some(prefix) = read_prefix(&mut recv).await else { return };
+									let recv = wind_quic::PrefixedRecv::new(bytes::Bytes::copy_from_slice(&prefix), recv);
+									if is_tuic_prefix(prefix) {
+										if let Err(e) = handle_bi_stream(conn, send, recv, cb).await {
+											error!("Bi stream error: {e:?}");
+										}
+									} else {
+										route_non_tuic(&conn, h3.as_ref(), &active, H3Stream::Bi(send, recv));
+									}
+								}
+								.instrument(tracing::debug_span!("bi_stream")),
 							);
 						}
 					},
@@ -423,33 +442,6 @@ pub async fn serve_connection<C, CB>(
 			}
 			.in_current_span(),
 		);
-	}
-
-	// Process the first event already consumed during classification (with any
-	// peeked header bytes replayed). Subsequent events are handled by the acceptor
-	// loops above.
-	{
-		let conn = connection.clone();
-		let cb = callback.clone();
-		match tuic_first {
-			TuicFirst::Uni(recv) => {
-				tokio::spawn(
-					spawn_logged("Uni stream", handle_uni_stream(conn, recv, cb))
-						.instrument(tracing::debug_span!("uni_stream")),
-				);
-			}
-			TuicFirst::Bi(send, recv) => {
-				tokio::spawn(
-					spawn_logged("Bi stream", handle_bi_stream(conn, send, recv, cb))
-						.instrument(tracing::debug_span!("bi_stream")),
-				);
-			}
-			TuicFirst::Datagram(dg) => {
-				tokio::spawn(
-					spawn_logged("Datagram", handle_datagram(conn, dg, cb)).instrument(tracing::debug_span!("datagram")),
-				);
-			}
-		}
 	}
 
 	// Exit on either server shutdown or peer disconnect.

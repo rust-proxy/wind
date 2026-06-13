@@ -9,11 +9,15 @@
 //! back. To an active prober the server is indistinguishable from a normal
 //! HTTP/3 web server.
 
-use std::{sync::OnceLock, time::Duration};
+use std::{
+	sync::{Arc, OnceLock},
+	time::Duration,
+};
 
 use bytes::{Buf as _, Bytes};
 use http::header::HeaderName;
 use reqwest::{Client, Url};
+use tokio::sync::{Notify, mpsc};
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -46,21 +50,29 @@ fn client() -> Client {
 		.clone()
 }
 
-/// Run the HTTP/3 masquerade server over `conn`. `first_uni` / `first_bidi` are
-/// the stream the classifier already consumed to peek (with its bytes
-/// replayed), if any, so the h3 server doesn't lose it. Returns when the peer
+/// Run the HTTP/3 masquerade server over `conn`. The per-stream router in
+/// [`super`] feeds h3 streams to `recv_rx` / `bidi_rx` and fires `go` on the
+/// first one. We wait for `go` before building the h3 server (whose setup opens
+/// our control stream + SETTINGS), so a pure-TUIC connection — which never
+/// fires `go` — never has h3 streams opened on it. Returns when the peer
 /// disconnects or `cancel` fires.
 pub async fn run_masquerade<C: QuicConnection>(
 	conn: C,
-	first_uni: Option<PrefixedRecv<C::RecvStream>>,
-	first_bidi: Option<(C::SendStream, PrefixedRecv<C::RecvStream>)>,
-	cfg: &MasqueradeConfig,
+	recv_rx: mpsc::UnboundedReceiver<PrefixedRecv<C::RecvStream>>,
+	bidi_rx: mpsc::UnboundedReceiver<(C::SendStream, PrefixedRecv<C::RecvStream>)>,
+	go: Arc<Notify>,
+	cfg: MasqueradeConfig,
 	cancel: CancellationToken,
 ) -> eyre::Result<()> {
+	tokio::select! {
+		_ = cancel.cancelled() => return Ok(()),
+		_ = go.notified() => {}
+	}
+
 	let backend = Url::parse(&cfg.upstream).map_err(|e| eyre::eyre!("invalid masquerade upstream {:?}: {e}", cfg.upstream))?;
 	let client = client();
 
-	let adapter = h3_adapter::server_connection(conn, first_uni, first_bidi);
+	let adapter = h3_adapter::server_connection(conn, recv_rx, bidi_rx);
 	let mut h3conn = h3::server::Connection::new(adapter)
 		.await
 		.map_err(|e| eyre::eyre!("h3 server setup failed: {e}"))?;

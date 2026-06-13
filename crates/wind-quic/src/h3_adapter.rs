@@ -9,13 +9,13 @@
 //!
 //! Only the **server** surface is implemented: accepting peer-initiated uni
 //! (control / QPACK) and bidi (request) streams, and opening our own uni
-//! streams (control / QPACK). The classifier in `wind-tuic` races the peer's
-//! first uni/bi stream and peeks a couple of bytes to decide TUIC vs HTTP/3;
-//! whichever stream it consumed for an h3 connection is handed back (with the
-//! peeked bytes replayed via [`PrefixedRecv`](crate::PrefixedRecv)) as
-//! `first_uni` / `first_bidi`, so the adapter yields it before accepting
-//! anything new. Every recv stream is a `PrefixedRecv` (with an empty prefix
-//! when none was consumed), so the adapter is generic over the backend's
+//! streams (control / QPACK). The per-stream classifier in `wind-tuic` reads
+//! each accepted stream's prefix, and feeds the ones it classified as h3 into
+//! this adapter over two channels (`recv_rx` / `bidi_rx`) — already accepted
+//! off the connection, with their peeked prefix replayed via
+//! [`PrefixedRecv`](crate::PrefixedRecv). So the adapter just pulls streams
+//! from the channels; there is no "first stream" special case. Every recv
+//! stream is a `PrefixedRecv`, so the adapter is generic over the backend's
 //! concrete stream types — no boxing or dynamic dispatch.
 //!
 //! The bridge is mechanical: our streams are `AsyncRead`/`AsyncWrite`, while
@@ -36,7 +36,10 @@ use h3::quic::{
 	BidiStream, Connection, ConnectionErrorIncoming, OpenStreams, RecvStream, SendStream, StreamErrorIncoming, StreamId,
 	WriteBuf,
 };
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::{
+	io::{AsyncRead, AsyncWrite, ReadBuf},
+	sync::mpsc,
+};
 
 use crate::{PrefixedRecv, QuicConnection, QuicError, QuicRecvStream, QuicSendStream};
 
@@ -45,32 +48,34 @@ const RECV_CHUNK: usize = 16 * 1024;
 
 type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
-/// A boxed in-flight `accept_bi` / `open_bi` future. Aliased because the bidi
-/// case returns a `(SendStream, RecvStream)` tuple, which trips clippy's
-/// `type_complexity` lint when written inline in every slot/signature.
+/// A boxed in-flight `open_bi` future. Aliased because the bidi case returns a
+/// `(SendStream, RecvStream)` tuple, which trips clippy's `type_complexity`
+/// lint when written inline in every slot/signature.
 type BoxBiFut<C> = BoxFut<Result<(<C as QuicConnection>::SendStream, <C as QuicConnection>::RecvStream), QuicError>>;
+
+/// Channel of accepted (prefix-replayed) recv streams the `wind-tuic`
+/// per-stream router feeds to the masquerade h3 server.
+type RecvRx<C> = mpsc::UnboundedReceiver<PrefixedRecv<<C as QuicConnection>::RecvStream>>;
+/// Channel of accepted bidi (request) streams — `(send half, prefix-replayed
+/// recv)`.
+type BidiRx<C> = mpsc::UnboundedReceiver<(
+	<C as QuicConnection>::SendStream,
+	PrefixedRecv<<C as QuicConnection>::RecvStream>,
+)>;
 
 /// Build an HTTP/3 server connection over `conn`.
 ///
-/// The classifier in `wind-tuic` races the connection's first uni/bi stream to
-/// decide TUIC vs HTTP/3, consuming a couple of bytes to peek. Whichever stream
-/// it consumed for an h3 connection is handed back here as `first_uni` and/or
-/// `first_bidi` (with the peeked bytes replayed via [`PrefixedRecv`]), so the
-/// h3 server yields it before accepting anything new — nothing is lost.
-pub fn server_connection<C: QuicConnection>(
-	conn: C,
-	first_uni: Option<PrefixedRecv<C::RecvStream>>,
-	first_bidi: Option<(C::SendStream, PrefixedRecv<C::RecvStream>)>,
-) -> H3Conn<C> {
+/// Accepted streams are pulled from `recv_rx` / `bidi_rx`, which the
+/// `wind-tuic` per-stream router fills with the streams it classified as h3
+/// (already accepted off the connection, with their peeked prefix replayed via
+/// [`PrefixedRecv`]). `conn` is kept only for *opening* the server's own
+/// control / QPACK streams. There is no "first stream" special case — every
+/// accepted stream arrives the same way.
+pub fn server_connection<C: QuicConnection>(conn: C, recv_rx: RecvRx<C>, bidi_rx: BidiRx<C>) -> H3Conn<C> {
 	H3Conn {
 		conn,
-		first_recv: first_uni,
-		first_bidi: first_bidi.map(|(send, recv)| H3Bidi {
-			send: H3Send::new(send),
-			recv,
-		}),
-		accept_recv_fut: None,
-		accept_bi_fut: None,
+		recv_rx,
+		bidi_rx,
 		open_uni_fut: None,
 		open_bi_fut: None,
 	}
@@ -309,13 +314,12 @@ impl<C: QuicConnection> OpenStreams<Bytes> for H3Opener<C> {
 // Connection
 // ---------------------------------------------------------------------------
 
-/// `h3::quic::Connection` over a [`QuicConnection`] handle.
+/// `h3::quic::Connection` over a [`QuicConnection`] handle. Accepts streams
+/// from the router's channels; opens streams directly on `conn`.
 pub struct H3Conn<C: QuicConnection> {
 	conn: C,
-	first_recv: Option<PrefixedRecv<C::RecvStream>>,
-	first_bidi: Option<H3Bidi<C>>,
-	accept_recv_fut: Option<BoxFut<Result<C::RecvStream, QuicError>>>,
-	accept_bi_fut: Option<BoxBiFut<C>>,
+	recv_rx: RecvRx<C>,
+	bidi_rx: BidiRx<C>,
 	open_uni_fut: Option<BoxFut<Result<C::SendStream, QuicError>>>,
 	open_bi_fut: Option<BoxBiFut<C>>,
 }
@@ -342,37 +346,21 @@ impl<C: QuicConnection> Connection<Bytes> for H3Conn<C> {
 	type RecvStream = PrefixedRecv<C::RecvStream>;
 
 	fn poll_accept_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, ConnectionErrorIncoming>> {
-		if let Some(recv) = self.first_recv.take() {
-			return Poll::Ready(Ok(recv));
-		}
-		let poll = {
-			let conn = &self.conn;
-			let fut = self.accept_recv_fut.get_or_insert_with(|| boxed_accept_uni(conn.clone()));
-			fut.as_mut().poll(cx)
-		};
-		match poll {
-			Poll::Ready(res) => {
-				self.accept_recv_fut = None;
-				Poll::Ready(res.map(|r| PrefixedRecv::new(Bytes::new(), r)).map_err(conn_err))
-			}
+		match self.recv_rx.poll_recv(cx) {
+			Poll::Ready(Some(recv)) => Poll::Ready(Ok(recv)),
+			// Channel closed → the router (and the connection) is gone.
+			Poll::Ready(None) => Poll::Ready(Err(ConnectionErrorIncoming::Timeout)),
 			Poll::Pending => Poll::Pending,
 		}
 	}
 
 	fn poll_accept_bidi(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::BidiStream, ConnectionErrorIncoming>> {
-		if let Some(bidi) = self.first_bidi.take() {
-			return Poll::Ready(Ok(bidi));
-		}
-		let poll = {
-			let conn = &self.conn;
-			let fut = self.accept_bi_fut.get_or_insert_with(|| boxed_accept_bi(conn.clone()));
-			fut.as_mut().poll(cx)
-		};
-		match poll {
-			Poll::Ready(res) => {
-				self.accept_bi_fut = None;
-				Poll::Ready(res.map(into_bidi).map_err(conn_err))
-			}
+		match self.bidi_rx.poll_recv(cx) {
+			Poll::Ready(Some((send, recv))) => Poll::Ready(Ok(H3Bidi {
+				send: H3Send::new(send),
+				recv,
+			})),
+			Poll::Ready(None) => Poll::Ready(Err(ConnectionErrorIncoming::Timeout)),
 			Poll::Pending => Poll::Pending,
 		}
 	}
@@ -394,14 +382,6 @@ fn stream_id(id: u64) -> StreamId {
 	// QUIC stream ids fit the h3 `StreamId` invariant (< 2^62); fall back to 0
 	// only if a backend ever surfaces something out of range.
 	StreamId::try_from(id).unwrap_or_else(|_| StreamId::try_from(0).expect("0 is a valid stream id"))
-}
-
-fn boxed_accept_uni<C: QuicConnection>(conn: C) -> BoxFut<Result<C::RecvStream, QuicError>> {
-	Box::pin(async move { conn.accept_uni().await })
-}
-
-fn boxed_accept_bi<C: QuicConnection>(conn: C) -> BoxBiFut<C> {
-	Box::pin(async move { conn.accept_bi().await })
 }
 
 fn poll_open_send<C: QuicConnection>(
