@@ -100,6 +100,10 @@ impl QuicSendStream for QuicheSend {
 		self.tx.close();
 		self.finished = true;
 	}
+
+	fn id(&self) -> u64 {
+		self.sid
+	}
 }
 
 /// Recv half of a quiche stream.
@@ -147,5 +151,9 @@ impl QuicRecvStream for QuicheRecv {
 			write: false,
 			code,
 		});
+	}
+
+	fn id(&self) -> u64 {
+		self.sid
 	}
 }

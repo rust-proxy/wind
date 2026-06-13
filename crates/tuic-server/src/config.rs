@@ -87,6 +87,12 @@ pub struct Config {
 	pub users: HashMap<Uuid, String>,
 	pub tls: TlsConfig,
 
+	/// HTTP/3 masquerade: reverse-proxy non-TUIC (HTTP/3 probe) connections to
+	/// a real upstream site so the server is indistinguishable from a web
+	/// server.
+	#[serde(default)]
+	pub masquerade: MasqueradeConfig,
+
 	#[educe(Default = "")]
 	pub data_dir: PathBuf,
 
@@ -255,6 +261,23 @@ pub struct TlsConfig {
 	pub acme_email: String,
 	#[educe(Default(expression = false))]
 	pub acme_staging: bool,
+}
+
+/// HTTP/3 masquerade configuration.
+///
+/// When `enabled`, a connection that isn't TUIC (its first stream byte isn't
+/// the TUIC version `0x05` — i.e. an active prober speaking real HTTP/3) is
+/// served as a reverse proxy to `upstream`, so the server is indistinguishable
+/// from a normal HTTP/3 website instead of resetting the connection.
+#[derive(Deserialize, Serialize, Educe)]
+#[educe(Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct MasqueradeConfig {
+	#[educe(Default(expression = false))]
+	pub enabled: bool,
+	/// Upstream site to reverse-proxy to, e.g. `https://example.com`.
+	#[educe(Default(expression = "https://example.com"))]
+	pub upstream: String,
 }
 
 /// Transport tuning for the quinn backend (`wind-tuic`).

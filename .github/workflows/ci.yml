@@ -29,7 +29,11 @@ jobs:
       rust-toolchain: "stable"
       packages: "wind,tuic-server,tuic-client"
       target-config-file: ".github/target.toml"
-      rustflags: ""
+      # The reusable workflow exports this as the `RUSTFLAGS` env var, which
+      # overrides `.cargo/config.toml [build] rustflags`; mirror the committed
+      # `--cfg reqwest_unstable` here so it stays enabled in CI (inert unless a
+      # crate also turns on reqwest's `http3` feature).
+      rustflags: "--cfg reqwest_unstable"
       enable-tmate: false
       only-clippy-tests-on-pr: false
       # GitHub caps the per-repo Actions cache at 10 GB and each matrix target

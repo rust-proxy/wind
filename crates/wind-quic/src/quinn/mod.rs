@@ -62,6 +62,10 @@ impl QuicSendStream for QuinnSend {
 	fn reset(&mut self, code: u64) {
 		let _ = self.0.reset(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
 	}
+
+	fn id(&self) -> u64 {
+		self.0.id().into()
+	}
 }
 
 impl AsyncRead for QuinnRecv {
@@ -73,6 +77,10 @@ impl AsyncRead for QuinnRecv {
 impl QuicRecvStream for QuinnRecv {
 	fn stop(&mut self, code: u64) {
 		let _ = self.0.stop(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
+	}
+
+	fn id(&self) -> u64 {
+		self.0.id().into()
 	}
 }
 

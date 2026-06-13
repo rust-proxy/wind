@@ -69,6 +69,11 @@ pub struct TuicInboundOpts {
 	/// connections (e.g. one TCP-over-QUIC stream per browser request) ramp out
 	/// of slow-start faster instead of trickling the first few round trips.
 	pub initial_window: u64,
+
+	/// HTTP/3 masquerade. When `Some`, connections that aren't TUIC (their
+	/// first stream byte isn't `0x05`) are served as a reverse-proxy HTTP/3
+	/// web server instead of being dropped.
+	pub masquerade: Option<crate::server::MasqueradeConfig>,
 }
 
 impl Default for TuicInboundOpts {
@@ -92,6 +97,7 @@ impl Default for TuicInboundOpts {
 			gso: true,
 			congestion_control: CongestionControl::Bbr,
 			initial_window: 1024 * 1024,
+			masquerade: None,
 		}
 	}
 }
@@ -217,6 +223,7 @@ impl AbstractInbound for TuicInbound {
 					let users = users.clone();
 					let auth_timeout = opts.auth_timeout;
 					let zero_rtt = opts.zero_rtt;
+					let masquerade = opts.masquerade.clone();
 					let cb = cb.clone();
 					let conn_cancel = self.cancel.child_token();
 					let remote = incoming.remote_address();
@@ -227,7 +234,7 @@ impl AbstractInbound for TuicInbound {
 					// `tasks.close()` + `tasks.wait()` after cancelling).
 					self.ctx.tasks.spawn(spawn_logged(
 						"Connection handler",
-						handle_connection(incoming, users, auth_timeout, zero_rtt, cb, conn_cancel),
+						handle_connection(incoming, users, auth_timeout, zero_rtt, masquerade, cb, conn_cancel),
 					).instrument(span));
 				}
 				else => {
@@ -255,6 +262,7 @@ async fn handle_connection<C: InboundCallback>(
 	users: Arc<HashMap<Uuid, String>>,
 	auth_timeout: Duration,
 	zero_rtt: bool,
+	masquerade: Option<crate::server::MasqueradeConfig>,
 	callback: C,
 	cancel: CancellationToken,
 ) -> eyre::Result<()> {
@@ -295,7 +303,16 @@ async fn handle_connection<C: InboundCallback>(
 	};
 
 	// Hand the established connection to the shared, backend-agnostic core.
-	crate::server::serve_connection(QuinnConnection::new(conn), remote_addr, users, auth_timeout, callback, cancel).await;
+	crate::server::serve_connection(
+		QuinnConnection::new(conn),
+		remote_addr,
+		users,
+		auth_timeout,
+		callback,
+		cancel,
+		masquerade,
+	)
+	.await;
 
 	Ok(())
 }

@@ -7,13 +7,26 @@ description.workspace = true
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["server", "client", "quinn", "aws-lc-rs"]
+default = ["server", "client", "quinn", "aws-lc-rs", "masquerade"]
 decode = ["tuic-core/decode"]
 encode = ["tuic-core/encode"]
 # The server decodes client requests AND encodes UDP response datagrams, so it
 # needs both codec directions (matching the former wind-tuiche `server` feature).
 server = ["decode", "encode"]
 client = ["encode"]
+
+# HTTP/3 masquerade: when a connecting client speaks real HTTP/3 instead of TUIC,
+# pose as a genuine HTTP/3 web server by reverse-proxying to a configured upstream
+# site. Backend-agnostic via the `wind-quic` h3 adapter, so it covers both the
+# quinn and quiche backends. The runtime `[masquerade].enabled` flag gates it; the
+# feature only compiles the code + deps in.
+masquerade = [
+    "server",
+    "wind-quic/h3",
+    "dep:h3",
+    "dep:http",
+    "dep:reqwest",
+]
 
 # Quinn Backend
 quinn = [
@@ -77,6 +90,13 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["loggin
 rustls = { version  = "0.23", default-features = false, optional = true }
 rustls-platform-verifier = { version = "0.7", default-features = false, optional = true }
 aws-lc-rs = { version = "*", optional = true, default-features = false }
+
+# HTTP/3 masquerade: the transport-agnostic h3 server engine plus a `reqwest`
+# reverse-proxy client to the upstream site (reqwest owns TLS/roots/pooling, so
+# no hyper/rustls plumbing here). Gated behind the `masquerade` feature.
+h3 = { version = "0.0.8", optional = true }
+http = { version = "1", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util", "macros", "rt-multi-thread", "io-util"] }
