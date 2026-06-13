@@ -149,6 +149,36 @@ where
 
 	let resp = req.send().await?;
 
+	// Reject an over-cap response *before* committing the response head, so the
+	// `502` fallback in `handle_request` can still fire cleanly. (A streamed
+	// response that under-reports or omits `Content-Length` is still bounded
+	// mid-relay below.)
+	if let Some(len) = resp.content_length()
+		&& len > MAX_RESPONSE_BODY_SIZE as u64
+	{
+		return Err(eyre::eyre!(
+			"upstream Content-Length {len} exceeds {MAX_RESPONSE_BODY_SIZE} bytes"
+		));
+	}
+
+	// From here the response head is committed to the h3 stream. A later failure
+	// (over-cap body, send error) must NOT become a second `502` response on a
+	// stream that already sent `200` — that yields a truncated-but-"successful"
+	// reply. Reset the stream instead, so the prober sees an aborted response.
+	if let Err(e) = relay_response(stream, resp).await {
+		debug!("masquerade response failed after the head was sent; resetting h3 stream: {e}");
+		stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+	}
+	Ok(())
+}
+
+/// Send the upstream response head, stream its body back (size-capped), and
+/// finish the stream. Any error leaves the already-committed response
+/// incomplete; the caller resets the stream rather than sending a fresh status.
+async fn relay_response<S>(stream: &mut h3::server::RequestStream<S, Bytes>, resp: reqwest::Response) -> eyre::Result<()>
+where
+	S: h3::quic::BidiStream<Bytes>,
+{
 	let mut builder = http::Response::builder().status(resp.status());
 	for (name, value) in resp.headers() {
 		if is_forwardable(name) {

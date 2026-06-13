@@ -89,10 +89,26 @@ async fn masquerade_reverse_proxies_http3_probes() -> eyre::Result<()> {
 		..Default::default()
 	};
 
-	tokio::spawn(async move {
-		let _ = timeout(Duration::from_secs(20), tuic_server::run(cfg)).await;
+	// `run` blocks forever on success; bound it so a hung server can't wedge the
+	// test runner, and treat the safety-timeout as "still serving".
+	let mut server = tokio::spawn(async move {
+		match timeout(Duration::from_secs(20), tuic_server::run(cfg)).await {
+			Ok(res) => res,
+			Err(_) => Ok(()),
+		}
 	});
-	tokio::time::sleep(Duration::from_secs(1)).await;
+
+	// Wait for the server to bind. If it instead exits early (e.g. the fixed port
+	// is already in use), surface that real error now rather than letting the
+	// HTTP/3 request below fail with an opaque 10s timeout.
+	tokio::select! {
+		joined = &mut server => match joined {
+			Ok(Ok(())) => eyre::bail!("tuic-server exited before serving any request"),
+			Ok(Err(e)) => eyre::bail!("tuic-server failed to start: {e:?}"),
+			Err(e) => eyre::bail!("tuic-server task panicked: {e}"),
+		},
+		_ = tokio::time::sleep(Duration::from_secs(1)) => {}
+	}
 
 	// reqwest as a real HTTP/3 prober. `danger_accept_invalid_certs` because the
 	// server uses a self-signed cert; `http3_prior_knowledge` forces h3.

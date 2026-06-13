@@ -200,7 +200,18 @@ fn spawn_h3_router<C: QuicConnection>(
 	let (uni_tx, uni_rx) = mpsc::unbounded_channel();
 	let (bidi_tx, bidi_rx) = mpsc::unbounded_channel();
 	let go = Arc::new(Notify::new());
-	tokio::spawn(masquerade::run_masquerade(conn, uni_rx, bidi_rx, go.clone(), cfg, cancel));
+	// Run the masquerade parked. If it fails (invalid upstream URL, h3 setup
+	// error) the connection would otherwise leak: a non-TUIC stream has already
+	// flipped `h3_active`, so the auth-timeout guard won't reap it. Log the error
+	// and close the connection ourselves, mirroring that guard's cleanup.
+	let close_conn = conn.clone();
+	let go_task = go.clone();
+	tokio::spawn(async move {
+		if let Err(e) = masquerade::run_masquerade(conn, uni_rx, bidi_rx, go_task, cfg, cancel).await {
+			warn!("HTTP/3 masquerade task failed; closing connection: {e:?}");
+			close_conn.close(0, b"");
+		}
+	});
 	Some(Arc::new(H3Senders { uni_tx, bidi_tx, go }))
 }
 
