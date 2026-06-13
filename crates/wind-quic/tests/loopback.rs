@@ -47,7 +47,6 @@ async fn run_case<C: QuicConnection>(server: C, client: C) {
 	const CONTEXT: &[u8] = b"wind-quic-test-context";
 
 	let server_task = tokio::spawn(async move {
-		// 1. bidi echo.
 		let (mut s_send, mut s_recv) = server.accept_bi().await.expect("accept_bi");
 		let mut buf = [0u8; 4];
 		s_recv.read_exact(&mut buf).await.expect("server read ping");
@@ -55,19 +54,16 @@ async fn run_case<C: QuicConnection>(server: C, client: C) {
 		s_send.write_all(b"pong").await.expect("server write pong");
 		s_send.finish().expect("server finish");
 
-		// 2. uni receive.
 		let mut u_recv = server.accept_uni().await.expect("accept_uni");
 		let mut ubuf = Vec::new();
 		u_recv.read_to_end(&mut ubuf).await.expect("server read uni");
 		assert_eq!(ubuf.as_slice(), b"hello-uni");
 
-		// 3. datagram echo (if supported).
 		if server.max_datagram_size().is_some() {
 			let dg = server.read_datagram().await.expect("server read datagram");
 			server.send_datagram(dg).expect("server echo datagram");
 		}
 
-		// 4. keying material.
 		let mut km = [0u8; 32];
 		server
 			.export_keying_material(&mut km, LABEL, CONTEXT)
@@ -81,7 +77,6 @@ async fn run_case<C: QuicConnection>(server: C, client: C) {
 	});
 
 	let client_km = {
-		// 1. bidi echo.
 		let (mut c_send, mut c_recv) = client.open_bi().await.expect("open_bi");
 		c_send.write_all(b"ping").await.expect("client write ping");
 		c_send.finish().expect("client finish");
@@ -89,12 +84,10 @@ async fn run_case<C: QuicConnection>(server: C, client: C) {
 		c_recv.read_exact(&mut buf).await.expect("client read pong");
 		assert_eq!(&buf, b"pong");
 
-		// 2. uni send.
 		let mut u_send = client.open_uni().await.expect("open_uni");
 		u_send.write_all(b"hello-uni").await.expect("client write uni");
 		u_send.finish().expect("client finish uni");
 
-		// 3. datagram round-trip.
 		if client.max_datagram_size().is_some() {
 			client
 				.send_datagram(Bytes::from_static(b"datagram-payload"))
@@ -103,7 +96,6 @@ async fn run_case<C: QuicConnection>(server: C, client: C) {
 			assert_eq!(&echoed[..], b"datagram-payload");
 		}
 
-		// 4. keying material.
 		let mut km = [0u8; 32];
 		client
 			.export_keying_material(&mut km, LABEL, CONTEXT)
@@ -115,7 +107,6 @@ async fn run_case<C: QuicConnection>(server: C, client: C) {
 	let server_km = server_task.await.expect("server task");
 	assert_eq!(server_km, client_km, "RFC 5705 keying material must match on both ends");
 
-	// 5. close completes.
 	client.close(0, b"done");
 	tokio::time::timeout(Duration::from_secs(2), client.closed())
 		.await

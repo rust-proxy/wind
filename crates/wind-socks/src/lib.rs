@@ -19,7 +19,6 @@ pub enum Error {
 		backtrace: Backtrace,
 	},
 	Io {
-		// action: String
 		source: std::io::Error,
 		backtrace: Backtrace,
 	},

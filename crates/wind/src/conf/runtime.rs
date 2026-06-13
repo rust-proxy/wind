@@ -3,10 +3,6 @@ pub use wind_tuic::quinn::outbound::TuicOutboundOpts;
 
 use crate::conf::persistent::{AuthConfig, InboundConfig, OutboundConfig, PersistentConfig};
 
-// ============================================================================
-// Runtime inbounds
-// ============================================================================
-
 /// A fully-resolved inbound ready to be started.
 pub struct InboundRuntime {
 	pub tag: String,
@@ -39,10 +35,6 @@ impl InboundRuntime {
 		}
 	}
 }
-
-// ============================================================================
-// Runtime outbounds
-// ============================================================================
 
 /// A fully-resolved outbound ready to be started.
 pub struct OutboundRuntime {
@@ -99,10 +91,6 @@ impl OutboundRuntime {
 	}
 }
 
-// ============================================================================
-// Top-level runtime config
-// ============================================================================
-
 pub struct Config {
 	pub inbounds: Vec<InboundRuntime>,
 	pub outbounds: Vec<OutboundRuntime>,
@@ -116,10 +104,6 @@ impl Config {
 		}
 	}
 }
-
-// ============================================================================
-// Helpers
-// ============================================================================
 
 fn parse_socket_addr(s: &str) -> std::net::SocketAddr {
 	s.parse()

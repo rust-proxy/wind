@@ -49,7 +49,6 @@ impl<'de> Deserialize<'de> for TargetAddr {
 
 		let s = String::deserialize(deserializer)?;
 
-		// Check if this is an IPv6 address with brackets [IPv6]:port
 		if s.starts_with('[') {
 			let end_bracket = match s.find(']') {
 				Some(pos) => pos,
@@ -58,7 +57,6 @@ impl<'de> Deserialize<'de> for TargetAddr {
 				}
 			};
 
-			// Ensure there's a colon after the closing bracket
 			if end_bracket + 1 >= s.len() || !s[end_bracket + 1..].starts_with(':') {
 				return Err(Error::custom("Invalid IPv6 address format, expected [IPv6]:port"));
 			}
@@ -79,7 +77,6 @@ impl<'de> Deserialize<'de> for TargetAddr {
 			return Ok(TargetAddr::IPv6(ipv6_addr, port));
 		}
 
-		// Split the string into host and port parts for IPv4 or domain.
 		// `rsplit_once` matches the LAST ':' so multi-colon inputs (which the
 		// IPv6 branch above didn't catch) fail cleanly instead of silently
 		// taking only the first segment.
@@ -93,10 +90,8 @@ impl<'de> Deserialize<'de> for TargetAddr {
 			return Err(Error::custom("Invalid address: host part is empty"));
 		}
 
-		// Parse the port
 		let port = port_str.parse::<u16>().map_err(|_| Error::custom("Invalid port number"))?;
 
-		// Try to parse as IPv4 first
 		if let Ok(ipv4) = host.parse::<Ipv4Addr>() {
 			Ok(TargetAddr::IPv4(ipv4, port))
 		} else {
@@ -192,20 +187,20 @@ mod tests {
 	// deserialization, not silently produce a `Domain("", _)` etc.
 
 	#[test]
-	fn pr4_deserialize_rejects_empty_host() {
+	fn deserialize_rejects_empty_host() {
 		let result: Result<TargetAddr, _> = serde_json::from_str("\":80\"");
 		let err = result.expect_err("`:80` must not parse — empty host");
 		assert!(err.to_string().to_lowercase().contains("empty"));
 	}
 
 	#[test]
-	fn pr4_deserialize_rejects_whitespace_in_domain() {
+	fn deserialize_rejects_whitespace_in_domain() {
 		let result: Result<TargetAddr, _> = serde_json::from_str("\"x y:80\"");
 		assert!(result.is_err(), "domain with whitespace must be rejected");
 	}
 
 	#[test]
-	fn pr4_deserialize_uses_last_colon_for_split() {
+	fn deserialize_uses_last_colon_for_split() {
 		// Without an IPv6 bracket form, an embedded `:` is ambiguous. The
 		// hardened parser uses `rsplit_once(':')`, so the host part keeps any
 		// leading colons; the validation step then catches the malformed

@@ -422,10 +422,6 @@ pub struct ExperimentalConfig {
 	pub drop_private: bool,
 }
 
-// ============================================================================
-// Serde helpers for wind_core::rule::Rule
-// ============================================================================
-
 /// Serialize `Vec<Rule>` as an array of strings.
 fn serialize_rules<S>(rules: &[Rule], serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -510,7 +506,6 @@ fn generate_random_alphanumeric_string(min: usize, max: usize) -> String {
 
 impl Config {
 	pub fn migrate(&mut self) {
-		// Migrate TLS-related fields
 		#[allow(deprecated)]
 		{
 			if let Some(self_sign) = self.__self_sign {
@@ -585,7 +580,6 @@ impl Config {
 				}
 				users
 			},
-			// Provide a minimal outbound example
 			outbound: OutboundConfig {
 				default: OutboundRule {
 					kind: "direct".into(),
@@ -594,7 +588,6 @@ impl Config {
 				},
 				..Default::default()
 			},
-			// Example ACL list (empty by default)
 			acl: Vec::new(),
 			..Default::default()
 		}
@@ -669,7 +662,6 @@ impl From<LogLevel> for LevelFilter {
 fn infer_config_format(content: &str) -> ConfigFormat {
 	let trimmed = content.trim_start();
 
-	// Check for JSON/JSON5 format
 	if trimmed.starts_with('{') || trimmed.starts_with('[') {
 		return ConfigFormat::Json;
 	}
@@ -680,7 +672,6 @@ fn infer_config_format(content: &str) -> ConfigFormat {
 		return ConfigFormat::Yaml;
 	}
 
-	// Try to detect YAML-style indentation patterns
 	let lines: Vec<&str> = content
 		.lines()
 		.filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
@@ -721,7 +712,6 @@ fn infer_config_format(content: &str) -> ConfigFormat {
 		while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-') {
 			i += 1;
 		}
-		// Skip whitespace then expect `=`
 		while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
 			i += 1;
 		}
@@ -732,7 +722,6 @@ fn infer_config_format(content: &str) -> ConfigFormat {
 		(trimmed.starts_with('[') && trimmed.contains(']') && !trimmed.contains(':')) || is_toml_assignment(trimmed)
 	});
 
-	// Decide based on patterns found
 	if has_toml_patterns && !has_yaml_patterns {
 		ConfigFormat::Toml
 	} else if has_yaml_patterns && !has_toml_patterns {
@@ -742,7 +731,6 @@ fn infer_config_format(content: &str) -> ConfigFormat {
 		// (YAML could have = in values, but TOML [sections] are more specific)
 		ConfigFormat::Toml
 	} else {
-		// Default to Unknown if we can't determine
 		ConfigFormat::Unknown
 	}
 }
@@ -768,7 +756,6 @@ async fn find_config_in_dir(dir: &PathBuf) -> eyre::Result<PathBuf> {
 	let mut entries = tokio::fs::read_dir(dir).await?;
 	let mut config_files = Vec::new();
 
-	// Collect all files with recognizable config extensions
 	while let Some(entry) = entries.next_entry().await? {
 		let path = entry.path();
 		if path.is_file() {
@@ -797,7 +784,6 @@ async fn find_config_in_dir(dir: &PathBuf) -> eyre::Result<PathBuf> {
 }
 
 pub async fn parse_config(cli: Cli, env_state: EnvState) -> eyre::Result<Config> {
-	// Handle --init flag
 	if cli.init {
 		warn!("Generating an example configuration to config.toml......");
 
@@ -826,7 +812,6 @@ pub async fn parse_config(cli: Cli, env_state: EnvState) -> eyre::Result<Config>
 		));
 	};
 
-	// Check if config file exists
 	if !cfg_path.exists() {
 		return Err(eyre::eyre!("Config file not found: {}", cfg_path.display()));
 	}
@@ -882,7 +867,6 @@ pub async fn parse_config(cli: Cli, env_state: EnvState) -> eyre::Result<Config>
 		ConfigFormat::Toml => figmet.merge(Toml::file(&cfg_path)),
 		ConfigFormat::Yaml => figmet.merge(Yaml::file(&cfg_path)),
 		ConfigFormat::Unknown => {
-			// Try to infer format from file content
 			let content = tokio::fs::read_to_string(&cfg_path).await?;
 			let inferred_format = infer_config_format(&content);
 
@@ -902,7 +886,6 @@ pub async fn parse_config(cli: Cli, env_state: EnvState) -> eyre::Result<Config>
 
 	let mut config: Config = figmet.extract()?;
 
-	// Migrate legacy fields to new nested structure
 	config.migrate();
 
 	if config.data_dir.to_str() == Some("") {
@@ -914,7 +897,6 @@ pub async fn parse_config(cli: Cli, env_state: EnvState) -> eyre::Result<Config>
 		tokio::fs::create_dir_all(&config.data_dir).await?;
 	};
 
-	// Determine certificate and key paths
 	let base_dir = config.data_dir.clone();
 	config.tls.certificate = if config.tls.auto_ssl && config.tls.certificate.to_str() == Some("") {
 		config.data_dir.join(format!("{}.cer.pem", config.tls.hostname))
@@ -996,7 +978,6 @@ mod tests {
 		assert_eq!(result.users.get(&uuid1), Some(&"password1".to_string()));
 		assert_eq!(result.users.get(&uuid2), Some(&"password2".to_string()));
 
-		// Cleanup test directories
 		let _ = tokio::fs::remove_dir_all("__test__custom_data").await;
 		Ok(())
 	}
@@ -1017,7 +998,7 @@ mod tests {
 		assert_eq!(result.users.get(&uuid), Some(&"old_password".to_string()));
 
 		assert!(!result.tls.self_sign);
-		assert!(result.data_dir.ends_with("__test__legacy_data")); // Cleanup test directories
+		assert!(result.data_dir.ends_with("__test__legacy_data"));
 		let _ = tokio::fs::remove_dir_all("__test__legacy_data").await;
 	}
 
@@ -1040,7 +1021,6 @@ mod tests {
 			current_dir.join("__test__relative_path").join("certs/server.key")
 		);
 
-		// Cleanup test directories
 		let _ = tokio::fs::remove_dir_all("__test__relative_path").await;
 	}
 
@@ -1063,18 +1043,15 @@ mod tests {
 		assert_eq!(result.tls.certificate, expected_cert);
 		assert_eq!(result.tls.private_key, expected_key);
 
-		// Cleanup test directories
 		let _ = tokio::fs::remove_dir_all("__test__ssl_data").await;
 	}
 
 	#[tokio::test]
 	async fn test_error_handling() {
-		// Test Invalid TOML
 		let config = "invalid toml content";
 		let result = test_parse_config(config, ".toml").await;
 		assert!(result.is_err());
 
-		// Test Invalid JSON
 		let config = "{ invalid json }";
 		let result = test_parse_config(config, ".json").await;
 		assert!(result.is_err());
@@ -1309,13 +1286,12 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_congestion_control_variants() {
-		// Test BBR
 		let config_bbr = include_str!("../tests/config/congestion_control_bbr.toml");
 
 		let result = test_parse_config(config_bbr, ".toml").await.unwrap();
 		assert_eq!(result.backend.quinn.congestion_control.controller, CongestionController::Bbr);
 
-		// Test NewReno (note: lowercase 'newreno' is the valid variant)
+		// note: lowercase 'newreno' is the valid variant
 		let config_new_reno = include_str!("../tests/config/congestion_control_newreno.toml");
 
 		let result = test_parse_config(config_new_reno, ".toml").await.unwrap();
@@ -1658,7 +1634,6 @@ send_window = 12345678
 		let temp_dir = tempdir().unwrap();
 		let dir_path = temp_dir.path();
 
-		// Test with JSON
 		let json_dir = dir_path.join("json_test");
 		fs::create_dir(&json_dir).unwrap();
 		fs::write(json_dir.join("config.json"), r#"{"log_level": "debug"}"#).unwrap();
@@ -1672,7 +1647,6 @@ send_window = 12345678
 		let result = parse_config(cli, EnvState::default()).await.unwrap();
 		assert_eq!(result.log_level, LogLevel::Debug);
 
-		// Test with YAML
 		let yaml_dir = dir_path.join("yaml_test");
 		fs::create_dir(&yaml_dir).unwrap();
 		fs::write(yaml_dir.join("config.yaml"), "log_level: warn").unwrap();
@@ -1854,10 +1828,6 @@ send_window = 12345678
 		assert!(result.is_ok());
 	}
 
-	// ====================================================================
-	// Metacubex-style rules tests
-	// ====================================================================
-
 	#[tokio::test]
 	async fn test_rules_parsing() {
 		let config = include_str!("../tests/config/rules_parsing.toml");
@@ -1866,30 +1836,22 @@ send_window = 12345678
 
 		assert_eq!(result.rules.len(), 8);
 
-		// DOMAIN,ad.example.com,REJECT
 		assert_eq!(result.rules[0].to_string(), "DOMAIN,ad.example.com,REJECT");
 		assert_eq!(result.rules[0].target, "REJECT");
 
-		// DOMAIN-SUFFIX,google.com,proxy
 		assert_eq!(result.rules[1].to_string(), "DOMAIN-SUFFIX,google.com,proxy");
 
-		// DOMAIN-KEYWORD,track,reject
 		assert_eq!(result.rules[2].target, "reject");
 
-		// IP-CIDR,10.0.0.0/8,direct,no-resolve
 		assert_eq!(result.rules[3].target, "direct");
 		assert!(result.rules[3].no_resolve());
 
-		// IP-CIDR6,fc00::/7,direct
 		assert_eq!(result.rules[4].to_string(), "IP-CIDR6,fc00::/7,direct");
 
-		// DST-PORT,443,proxy
 		assert_eq!(result.rules[5].to_string(), "DST-PORT,443,proxy");
 
-		// NETWORK,udp,direct
 		assert_eq!(result.rules[6].to_string(), "NETWORK,udp,direct");
 
-		// MATCH,proxy
 		assert_eq!(result.rules[7].to_string(), "MATCH,proxy");
 	}
 
@@ -1985,13 +1947,13 @@ rules = ["INVALID_TYPE,value,target"]
 	/// secret like `aGVsbG8=`) was misclassified as TOML because the heuristic
 	/// reduced to `trimmed.contains('=')` due to `&&`/`||` precedence.
 	#[test]
-	fn pr4_yaml_with_equals_in_value_is_yaml() {
+	fn yaml_with_equals_in_value_is_yaml() {
 		let yaml = "secret: aGVsbG8=\nfoo: bar\n";
 		assert_eq!(infer_config_format(yaml), ConfigFormat::Yaml);
 	}
 
 	#[test]
-	fn pr4_toml_section_still_detected() {
+	fn toml_section_still_detected() {
 		// `infer_config_format` short-circuits `starts_with('[')` to JSON, so
 		// any TOML file starting with a `[section]` would be misidentified as
 		// JSON regardless of the PR4-L heuristic fix. That JSON shortcut is a
@@ -2004,14 +1966,14 @@ rules = ["INVALID_TYPE,value,target"]
 	}
 
 	#[test]
-	fn pr4_toml_bare_assignment_still_detected() {
+	fn toml_bare_assignment_still_detected() {
 		// `key = "value"` without a section header is still valid TOML.
 		let toml = "log_level = \"info\"\n";
 		assert_eq!(infer_config_format(toml), ConfigFormat::Toml);
 	}
 
 	#[test]
-	fn pr4_yaml_with_indented_block_not_misread_as_toml() {
+	fn yaml_with_indented_block_not_misread_as_toml() {
 		// Indented list under a key — pure YAML, no top-level `=`.
 		let yaml = "rules:\n  - foo=bar\n  - baz\n";
 		assert_eq!(infer_config_format(yaml), ConfigFormat::Yaml);

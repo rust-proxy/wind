@@ -91,10 +91,6 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// PR1 regression tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
 	use std::{net::SocketAddr, sync::Arc, time::Duration};

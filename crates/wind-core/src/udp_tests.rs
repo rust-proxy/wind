@@ -28,7 +28,6 @@ mod tests {
 			.unwrap();
 		let dst_addr = recv.local_addr().unwrap();
 
-		// Generate random data for testing
 		let test_data = generate_random_data(data_len);
 
 		test_send_recv(
@@ -87,7 +86,6 @@ mod tests {
 
 			let socket_state = UdpSocketState::new(sock.into()).expect("created socket state");
 
-			// Change the send buffer size.
 			let buffer_before = socket_state.send_buffer_size(sock.into()).unwrap();
 			assert_ne!(
 				buffer_before,
@@ -104,7 +102,6 @@ mod tests {
 				"setting send buffer size to {BUFFER_SIZE} resulted in {buffer_before} -> {buffer_after}",
 			);
 
-			// Change the receive buffer size.
 			let buffer_before = socket_state.recv_buffer_size(sock.into()).unwrap();
 			socket_state
 				.set_recv_buffer_size(sock.into(), BUFFER_SIZE)

@@ -27,10 +27,6 @@ use crate::{
 	traits::{QuicConnection, QuicRecvStream, QuicSendStream},
 };
 
-// ---------------------------------------------------------------------------
-// Streams
-// ---------------------------------------------------------------------------
-
 /// quinn send half.
 pub struct QuinnSend(quinn::SendStream);
 
@@ -83,10 +79,6 @@ impl QuicRecvStream for QuinnRecv {
 		self.0.id().into()
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Connection
-// ---------------------------------------------------------------------------
 
 /// A [`QuicConnection`] backed by quinn.
 ///
@@ -172,10 +164,6 @@ impl QuicConnection for QuinnConnection {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Endpoint / connect
-// ---------------------------------------------------------------------------
-
 /// A quinn server endpoint that yields [`QuinnConnection`]s.
 pub struct QuinnAcceptor {
 	endpoint: Endpoint,
@@ -253,10 +241,6 @@ pub async fn connect(
 		_endpoint: Some(Arc::new(endpoint)),
 	})
 }
-
-// ---------------------------------------------------------------------------
-// Transport mapping
-// ---------------------------------------------------------------------------
 
 fn build_transport(t: &TransportConfig) -> Result<QuinnTransport, QuicError> {
 	let mut tr = QuinnTransport::default();

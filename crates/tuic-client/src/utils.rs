@@ -7,7 +7,6 @@ use std::{
 use anyhow::Context;
 use rustls::{RootCertStore, pki_types::CertificateDer};
 use tokio::net;
-// Re-export common types from wind-core and wind-tuic
 pub use wind_core::StackPrefer;
 pub use wind_tuic::quinn::{CongestionControl, UdpRelayMode};
 

@@ -28,10 +28,6 @@ use crate::{
 	udp::UdpStream,
 };
 
-// ============================================================================
-// Public types
-// ============================================================================
-
 /// Boxed future alias used throughout this module.
 ///
 /// Both `Send` and `Sync` are required so the future satisfies the
@@ -51,10 +47,6 @@ pub enum RouteAction {
 	Forward(String),
 }
 
-// ============================================================================
-// Router trait
-// ============================================================================
-
 /// Determines which outbound handler should serve a connection.
 ///
 /// Implementations are free to perform DNS resolution, consult ACL tables, or
@@ -66,10 +58,6 @@ pub trait Router: Send + Sync + 'static {
 	/// * `is_tcp`  – `true` for TCP streams, `false` for UDP streams.
 	fn route(&self, target: &TargetAddr, is_tcp: bool) -> impl Future<Output = eyre::Result<RouteAction>> + Send;
 }
-
-// ============================================================================
-// OutboundAction trait
-// ============================================================================
 
 /// Object-safe outbound handler.
 ///
@@ -88,10 +76,6 @@ pub trait OutboundAction: Send + Sync + 'static {
 	/// Handle an inbound UDP session.
 	async fn handle_udp(&self, stream: UdpStream) -> eyre::Result<()>;
 }
-
-// ============================================================================
-// Dispatcher
-// ============================================================================
 
 /// Routes inbound connections to named outbound handlers.
 ///
@@ -142,10 +126,6 @@ impl<R: Router> Clone for Dispatcher<R> {
 		}
 	}
 }
-
-// ============================================================================
-// InboundCallback implementation
-// ============================================================================
 
 impl<R: Router> InboundCallback for Dispatcher<R> {
 	async fn handle_tcpstream(&self, target_addr: TargetAddr, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
@@ -236,10 +216,6 @@ impl<R: Router> Dispatcher<R> {
 		}
 	}
 }
-
-// ============================================================================
-// AclRouter – built-in Router backed by Rule list
-// ============================================================================
 
 /// A built-in [`Router`] that evaluates a list of [`Rule`]s in order.
 ///
@@ -338,10 +314,6 @@ fn rule_target_to_action(target: &str, rule: &Rule) -> RouteAction {
 	}
 }
 
-// ============================================================================
-// Adapter: AbstractOutbound → OutboundAction
-// ============================================================================
-
 use crate::AbstractOutbound;
 
 /// Placeholder type used for the `via` parameter when no outbound chaining
@@ -394,10 +366,6 @@ impl<O: AbstractOutbound + Send + Sync + 'static> OutboundAction for OutboundAsA
 	}
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
 	use std::sync::{
@@ -406,8 +374,6 @@ mod tests {
 	};
 
 	use super::*;
-
-	// -- Helpers --
 
 	fn parse_rules(text: &str) -> Vec<Rule> {
 		Rule::parse_rules(text).into_iter().filter_map(Result::ok).collect()
@@ -440,8 +406,6 @@ mod tests {
 			Ok(())
 		}
 	}
-
-	// -- AclRouter unit tests --
 
 	#[tokio::test]
 	async fn acl_router_domain_suffix_match() {
@@ -576,8 +540,6 @@ mod tests {
 		assert!(matches!(action, RouteAction::Forward(name) if name == "default"));
 	}
 
-	// -- Dispatcher + AclRouter integration tests --
-
 	#[tokio::test]
 	async fn dispatcher_routes_tcp_to_correct_handler() {
 		let rules = parse_rules(
@@ -594,7 +556,6 @@ mod tests {
 		dispatcher.add_handler("proxy_out", proxy_handler.clone());
 		dispatcher.add_handler("default", default_handler.clone());
 
-		// Create a duplex stream
 		let (client, _server) = tokio::io::duplex(1024);
 
 		let target = TargetAddr::Domain("app.proxy.me".into(), 443);
@@ -692,8 +653,6 @@ mod tests {
 		assert!(result.is_err());
 	}
 
-	// -- Port range routing --
-
 	#[tokio::test]
 	async fn acl_router_dst_port_range() {
 		let router = AclRouter::new(parse_rules("DST-PORT,8000-9000,proxy"), "direct");
@@ -706,8 +665,6 @@ mod tests {
 		let action = router.route(&target, true).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
-
-	// -- Compound rules in routing --
 
 	#[tokio::test]
 	async fn acl_router_and_compound() {
@@ -764,8 +721,6 @@ mod tests {
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
-	// -- SrcIpCidr in routing (no src_ip in TargetAddr context → never matches) --
-
 	#[tokio::test]
 	async fn acl_router_src_ip_cidr_no_match_without_context() {
 		let router = AclRouter::new(parse_rules("SRC-IP-CIDR,192.168.0.0/16,local"), "default");
@@ -775,8 +730,6 @@ mod tests {
 		// SRC-IP-CIDR can't match because AclRouter doesn't have src_ip context
 		assert!(matches!(action, RouteAction::Forward(name) if name == "default"));
 	}
-
-	// -- Domain + port combination --
 
 	#[tokio::test]
 	async fn acl_router_domain_and_port_combination() {
@@ -805,16 +758,12 @@ mod tests {
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
-	// ------------------------------------------------------------------
-	// PR4-A regression tests for `rule_target_to_action`
-	// ------------------------------------------------------------------
-
 	/// Outbound names registered with mixed case must survive routing —
 	/// previously the `name => RouteAction::Forward(name.to_string())` arm
 	/// bound to the lowercased string and silently routed `Proxy_Out` to
 	/// `proxy_out`, which `Dispatcher::resolve_handler` failed to find.
 	#[tokio::test]
-	async fn pr4_router_forwards_with_original_case() {
+	async fn router_forwards_with_original_case() {
 		let router = AclRouter::new(parse_rules("DOMAIN-SUFFIX,example.com,Proxy_Out"), "default");
 		let target = TargetAddr::Domain("foo.example.com".into(), 80);
 		let action = router.route(&target, true).await.unwrap();
@@ -824,7 +773,7 @@ mod tests {
 	/// Reject keywords are still recognised case-insensitively across all
 	/// three spellings.
 	#[tokio::test]
-	async fn pr4_router_reject_keywords_case_insensitive() {
+	async fn router_reject_keywords_case_insensitive() {
 		for kw in ["REJECT", "Reject", "reject", "BLOCK", "Block", "deny", "Deny", "DENY"] {
 			let r = AclRouter::new(parse_rules(&format!("DOMAIN-SUFFIX,blocked.com,{kw}")), "default");
 			let target = TargetAddr::Domain("a.blocked.com".into(), 443);

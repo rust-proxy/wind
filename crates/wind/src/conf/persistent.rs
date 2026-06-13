@@ -7,10 +7,6 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// ============================================================================
-// Top-level config
-// ============================================================================
-
 /// Root configuration for Wind.
 ///
 /// # Example (YAML)
@@ -36,10 +32,6 @@ pub struct PersistentConfig {
 	#[serde(default)]
 	pub outbounds: Vec<OutboundConfig>,
 }
-
-// ============================================================================
-// Default
-// ============================================================================
 
 impl Default for PersistentConfig {
 	fn default() -> Self {
@@ -68,10 +60,6 @@ impl Default for PersistentConfig {
 		}
 	}
 }
-
-// ============================================================================
-// Inbounds
-// ============================================================================
 
 /// One inbound protocol instance.
 #[derive(Debug, Deserialize, Serialize)]
@@ -131,10 +119,6 @@ pub enum AuthConfig {
 	},
 }
 
-// ============================================================================
-// Outbounds
-// ============================================================================
-
 /// One outbound protocol instance.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
@@ -145,8 +129,6 @@ pub enum OutboundConfig {
 	#[serde(rename = "naive")]
 	Naive(NaiveOutboundConfig),
 }
-
-// ── TUIC ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TuicOutboundConfig {
@@ -190,8 +172,6 @@ pub struct TuicOutboundConfig {
 	pub alpn: Vec<String>,
 }
 
-// ── NaiveProxy ───────────────────────────────────────────────────────────
-
 #[derive(Debug, Deserialize, Serialize)]
 pub struct NaiveOutboundConfig {
 	/// Tag (name) used by the router.
@@ -233,10 +213,6 @@ pub struct NaiveOutboundConfig {
 	pub cronet_lib_path: Option<String>,
 }
 
-// ============================================================================
-// Default helpers
-// ============================================================================
-
 fn default_true() -> bool {
 	true
 }
@@ -255,10 +231,6 @@ fn default_h3_alpn() -> Vec<String> {
 fn default_concurrency() -> u32 {
 	1
 }
-
-// ============================================================================
-// Config loader
-// ============================================================================
 
 impl PersistentConfig {
 	/// Write the default config to a file.
@@ -324,10 +296,6 @@ impl PersistentConfig {
 	}
 }
 
-// ============================================================================
-// PR1 regression tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -383,7 +351,7 @@ password: "p"
 	/// parser, producing cryptic "expected `[section]`" errors when the file
 	/// was actually JSON or had a typo. Now they fail loudly up front.
 	#[test]
-	fn pr4_unknown_config_extension_rejected() {
+	fn unknown_config_extension_rejected() {
 		let err = PersistentConfig::load(Some("/tmp/wind-pr4-bogus.json".into()), None)
 			.expect_err("`.json` is not supported and must be rejected");
 		let msg = format!("{err:#}");

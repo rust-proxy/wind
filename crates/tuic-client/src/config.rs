@@ -230,10 +230,8 @@ fn default_udp_timeout() -> Duration {
 
 impl Config {
 	pub fn parse(cli: Cli, env_state: EnvState) -> eyre::Result<Self> {
-		// Require config file
 		let path = cli.config.ok_or(ConfigError::NoConfig)?;
 
-		// Check if config file exists
 		if !path.exists() {
 			return Err(ConfigError::ConfigNotFound(path))?;
 		}
@@ -254,7 +252,6 @@ impl Config {
 				_ => format = ConfigFormat::Unknown,
 			}
 		} else {
-			// Fall back to file extension
 			match path
 				.extension()
 				.and_then(|v| v.to_str())
@@ -274,7 +271,6 @@ impl Config {
 			ConfigFormat::Toml => figmet.merge(Toml::file(&path)),
 			ConfigFormat::Yaml => figmet.merge(Yaml::file(&path)),
 			ConfigFormat::Unknown => {
-				// Try to infer format from file content
 				let content = std::fs::read_to_string(&path)?;
 				let inferred_format = infer_config_format(&content);
 
@@ -306,7 +302,6 @@ enum ConfigFormat {
 fn infer_config_format(content: &str) -> ConfigFormat {
 	let trimmed = content.trim();
 
-	// Check for YAML indicators
 	if trimmed.lines().any(|line| {
 		let line = line.trim();
 		// YAML typically has keys followed by colons (not in quotes)
@@ -322,7 +317,6 @@ fn infer_config_format(content: &str) -> ConfigFormat {
 		return ConfigFormat::Yaml;
 	}
 
-	// Check for TOML indicators (section headers)
 	if trimmed.lines().any(|line| {
 		let line = line.trim();
 		line.starts_with('[') && line.ends_with(']') && !line.contains('{')
@@ -330,7 +324,6 @@ fn infer_config_format(content: &str) -> ConfigFormat {
 		return ConfigFormat::Toml;
 	}
 
-	// Check for JSON/JSON5 indicators
 	if trimmed.starts_with('{') || trimmed.starts_with('[') {
 		return ConfigFormat::Json;
 	}
@@ -454,22 +447,18 @@ mod tests {
 
 		fs::write(&config_path, config_content).unwrap();
 
-		// Temporarily set command line arguments for clap to parse
 		let os_args = vec![
 			"test_binary".to_owned(),
 			"--config".to_owned(),
 			config_path.to_string_lossy().into_owned(),
 		];
 
-		// Parse CLI with test arguments
 		let cli = Cli::try_parse_from(os_args).map_err(|e| ConfigError::Figment(figment::Error::from(e.to_string())))?;
 
-		// Call parse with the CLI and env_state
 		Config::parse(cli, env_state)
 	}
 	#[test]
 	fn test_backward_compatibility_standard_json() {
-		// Test backward compatibility with standard JSON format
 		let json_config = include_str!("../tests/config/backward_compatibility_standard_json.json");
 
 		let config = test_parse_config(json_config, ".json5");
@@ -483,7 +472,6 @@ mod tests {
 
 	#[test]
 	fn test_json5_comments() {
-		// Test JSON5 comment support (single-line and multi-line)
 		let json5_config = include_str!("../tests/config/json5_comments.json5");
 
 		let config = test_parse_config(json5_config, ".json5");
@@ -492,7 +480,6 @@ mod tests {
 
 	#[test]
 	fn test_json5_trailing_commas() {
-		// Test JSON5 trailing comma support
 		let json5_config = include_str!("../tests/config/json5_trailing_commas.json5");
 
 		let config = test_parse_config(json5_config, ".json5");
@@ -501,7 +488,6 @@ mod tests {
 
 	#[test]
 	fn test_json5_unquoted_keys() {
-		// Test JSON5 unquoted object keys
 		let json5_config = include_str!("../tests/config/json5_unquoted_keys.json5");
 
 		let config = test_parse_config(json5_config, ".json5");
@@ -510,7 +496,6 @@ mod tests {
 
 	#[test]
 	fn test_json5_single_quotes() {
-		// Test JSON5 single-quoted strings
 		let json5_config = include_str!("../tests/config/json5_single_quotes.json5");
 
 		let config = test_parse_config(json5_config, ".json5");
@@ -519,7 +504,6 @@ mod tests {
 
 	#[test]
 	fn test_json5_multiline_strings() {
-		// Test JSON5 multiline strings with escaped newlines
 		let json5_config = include_str!("../tests/config/json5_multiline_strings.json5");
 
 		let config = test_parse_config(json5_config, ".json5");
@@ -528,7 +512,6 @@ mod tests {
 
 	#[test]
 	fn test_json5_mixed_features() {
-		// Test multiple JSON5 features combined
 		let json5_config = include_str!("../tests/config/json5_mixed_features.json5");
 
 		let config = test_parse_config(json5_config, ".json5");
@@ -540,7 +523,6 @@ mod tests {
 
 	#[test]
 	fn test_complex_config_with_all_fields() {
-		// Test a more complete configuration with various optional fields
 		let json5_config = include_str!("../tests/config/complex_config_with_all_fields.json5");
 
 		let config = test_parse_config(json5_config, ".json5");
@@ -557,7 +539,6 @@ mod tests {
 
 		let config = test_parse_config(json5_config, ".json5").unwrap();
 
-		// Check default values
 		assert_eq!(config.log_level, "info");
 		assert_eq!(config.relay.ipstack_prefer, StackPrefer::V4first);
 		assert_eq!(config.relay.udp_relay_mode, UdpRelayMode::Native);
@@ -680,10 +661,8 @@ server = "127.0.0.1:1081"
 		let proxy = config.relay.proxy.unwrap();
 		assert_eq!(proxy.server.0, "proxy.example.com");
 		assert_eq!(proxy.server.1, 1080);
-		// username and password should be None when not provided
 		assert!(proxy.username.is_none());
 		assert!(proxy.password.is_none());
-		// Should use default udp_buffer_size
 		assert_eq!(proxy.udp_buffer_size, 2048);
 	}
 
@@ -697,7 +676,6 @@ server = "127.0.0.1:1081"
 		assert_eq!(proxy.server.1, 1080);
 		assert!(proxy.username.is_none());
 		assert!(proxy.password.is_none());
-		// Default udp_buffer_size should be 2048
 		assert_eq!(proxy.udp_buffer_size, 2048);
 	}
 
@@ -706,7 +684,6 @@ server = "127.0.0.1:1081"
 		let toml_config = include_str!("../tests/config/no_proxy.toml");
 
 		let config = test_parse_config(toml_config, ".toml").unwrap();
-		// proxy should be None when not configured
 		assert!(config.relay.proxy.is_none());
 	}
 
@@ -748,7 +725,6 @@ server = "127.0.0.1:1081"
 
 		let config = test_parse_config(toml_config, ".toml").unwrap();
 
-		// Test default values
 		assert_eq!(config.log_level, "info");
 		assert_eq!(config.relay.congestion_control, CongestionControl::Bbr);
 		assert_eq!(config.relay.udp_relay_mode, UdpRelayMode::Native);
@@ -874,7 +850,6 @@ server = "127.0.0.1:1081"
 	fn test_env_var_force_toml() {
 		let config_content = include_str!("../tests/config/env_var_force_toml.toml");
 
-		// Create EnvState with force_toml enabled
 		let env_state = EnvState {
 			tuic_force_toml: true,
 			tuic_config_format: None,
@@ -889,7 +864,6 @@ server = "127.0.0.1:1081"
 	fn test_env_var_config_format() {
 		let config_content = include_str!("../tests/config/env_yaml.toml");
 
-		// Create EnvState with config_format set to YAML
 		let env_state = EnvState {
 			tuic_force_toml: false,
 			tuic_config_format: Some("yaml".to_string()),
@@ -927,12 +901,10 @@ server = "127.0.0.1:1081"
 
 	#[test]
 	fn test_backward_compat_json_to_toml() {
-		// Test that configs can be converted from JSON5 to TOML
 		let json5_content = include_str!("../tests/config/compat_json.json5");
 
 		let json_config = test_parse_config(json5_content, ".json5").unwrap();
 
-		// Verify the config is parsed correctly
 		assert_eq!(json_config.relay.server.0, "compat.example.com");
 		assert_eq!(json_config.relay.server.1, 8443);
 		assert_eq!(json_config.log_level, "warn");

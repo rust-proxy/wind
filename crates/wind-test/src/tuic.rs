@@ -20,10 +20,6 @@ use wind_core::{
 	udp::{UdpPacket, UdpStream},
 };
 
-// =============================================================================
-// Public Test Helpers
-// =============================================================================
-
 /// A simple [`InboundCallback`] that relays TCP connections directly to their
 /// targets and relays UDP packets to real targets via a bound UDP socket.
 ///
@@ -137,10 +133,6 @@ pub fn generate_tuic_test_cert() -> (Vec<CertificateDer<'static>>, PrivateKeyDer
 	(vec![cert_der], PrivateKeyDer::Pkcs8(key_der))
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 #[cfg(test)]
 mod tests {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -154,10 +146,6 @@ mod tests {
 	use super::*;
 
 	const TEST_PASSWORD: &[u8] = b"wind_tuic_test_secret";
-
-	// -------------------------------------------------------------------------
-	// Test setup helpers
-	// -------------------------------------------------------------------------
 
 	struct TuicTestSetup {
 		server_addr: SocketAddr,
@@ -235,10 +223,6 @@ mod tests {
 		Ok(client)
 	}
 
-	// =========================================================================
-	// Connection & Authentication Tests
-	// =========================================================================
-
 	/// A TUIC client must be able to establish a QUIC connection to the server.
 	#[tokio::test]
 	async fn test_tuic_connection() {
@@ -308,17 +292,12 @@ mod tests {
 		);
 	}
 
-	// =========================================================================
-	// TCP Proxy Tests
-	// =========================================================================
-
 	/// End-to-end TCP relay through TUIC: a message written on the local stream
 	/// must reach the echo target and the echo must arrive back at the caller.
 	#[tokio::test]
 	async fn test_tuic_tcp_proxy() {
 		use tokio::net::TcpListener;
 
-		// Start a simple TCP echo server
 		let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let echo_addr = echo.local_addr().unwrap();
 		tokio::spawn(async move {
@@ -347,7 +326,6 @@ mod tests {
 		let (mut local, remote) = tokio::io::duplex(4096);
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
 
-		// Drive the TCP relay in a background task
 		tokio::spawn(async move {
 			let _ = client.handle_tcp(target, remote, None::<TuicOutbound>).await;
 		});
@@ -388,7 +366,6 @@ mod tests {
 			let _ = client.handle_tcp(target, remote, None::<TuicOutbound>).await;
 		});
 
-		// 32 KiB payload
 		let payload: Vec<u8> = (0u8..=255).cycle().take(32 * 1024).collect();
 		local.write_all(&payload).await.expect("Write failed");
 
@@ -399,10 +376,6 @@ mod tests {
 		assert!(read_result.unwrap().is_ok(), "read_exact failed for large payload");
 		assert_eq!(received, payload, "Large payload echo must match");
 	}
-
-	// =========================================================================
-	// PR2 verification: per-fragment INFO-level logs must stay demoted
-	// =========================================================================
 
 	/// PR2 regression test for log-level noise on the UDP fragmentation path.
 	///
@@ -435,7 +408,7 @@ mod tests {
 	/// every event regardless of target.
 	#[tracing_test::traced_test]
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-	async fn test_pr2_fragmented_udp_emits_no_info_log_noise() {
+	async fn test_fragmented_udp_emits_no_info_log_noise() {
 		// (1) Spin up a UDP echo server on loopback.
 		let echo = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let echo_addr = echo.local_addr().unwrap();
@@ -515,7 +488,7 @@ mod tests {
 		// filters captured lines by ` {span_name}:` (the test function name);
 		// spawned tasks instrumented with `.in_current_span()` keep the
 		// test's span as the current span, so their pre-formatted lines DO
-		// include `test_pr2_..._noise:` and pass the filter.
+		// include `test_..._noise:` and pass the filter.
 		logs_assert(|lines: &[&str]| {
 			for forbidden in ["Fragmentation params", "Sending fragment "] {
 				if let Some(bad) = lines.iter().find(|l| l.contains(" INFO ") && l.contains(forbidden)) {

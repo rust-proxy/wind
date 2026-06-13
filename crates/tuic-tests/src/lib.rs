@@ -129,7 +129,6 @@ pub async fn start_quiche_pair(server_port: u16, socks_port: u16, zero_rtt: bool
 	format!("127.0.0.1:{socks_port}")
 }
 
-// Helper function to create and run a TCP echo server
 pub async fn run_tcp_echo_server(bind_addr: &str, test_name: &str) -> (tokio::task::JoinHandle<()>, std::net::SocketAddr) {
 	use tokio::{
 		io::{AsyncReadExt, AsyncWriteExt},
@@ -182,7 +181,6 @@ pub async fn run_tcp_echo_server(bind_addr: &str, test_name: &str) -> (tokio::ta
 	(echo_task, echo_addr)
 }
 
-// Helper function to create and run a UDP echo server
 pub async fn run_udp_echo_server(
 	bind_addr: &str,
 	test_name: &str,
@@ -226,7 +224,6 @@ pub async fn run_udp_echo_server(
 	(echo_task, echo_addr, echo_server)
 }
 
-// Helper function to test TCP connection through SOCKS5
 pub async fn test_tcp_through_socks5(
 	socks5_addr: &str,
 	target_addr: std::net::SocketAddr,
@@ -299,7 +296,6 @@ pub async fn test_tcp_through_socks5(
 	}
 }
 
-// Helper function to test UDP connection through SOCKS5
 pub async fn test_udp_through_socks5(
 	socks5_addr: &str,
 	target_addr: std::net::SocketAddr,
@@ -388,7 +384,6 @@ pub async fn test_udp_through_socks5(
 	}
 }
 
-// Helper function to create and run a SOCKS5 server
 // This server can be used as a proxy for testing TUIC client proxy
 // configuration
 pub async fn run_socks5_server(

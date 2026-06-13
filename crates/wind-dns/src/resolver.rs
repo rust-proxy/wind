@@ -112,8 +112,6 @@ pub(crate) fn build(cfg: &DnsConfig) -> Result<Option<HickoryResolver>> {
 	Ok(Some(HickoryResolver::new(resolver, cfg.stack_prefer)))
 }
 
-/// Factory: given a resolved IP and optional SNI, produce a
-/// [`NameServerConfig`].
 type MakeNameServer = fn(IpAddr, Option<String>) -> NameServerConfig;
 
 /// Parse a DNS server URL or bare address into a [`NameServerConfig`].

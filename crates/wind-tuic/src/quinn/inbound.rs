@@ -302,7 +302,6 @@ async fn handle_connection<C: InboundCallback>(
 		conn
 	};
 
-	// Hand the established connection to the shared, backend-agnostic core.
 	crate::server::serve_connection(
 		QuinnConnection::new(conn),
 		remote_addr,

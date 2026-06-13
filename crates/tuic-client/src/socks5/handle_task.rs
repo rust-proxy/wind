@@ -109,7 +109,6 @@ impl Server {
 					}
 				};
 
-				// Spawn wind outbound UDP handler
 				let outbound_handle = tokio::spawn(async move {
 					match get_connection() {
 						Some(adapter) => {
@@ -149,7 +148,6 @@ impl Server {
 				// session is gone either way.
 				let _ = UDP_SESSIONS.get().unwrap().write().await.remove(&assoc_id);
 
-				// Cancel the outbound UDP handler
 				outbound_handle.abort();
 			}
 			Err(err) => {

@@ -183,7 +183,6 @@ async fn run_udp_forwarder(entry: UdpForward, cancel: CancellationToken) {
 					let pkt = Bytes::copy_from_slice(&buf[..n]);
 					let target = TargetAddr::Domain(entry.remote.0.clone(), entry.remote.1);
 
-					// Look up or create the session for this source.
 					let session = sessions.entry(src_addr).or_insert_with(|| {
 						let assoc_id = next_assoc_id();
 						let socket_for_reply = socket.clone();

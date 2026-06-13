@@ -97,10 +97,6 @@ fn stream_err(e: QuicError) -> StreamErrorIncoming {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Recv stream — `PrefixedRecv` *is* the adapter's recv stream
-// ---------------------------------------------------------------------------
-
 /// [`PrefixedRecv`] doubles as the adapter's `h3::quic::RecvStream`: it already
 /// owns the (possibly empty) replayed prefix plus the backend recv stream, so
 /// no separate wrapper type is needed. Fresh accepted streams are wrapped with
@@ -134,10 +130,6 @@ impl<R: QuicRecvStream> RecvStream for PrefixedRecv<R> {
 		stream_id(self.id())
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Send stream
-// ---------------------------------------------------------------------------
 
 /// `h3::quic::SendStream` over the backend's send stream.
 pub struct H3Send<C: QuicConnection> {
@@ -217,10 +209,6 @@ impl<C: QuicConnection> SendStream<Bytes> for H3Send<C> {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Bidi stream (request streams)
-// ---------------------------------------------------------------------------
-
 /// `h3::quic::BidiStream` joining an [`H3Send`] and a [`PrefixedRecv`].
 pub struct H3Bidi<C: QuicConnection> {
 	send: H3Send<C>,
@@ -281,10 +269,6 @@ fn into_bidi<C: QuicConnection>((send, recv): (C::SendStream, C::RecvStream)) ->
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Opener
-// ---------------------------------------------------------------------------
-
 /// Opens local uni/bidi streams (HTTP/3 control + QPACK streams). Produced by
 /// [`Connection::opener`].
 pub struct H3Opener<C: QuicConnection> {
@@ -309,10 +293,6 @@ impl<C: QuicConnection> OpenStreams<Bytes> for H3Opener<C> {
 		self.conn.close(0, reason);
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Connection
-// ---------------------------------------------------------------------------
 
 /// `h3::quic::Connection` over a [`QuicConnection`] handle. Accepts streams
 /// from the router's channels; opens streams directly on `conn`.
@@ -373,10 +353,6 @@ impl<C: QuicConnection> Connection<Bytes> for H3Conn<C> {
 		}
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Shared poll helpers
-// ---------------------------------------------------------------------------
 
 fn stream_id(id: u64) -> StreamId {
 	// QUIC stream ids fit the h3 `StreamId` invariant (< 2^62); fall back to 0

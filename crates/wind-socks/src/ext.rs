@@ -36,7 +36,6 @@ macro_rules! try_notify {
 }
 
 fn udp_bind_random_port(addr: Option<IpAddr>) -> io::Result<Socket> {
-	// Early return pattern: handle the Some case first
 	if let Some(addr) = addr {
 		let sock_addr = SocketAddr::new(addr, 0);
 		let socket = Socket::new(Domain::for_address(sock_addr), Type::DGRAM, None)?;
@@ -44,7 +43,6 @@ fn udp_bind_random_port(addr: Option<IpAddr>) -> io::Result<Socket> {
 		return socket.set_nonblocking(true).map(|_| socket);
 	}
 
-	// Handle None case (trying IPv6 first, then IPv4)
 	const V4_UNSPEC: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 	const V6_UNSPEC: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
 	Socket::new(Domain::IPV6, Type::DGRAM, None)
@@ -77,7 +75,6 @@ where
 
 	let reply_port = peer_addr.as_socket().ok_or(SocksServerError::Bug("addr not IP"))?.port();
 
-	// Respect the pre-populated reply IP address.
 	let mut inner = proto.reply_success(SocketAddr::new(reply_ip, reply_port)).await?;
 
 	let udp_fut = transfer(peer_sock);
