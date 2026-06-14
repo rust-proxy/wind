@@ -86,10 +86,6 @@ use std::{fmt, net::IpAddr};
 use ipnet::{IpNet, Ipv6Net};
 use regex::Regex;
 
-// ============================================================================
-// Core types
-// ============================================================================
-
 /// Network protocol type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkType {
@@ -132,7 +128,6 @@ pub struct DomainWildcardPattern {
 
 /// All supported rule types.
 pub enum RuleType {
-	// -- Domain rules --
 	/// Exact domain match (case-insensitive).
 	Domain(String),
 	/// Domain suffix match — also matches subdomains.
@@ -150,7 +145,6 @@ pub enum RuleType {
 	/// GeoSite database match — requires external lookup.
 	GeoSite(String),
 
-	// -- IP rules (destination) --
 	/// IPv4/IPv6 CIDR match on destination IP.
 	IpCidr(IpNet),
 	/// IPv6-only CIDR match on destination IP.
@@ -162,7 +156,6 @@ pub enum RuleType {
 	/// GeoIP country code match on destination IP.
 	GeoIp(String),
 
-	// -- IP rules (source) --
 	/// GeoIP match on source IP.
 	SrcGeoIp(String),
 	/// ASN match on source IP.
@@ -172,7 +165,6 @@ pub enum RuleType {
 	/// IP network suffix match on source IP.
 	SrcIpSuffix(IpNet),
 
-	// -- Port rules --
 	/// Destination port match.
 	DstPort(u16),
 	/// Destination port range match (inclusive).
@@ -182,7 +174,6 @@ pub enum RuleType {
 	/// Source port range match (inclusive).
 	SrcPortRange(u16, u16),
 
-	// -- Inbound rules --
 	/// Inbound listening port.
 	InPort(u16),
 	/// Inbound type (SOCKS / HTTP).
@@ -192,7 +183,6 @@ pub enum RuleType {
 	/// Inbound name identifier.
 	InName(String),
 
-	// -- Process rules --
 	/// Exact process executable path.
 	ProcessPath(String),
 	/// Process path matched by regex.
@@ -204,13 +194,11 @@ pub enum RuleType {
 	/// Unix UID.
 	Uid(u32),
 
-	// -- Network rules --
 	/// Network protocol match (TCP / UDP).
 	Network(NetworkType),
 	/// DSCP value match.
 	Dscp(u8),
 
-	// -- Advanced rules --
 	/// External rule set reference (placeholder — always `false`).
 	RuleSet(String),
 	/// Logical AND of sub-rules.
@@ -231,14 +219,9 @@ pub enum RuleType {
 	/// more than one.
 	SubRule(Vec<Rule>, String),
 
-	// -- Catch-all --
 	/// Matches every connection.
 	Match,
 }
-
-// ============================================================================
-// MatchContext
-// ============================================================================
 
 pub type GeoIpLookup<'a> = &'a dyn Fn(&str, IpAddr) -> bool;
 pub type AsnLookup<'a> = &'a dyn Fn(u32, IpAddr) -> bool;
@@ -250,24 +233,20 @@ pub type GeoSiteLookup<'a> = &'a dyn Fn(&str, &str) -> bool;
 /// default).
 #[derive(Default)]
 pub struct MatchContext<'a> {
-	// -- Connection info --
 	pub src_ip: Option<IpAddr>,
 	pub dst_ip: Option<IpAddr>,
 	pub src_port: Option<u16>,
 	pub dst_port: Option<u16>,
 	pub domain: Option<&'a str>,
 
-	// -- Network info --
 	pub network: Option<NetworkType>,
 	pub dscp: Option<u8>,
 
-	// -- Inbound info --
 	pub inbound_port: Option<u16>,
 	pub inbound_type: Option<InboundType>,
 	pub inbound_user: Option<&'a str>,
 	pub inbound_name: Option<&'a str>,
 
-	// -- Process info --
 	pub process_path: Option<&'a str>,
 	pub process_name: Option<&'a str>,
 	pub uid: Option<u32>,
@@ -279,7 +258,6 @@ pub struct MatchContext<'a> {
 }
 
 // Manual impls because the function-pointer fields prevent derive.
-
 impl<'a> Clone for MatchContext<'a> {
 	fn clone(&self) -> Self {
 		Self {
@@ -328,15 +306,10 @@ impl fmt::Debug for MatchContext<'_> {
 	}
 }
 
-// ============================================================================
-// Matching
-// ============================================================================
-
 impl Rule {
 	/// Returns `true` if this rule matches the given context.
 	pub fn matches(&self, ctx: &MatchContext) -> bool {
 		match &self.rule_type {
-			// -- Domain --
 			RuleType::Domain(d) => ctx.domain.is_some_and(|h| h.eq_ignore_ascii_case(d)),
 
 			// `suffix` and `kw` are already lowercased at parse time
@@ -363,7 +336,6 @@ impl Rule {
 				.and_then(|d| ctx.geosite_lookup.map(|f| f(site, d)))
 				.unwrap_or(false),
 
-			// -- IP (destination) --
 			RuleType::IpCidr(net) => ctx.dst_ip.is_some_and(|ip| net.contains(&ip)),
 
 			RuleType::IpCidr6(net) => ctx.dst_ip.is_some_and(|ip| match ip {
@@ -380,7 +352,6 @@ impl Rule {
 				.and_then(|ip| ctx.geoip_lookup.map(|f| f(country, ip)))
 				.unwrap_or(false),
 
-			// -- IP (source) --
 			RuleType::SrcGeoIp(country) => ctx
 				.src_ip
 				.and_then(|ip| ctx.geoip_lookup.map(|f| f(country, ip)))
@@ -392,13 +363,11 @@ impl Rule {
 
 			RuleType::SrcIpSuffix(net) => ctx.src_ip.is_some_and(|ip| net.contains(&ip)),
 
-			// -- Port --
 			RuleType::DstPort(p) => ctx.dst_port.is_some_and(|dp| dp == *p),
 			RuleType::DstPortRange(lo, hi) => ctx.dst_port.is_some_and(|dp| dp >= *lo && dp <= *hi),
 			RuleType::SrcPort(p) => ctx.src_port.is_some_and(|sp| sp == *p),
 			RuleType::SrcPortRange(lo, hi) => ctx.src_port.is_some_and(|sp| sp >= *lo && sp <= *hi),
 
-			// -- Inbound --
 			RuleType::InPort(p) => ctx.inbound_port.is_some_and(|ip| ip == *p),
 
 			RuleType::InType(in_type) => ctx.inbound_type.is_some_and(|t| match in_type {
@@ -409,18 +378,15 @@ impl Rule {
 			RuleType::InUser(user) => ctx.inbound_user.is_some_and(|u| u == user),
 			RuleType::InName(name) => ctx.inbound_name.is_some_and(|n| n == name),
 
-			// -- Process --
 			RuleType::ProcessPath(path) => ctx.process_path.is_some_and(|p| p == path),
 			RuleType::ProcessPathRegex(re) => ctx.process_path.is_some_and(|p| re.is_match(p)),
 			RuleType::ProcessName(name) => ctx.process_name.is_some_and(|n| n == name),
 			RuleType::ProcessNameRegex(re) => ctx.process_name.is_some_and(|n| re.is_match(n)),
 			RuleType::Uid(uid) => ctx.uid.is_some_and(|u| u == *uid),
 
-			// -- Network --
 			RuleType::Network(n) => ctx.network.is_some_and(|nn| nn == *n),
 			RuleType::Dscp(d) => ctx.dscp.is_some_and(|dd| dd == *d),
 
-			// -- Advanced --
 			RuleType::RuleSet(_) => false, // placeholder
 			RuleType::And(rules) => rules.iter().all(|r| r.matches(ctx)),
 			RuleType::Or(rules) => rules.iter().any(|r| r.matches(ctx)),
@@ -429,7 +395,6 @@ impl Rule {
 			// "sub-rule reference by name" lookup is implemented.
 			RuleType::SubRule(rules, _) => rules.iter().all(|r| r.matches(ctx)),
 
-			// -- Catch-all --
 			RuleType::Match => true,
 		}
 	}
@@ -439,10 +404,6 @@ impl Rule {
 		self.options.iter().any(|o| o.eq_ignore_ascii_case("no-resolve"))
 	}
 }
-
-// ============================================================================
-// Parsing
-// ============================================================================
 
 /// Errors that can occur while parsing a rule string.
 #[derive(Debug, Clone, PartialEq)]
@@ -522,7 +483,6 @@ impl Rule {
 
 	fn parse_type(type_str: &str, value: &str) -> Result<RuleType, RuleParseError> {
 		match type_str.to_ascii_uppercase().as_str() {
-			// Domain rules
 			"DOMAIN" => Ok(RuleType::Domain(value.to_string())),
 			// DOMAIN-SUFFIX / DOMAIN-KEYWORD values are stored in lower-case
 			// ASCII at parse time, so the per-match hot path can compare
@@ -544,7 +504,6 @@ impl Rule {
 			}
 			"GEOSITE" => Ok(RuleType::GeoSite(value.to_string())),
 
-			// IP rules (destination)
 			"IP-CIDR" => {
 				let net = value
 					.parse::<IpNet>()
@@ -580,7 +539,6 @@ impl Rule {
 			}
 			"GEOIP" => Ok(RuleType::GeoIp(value.to_string())),
 
-			// Source IP rules
 			"SRC-GEOIP" => Ok(RuleType::SrcGeoIp(value.to_string())),
 			"SRC-IP-ASN" => {
 				let asn = value
@@ -603,11 +561,9 @@ impl Rule {
 				Ok(RuleType::SrcIpCidr(net))
 			}
 
-			// Port rules
 			"DST-PORT" => Self::parse_port_or_range(value, false),
 			"SRC-PORT" => Self::parse_port_or_range(value, true),
 
-			// Inbound rules
 			"IN-PORT" => {
 				let port = value
 					.parse::<u16>()
@@ -626,7 +582,6 @@ impl Rule {
 			"IN-USER" => Ok(RuleType::InUser(value.to_string())),
 			"IN-NAME" => Ok(RuleType::InName(value.to_string())),
 
-			// Process rules
 			"PROCESS-PATH" => Ok(RuleType::ProcessPath(value.to_string())),
 			"PROCESS-PATH-REGEX" => {
 				let re = Regex::new(value).map_err(|e| RuleParseError::InvalidRegex(e.to_string()))?;
@@ -644,7 +599,6 @@ impl Rule {
 				Ok(RuleType::Uid(uid))
 			}
 
-			// Network rules
 			"NETWORK" => match value.to_ascii_lowercase().as_str() {
 				"tcp" => Ok(RuleType::Network(NetworkType::Tcp)),
 				"udp" => Ok(RuleType::Network(NetworkType::Udp)),
@@ -657,7 +611,6 @@ impl Rule {
 				Ok(RuleType::Dscp(dscp))
 			}
 
-			// Advanced rules
 			"RULE-SET" => Ok(RuleType::RuleSet(value.to_string())),
 			// `iter().all(...)` returns true on an empty iterator, so an empty
 			// AND would silently degenerate into a catch-all MATCH. Likewise
@@ -797,10 +750,6 @@ impl Rule {
 	}
 }
 
-// ============================================================================
-// Display
-// ============================================================================
-
 impl fmt::Display for NetworkType {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
@@ -924,10 +873,6 @@ impl fmt::Debug for RuleType {
 	}
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 /// Convert a wildcard pattern (`*` = any chars, `?` = one char) into a
 /// case-insensitive anchored regex. Used at PARSE time so we don't recompile
 /// the regex on every match. Returns the compiled regex; the caller is
@@ -1008,15 +953,9 @@ fn split_top_level(s: &str) -> Vec<String> {
 	parts
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	// -- Domain rules --
 
 	#[test]
 	fn parse_domain_exact() {
@@ -1119,8 +1058,6 @@ mod tests {
 		assert!(rule.matches(&ctx));
 	}
 
-	// -- IP rules --
-
 	#[test]
 	fn parse_ip_cidr() {
 		let rule = Rule::parse("IP-CIDR,192.168.0.0/16,DIRECT").unwrap();
@@ -1187,8 +1124,6 @@ mod tests {
 		}));
 	}
 
-	// -- Port rules --
-
 	#[test]
 	fn parse_dst_port() {
 		let rule = Rule::parse("DST-PORT,443,PROXY").unwrap();
@@ -1210,8 +1145,6 @@ mod tests {
 			..Default::default()
 		}));
 	}
-
-	// -- Inbound rules --
 
 	#[test]
 	fn parse_in_port() {
@@ -1274,8 +1207,6 @@ mod tests {
 		}));
 	}
 
-	// -- Process rules --
-
 	#[test]
 	fn parse_process_name() {
 		let rule = Rule::parse("PROCESS-NAME,chrome,PROXY").unwrap();
@@ -1324,8 +1255,6 @@ mod tests {
 		}));
 	}
 
-	// -- Network rules --
-
 	#[test]
 	fn parse_network() {
 		let rule = Rule::parse("NETWORK,tcp,PROXY").unwrap();
@@ -1352,15 +1281,11 @@ mod tests {
 		}));
 	}
 
-	// -- Match --
-
 	#[test]
 	fn parse_match_all() {
 		let rule = Rule::parse("MATCH,FALLBACK").unwrap();
 		assert!(rule.matches(&MatchContext::default()));
 	}
-
-	// -- Options --
 
 	#[test]
 	fn parse_with_options() {
@@ -1368,8 +1293,6 @@ mod tests {
 		assert!(rule.no_resolve());
 		assert_eq!(rule.options, vec!["no-resolve"]);
 	}
-
-	// -- Advanced: AND / OR / NOT --
 
 	#[test]
 	fn parse_and_rule() {
@@ -1423,8 +1346,6 @@ mod tests {
 		}));
 	}
 
-	// -- Multi-line parsing --
-
 	#[test]
 	fn parse_rules_multiline() {
 		let rules = Rule::parse_rules(
@@ -1440,16 +1361,12 @@ mod tests {
 		assert!(rules.iter().all(Result::is_ok));
 	}
 
-	// -- Display round-trip --
-
 	#[test]
 	fn display_round_trip() {
 		let input = "DOMAIN-SUFFIX,google.com,PROXY";
 		let rule = Rule::parse(input).unwrap();
 		assert_eq!(rule.to_string(), input);
 	}
-
-	// -- Error cases --
 
 	#[test]
 	fn unknown_rule_type() {
@@ -1477,8 +1394,6 @@ mod tests {
 			RuleParseError::EmptyOrComment
 		));
 	}
-
-	// -- Port range rules --
 
 	#[test]
 	fn parse_dst_port_range() {
@@ -1526,8 +1441,6 @@ mod tests {
 		let rule2 = Rule::parse("SRC-PORT,100-200,DIRECT").unwrap();
 		assert_eq!(rule2.to_string(), "SRC-PORT,100-200,DIRECT");
 	}
-
-	// -- Source IP rules --
 
 	#[test]
 	fn parse_src_ip_suffix() {
@@ -1578,8 +1491,6 @@ mod tests {
 		assert!(rule.matches(&ctx));
 	}
 
-	// -- Process rules (regex) --
-
 	#[test]
 	fn parse_process_path_regex() {
 		let rule = Rule::parse("PROCESS-PATH-REGEX,/usr/.*/curl,DIRECT").unwrap();
@@ -1592,8 +1503,6 @@ mod tests {
 			..Default::default()
 		}));
 	}
-
-	// -- GeoIp with lookup --
 
 	#[test]
 	fn parse_geoip_with_lookup() {
@@ -1618,8 +1527,6 @@ mod tests {
 		};
 		assert!(rule.matches(&ctx));
 	}
-
-	// -- Compound rules edge cases --
 
 	#[test]
 	fn nested_and_or_compound() {
@@ -1654,15 +1561,11 @@ mod tests {
 		}));
 	}
 
-	// -- RuleSet and SubRule (placeholders) --
-
 	#[test]
 	fn rule_set_always_false() {
 		let rule = Rule::parse("RULE-SET,my-set,PROXY").unwrap();
 		assert!(!rule.matches(&MatchContext::default()));
 	}
-
-	// -- Case sensitivity --
 
 	#[test]
 	fn domain_case_insensitive() {
@@ -1686,8 +1589,6 @@ mod tests {
 		}));
 	}
 
-	// -- None field behavior --
-
 	#[test]
 	fn none_fields_never_match_specific_rules() {
 		let rule = Rule::parse("DOMAIN,example.com,REJECT").unwrap();
@@ -1703,8 +1604,6 @@ mod tests {
 		assert!(!rule.matches(&MatchContext::default())); // network is None
 	}
 
-	// -- Display for compound rules --
-
 	#[test]
 	fn display_and_rule() {
 		let rule = Rule::parse("AND,((NETWORK,tcp),(DST-PORT,443)),PROXY").unwrap();
@@ -1714,8 +1613,6 @@ mod tests {
 		assert!(s.contains("DST-PORT,443"));
 		assert!(s.ends_with(",PROXY"));
 	}
-
-	// -- Error cases --
 
 	#[test]
 	fn invalid_regex() {
@@ -1748,13 +1645,13 @@ mod tests {
 	/// PR4-C: an empty AND would silently become MATCH (every closure over an
 	/// empty `Vec` returns true); empty OR would silently become a never-match.
 	#[test]
-	fn pr4_empty_and_rejected_at_parse() {
+	fn empty_and_rejected_at_parse() {
 		let err = Rule::parse("AND,(),TARGET").unwrap_err();
 		assert!(matches!(err, RuleParseError::InvalidFormat(_)));
 	}
 
 	#[test]
-	fn pr4_empty_or_rejected_at_parse() {
+	fn empty_or_rejected_at_parse() {
 		let err = Rule::parse("OR,(),TARGET").unwrap_err();
 		assert!(matches!(err, RuleParseError::InvalidFormat(_)));
 	}
@@ -1762,7 +1659,7 @@ mod tests {
 	/// PR4-H: a reversed port range matches nothing because `port >= lo` and
 	/// `port <= hi` cannot both hold. Catch the misconfiguration at parse.
 	#[test]
-	fn pr4_reversed_port_range_rejected() {
+	fn reversed_port_range_rejected() {
 		let err = Rule::parse("DST-PORT,9000-1000,TARGET").unwrap_err();
 		assert!(matches!(err, RuleParseError::InvalidFormat(_)));
 		let err = Rule::parse("SRC-PORT,9000-1000,TARGET").unwrap_err();
@@ -1774,7 +1671,7 @@ mod tests {
 	/// into the IP-CIDR variant so the two keywords have provably-identical
 	/// runtime behaviour.
 	#[test]
-	fn pr4_ip_suffix_parses_as_ip_cidr() {
+	fn ip_suffix_parses_as_ip_cidr() {
 		let r = Rule::parse("IP-SUFFIX,10.0.0.0/24,PROXY").unwrap();
 		assert!(matches!(r.rule_type, RuleType::IpCidr(_)));
 		let r = Rule::parse("SRC-IP-SUFFIX,10.0.0.0/24,PROXY").unwrap();
@@ -1786,7 +1683,7 @@ mod tests {
 	/// error instead of being deferred to every match call (where it used to
 	/// silently fail-closed via `Regex::new(...).is_ok_and(...)`).
 	#[test]
-	fn pr4_wildcard_compiles_at_parse() {
+	fn wildcard_compiles_at_parse() {
 		let r = Rule::parse("DOMAIN-WILDCARD,*.example.com,PROXY").unwrap();
 		match r.rule_type {
 			RuleType::DomainWildcard(p) => {
@@ -1803,7 +1700,7 @@ mod tests {
 	/// case at parse time so the per-match path can compare without
 	/// allocating.
 	#[test]
-	fn pr4_domain_suffix_keyword_lowercased() {
+	fn domain_suffix_keyword_lowercased() {
 		let r = Rule::parse("DOMAIN-SUFFIX,Example.COM,DIRECT").unwrap();
 		match r.rule_type {
 			RuleType::DomainSuffix(s) => assert_eq!(s, "example.com"),
@@ -1820,7 +1717,7 @@ mod tests {
 	/// the rest. After the fix it carries every parsed condition AND its
 	/// `Display` form parses back to the same shape.
 	#[test]
-	fn pr4_sub_rule_preserves_all_children() {
+	fn sub_rule_preserves_all_children() {
 		let r = Rule::parse("SUB-RULE,((NETWORK,tcp),(DST-PORT,443)),PROXY").unwrap();
 		match &r.rule_type {
 			RuleType::SubRule(rules, _) => assert_eq!(rules.len(), 2),

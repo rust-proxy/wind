@@ -1,6 +1,3 @@
-// Integration tests for TUIC protocol
-// Tests the encode/decode round-trip for all protocol types
-
 use std::{
 	net::{Ipv4Addr, Ipv6Addr},
 	time::Duration,
@@ -18,21 +15,18 @@ use tuic_tests::{
 use uuid::Uuid;
 use wind_tuic::proto::{Address, AddressCodec, CmdCodec, CmdType, Command, Header, HeaderCodec};
 
-// Helper function to encode and decode a header
 fn roundtrip_header(header: Header) -> Header {
 	let mut buf = BytesMut::new();
 	HeaderCodec.encode(header, &mut buf).unwrap();
 	HeaderCodec.decode(&mut buf).unwrap().unwrap()
 }
 
-// Helper function to encode and decode a command
 fn roundtrip_command(cmd_type: CmdType, command: Command) -> Command {
 	let mut buf = BytesMut::new();
 	CmdCodec(cmd_type).encode(command, &mut buf).unwrap();
 	CmdCodec(cmd_type).decode(&mut buf).unwrap().unwrap()
 }
 
-// Helper function to encode and decode an address
 fn roundtrip_address(addr: Address) -> Address {
 	let mut buf = BytesMut::new();
 	AddressCodec.encode(addr, &mut buf).unwrap();
@@ -41,9 +35,6 @@ fn roundtrip_address(addr: Address) -> Address {
 
 #[test]
 fn test_full_protocol_roundtrip() {
-	// Test all header and command types can be encoded and decoded correctly
-
-	// 1. Authenticate
 	let uuid = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
 	let token = [42u8; 32];
 	let cmd = Command::Auth { uuid, token };
@@ -63,7 +54,6 @@ fn test_full_protocol_roundtrip() {
 		_ => panic!("Wrong command type"),
 	}
 
-	// 2. Connect with different address types
 	let addresses: Vec<Address> = vec![
 		Address::None,
 		Address::Domain("example.com".to_string(), 443),
@@ -82,7 +72,6 @@ fn test_full_protocol_roundtrip() {
 		assert_eq!(decoded_addr, addr);
 	}
 
-	// 3. Packet
 	let cmd = Command::Packet {
 		assoc_id: 123,
 		pkt_id: 456,
@@ -116,7 +105,6 @@ fn test_full_protocol_roundtrip() {
 	let decoded_addr = roundtrip_address(addr.clone());
 	assert_eq!(decoded_addr, addr);
 
-	// 4. Dissociate
 	let cmd = Command::Dissociate { assoc_id: 999 };
 
 	let decoded_header = roundtrip_header(Header::new(CmdType::Dissociate));
@@ -130,7 +118,6 @@ fn test_full_protocol_roundtrip() {
 		_ => panic!("Wrong command type"),
 	}
 
-	// 5. Heartbeat
 	let decoded_header = roundtrip_header(Header::new(CmdType::Heartbeat));
 	assert_eq!(decoded_header.command, CmdType::Heartbeat);
 
@@ -173,7 +160,6 @@ fn test_fragmented_udp_packets() {
 
 #[test]
 fn test_edge_case_values() {
-	// Test edge case values for Packet command
 	let test_cases: Vec<(u16, u16, u8, u8, u16)> = vec![
 		(0, 0, 1, 0, 0),                                      // Minimum values
 		(u16::MAX, u16::MAX, u8::MAX, u8::MAX - 1, u16::MAX), // Maximum values
@@ -212,7 +198,6 @@ fn test_edge_case_values() {
 
 #[test]
 fn test_various_domain_names() {
-	// Test various domain name lengths and formats
 	let binding = "a".repeat(63);
 	let domains = vec![
 		"a.b",                             // Short domain
@@ -253,7 +238,6 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 	#[cfg(feature = "ring")]
 	let _ = rustls::crypto::ring::default_provider().install_default();
 
-	// Create a minimal server configuration for testing
 	// IMPORTANT: We need to configure ACL to allow localhost connections for
 	// testing
 	let server_config = tuic_server::Config {
@@ -289,10 +273,8 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 		..Default::default()
 	};
 
-	// Spawn server in background
 	info!("[Integration Test] Starting TUIC server on 127.0.0.1:8443...");
 	let server_handle = tokio::spawn(async move {
-		// Run server with a timeout
 		match timeout(Duration::from_secs(10), tuic_server::run(server_config)).await {
 			Ok(Ok(())) => info!("[Integration Test] Server completed successfully"),
 			Ok(Err(e)) => error!("[Integration Test] Server error: {}", e),
@@ -305,7 +287,6 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 	tokio::time::sleep(Duration::from_secs(1)).await;
 	info!("[Integration Test] Server should be ready now");
 
-	// Create a client configuration that connects to the test server
 	let client_config = tuic_client::Config {
 		relay: tuic_client::config::Relay {
 			server: ("127.0.0.1".to_string(), 8443),
@@ -337,7 +318,6 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 		log_level: "debug".to_string(),
 	};
 
-	// Spawn client in background with timeout
 	info!("[Integration Test] Starting TUIC client with SOCKS5 server on 127.0.0.1:1080...");
 	let client_handle = tokio::spawn(async move {
 		match timeout(Duration::from_secs(10), tuic_client::run(client_config)).await {
@@ -347,7 +327,6 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 		}
 	});
 
-	// Wait for client to establish connection and start SOCKS5 server
 	info!("[Integration Test] Waiting for client to connect and start SOCKS5 server...");
 	tokio::time::sleep(Duration::from_secs(2)).await;
 	info!("[Integration Test] SOCKS5 proxy should be ready now\n");
@@ -371,37 +350,25 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 		}
 	}
 
-	// ============================================================================
-	// Test 1: Create a local TCP echo server and test TCP relay through SOCKS5
-	// ============================================================================
 	let tcp_test = async {
 		info!("[TCP Test] Starting TCP relay test...");
 
-		// Start a local TCP echo server
 		let (echo_task, echo_addr) = run_tcp_echo_server("127.0.0.1:0", "TCP Test").await;
 
-		// Give server time to start
 		tokio::time::sleep(Duration::from_millis(200)).await;
 
-		// Test TCP connection through SOCKS5
 		let test_data = b"Hello, TUIC!";
 		test_tcp_through_socks5("127.0.0.1:1080", echo_addr, test_data, "TCP Test").await;
 
-		// Wait a bit to see if echo server gets anything
 		info!("[TCP Test] Waiting for echo server to finish...");
 		tokio::time::sleep(Duration::from_millis(500)).await;
 
-		// Clean up
 		echo_task.abort();
 		info!("[TCP Test] TCP test completed\n");
 	};
 
-	// Run the TCP test with a timeout
 	let _ = timeout(Duration::from_secs(6), tcp_test).await;
 
-	// ============================================================================
-	// Test 2: Create a local UDP echo server and test UDP relay through SOCKS5
-	// ============================================================================
 	let udp_test = async {
 		use std::net::{IpAddr, Ipv4Addr};
 
@@ -409,28 +376,20 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 		info!("[UDP Test] Starting UDP relay test...");
 		info!("[UDP Test] ========================================\n");
 
-		// Start a local UDP echo server
 		let (echo_task, echo_addr, _echo_server) = run_udp_echo_server("127.0.0.1:0", "UDP Test").await;
 
-		// Give server time to start
 		tokio::time::sleep(Duration::from_millis(100)).await;
 
-		// Test UDP connection through SOCKS5
 		let test_data = b"Hello, UDP through TUIC!";
 		let client_bind_addr = std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 		test_udp_through_socks5("127.0.0.1:1080", echo_addr, test_data, "UDP Test", client_bind_addr).await;
 
-		// Clean up
 		echo_task.abort();
 		info!("[UDP Test] UDP test completed\n");
 	};
 
-	// Run the UDP test with a timeout
 	let _ = timeout(Duration::from_secs(3), udp_test).await;
 
-	// ============================================================================
-	// Test 3: Test multiple concurrent TCP connections
-	// ============================================================================
 	let concurrent_test = async {
 		use fast_socks5::client::{Config, Socks5Stream};
 		use tokio::{
@@ -440,12 +399,10 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 
 		info!("[Concurrent Test] Starting concurrent TCP connections test...");
 
-		// Start a local TCP server
 		let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let server_addr = server.local_addr().unwrap();
 		info!("[Concurrent Test] TCP server started at: {}", server_addr);
 
-		// Spawn server task that handles multiple connections
 		let server_task = tokio::spawn(async move {
 			for i in 0..3 {
 				if let Ok((mut socket, addr)) = server.accept().await {
@@ -465,7 +422,6 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 
 		tokio::time::sleep(Duration::from_millis(100)).await;
 
-		// Create multiple concurrent connections through SOCKS5
 		info!("[Concurrent Test] Creating 3 concurrent connections through SOCKS5...");
 		let mut handles = vec![];
 		for i in 0..3 {
@@ -511,7 +467,6 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 			handles.push(handle);
 		}
 
-		// Wait for all connections to complete
 		for (i, handle) in handles.into_iter().enumerate() {
 			if let Err(e) = handle.await {
 				error!("[Concurrent Test] Connection {} task failed: {}", i, e);
@@ -523,10 +478,8 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 		info!("[Concurrent Test] Concurrent test completed\n");
 	};
 
-	// Run the concurrent test with a timeout
 	let _ = timeout(Duration::from_secs(5), concurrent_test).await;
 
-	// Clean up
 	client_handle.abort();
 	server_handle.abort();
 
@@ -561,7 +514,6 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 	info!("[IPv6 Test] Starting IPv6 Integration Test");
 	info!("[IPv6 Test] ========================================\n");
 
-	// Create server configuration using IPv6 localhost [::1]
 	let server_config = tuic_server::Config {
 		log_level: tuic_server::config::LogLevel::Debug,
 		server: "[::1]:8444".parse::<SocketAddr>()?,
@@ -605,7 +557,6 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 		..Default::default()
 	};
 
-	// Spawn IPv6 server
 	info!("[IPv6 Test] Starting TUIC server on [::1]:8444...");
 	let server_handle = tokio::spawn(async move {
 		match timeout(Duration::from_secs(10), tuic_server::run(server_config)).await {
@@ -615,12 +566,10 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 		}
 	});
 
-	// Wait for server to start
 	info!("[IPv6 Test] Waiting for server to initialize...");
 	tokio::time::sleep(Duration::from_secs(1)).await;
 	info!("[IPv6 Test] Server should be ready now");
 
-	// Create client configuration connecting to IPv6 server
 	let client_config = tuic_client::Config {
 		relay: tuic_client::config::Relay {
 			server: ("[::1]".to_string(), 8444),
@@ -661,7 +610,6 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 		log_level: "debug".to_string(),
 	};
 
-	// Spawn client with IPv6 SOCKS5 server
 	info!("[IPv6 Test] Starting TUIC client with SOCKS5 server on [::1]:1081...");
 	let client_handle = tokio::spawn(async move {
 		match timeout(Duration::from_secs(10), tuic_client::run(client_config)).await {
@@ -671,12 +619,10 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 		}
 	});
 
-	// Wait for client to connect
 	info!("[IPv6 Test] Waiting for client to connect and start SOCKS5 server...");
 	tokio::time::sleep(Duration::from_secs(2)).await;
 	info!("[IPv6 Test] SOCKS5 proxy should be ready now\n");
 
-	// Test SOCKS5 proxy connectivity on IPv6
 	use tokio::net::TcpStream;
 	info!("[IPv6 Test] Testing SOCKS5 proxy connectivity on IPv6...");
 	match TcpStream::connect("[::1]:1081").await {
@@ -691,18 +637,13 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 		}
 	}
 
-	// ============================================================================
-	// Test 1: IPv6 TCP relay through SOCKS5
-	// ============================================================================
 	let tcp_test = async {
 		info!("[IPv6 TCP Test] Starting TCP relay test on IPv6...");
 
-		// Start a local TCP echo server on IPv6
 		let (echo_task, echo_addr) = run_tcp_echo_server("[::1]:0", "IPv6 TCP Test").await;
 
 		tokio::time::sleep(Duration::from_millis(200)).await;
 
-		// Test TCP connection through SOCKS5 on IPv6
 		let test_data = b"Hello IPv6 TUIC!";
 		test_tcp_through_socks5("[::1]:1081", echo_addr, test_data, "IPv6 TCP Test").await;
 
@@ -712,20 +653,15 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 
 	let _ = timeout(Duration::from_secs(6), tcp_test).await;
 
-	// ============================================================================
-	// Test 2: IPv6 UDP relay through SOCKS5
-	// ============================================================================
 	let udp_test = async {
 		use std::net::{IpAddr, Ipv6Addr};
 
 		info!("[IPv6 UDP Test] Starting UDP relay test on IPv6...");
 
-		// Start a local UDP echo server on IPv6
 		let (echo_task, echo_addr, _echo_server) = run_udp_echo_server("[::1]:0", "IPv6 UDP Test").await;
 
 		tokio::time::sleep(Duration::from_millis(100)).await;
 
-		// Test UDP connection through SOCKS5 on IPv6
 		let test_data = b"Hello, IPv6 UDP through TUIC!";
 		let client_bind_addr = std::net::SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
 		test_udp_through_socks5("[::1]:1081", echo_addr, test_data, "IPv6 UDP Test", client_bind_addr).await;
@@ -736,7 +672,6 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 
 	let _ = timeout(Duration::from_secs(3), udp_test).await;
 
-	// Clean up
 	client_handle.abort();
 	server_handle.abort();
 
@@ -771,7 +706,6 @@ async fn test_client_proxy_configuration() -> eyre::Result<()> {
 	info!("[Proxy Config Test] Starting Proxy Configuration Test");
 	info!("[Proxy Config Test] ========================================\n");
 
-	// Create a minimal server for testing
 	let server_config = tuic_server::Config {
 		log_level: tuic_server::config::LogLevel::Debug,
 		server: "127.0.0.1:8445".parse::<SocketAddr>()?,
@@ -816,17 +750,14 @@ async fn test_client_proxy_configuration() -> eyre::Result<()> {
 
 	tokio::time::sleep(Duration::from_millis(500)).await;
 
-	// Test: Client config with proxy settings
 	info!("[Proxy Config Test] Test 1: Client with SOCKS5 proxy configuration");
 
-	// Start a real SOCKS5 proxy server for testing
 	let (socks5_handle, socks5_addr) =
 		run_socks5_server("127.0.0.1:0", "Proxy Test 1", Some("proxy_user"), Some("proxy_pass")).await;
 
 	info!("[Proxy Config Test] SOCKS5 proxy started at: {}", socks5_addr);
 	tokio::time::sleep(Duration::from_millis(200)).await;
 
-	// Build config directly
 	let config = tuic_client::config::Config {
 		relay: tuic_client::config::Relay {
 			server: ("127.0.0.1".to_string(), 8445),
@@ -872,7 +803,6 @@ async fn test_client_proxy_configuration() -> eyre::Result<()> {
 	let (echo_handle, echo_addr) = run_tcp_echo_server("127.0.0.1:0", "Proxy Test 1 Echo").await;
 	tokio::time::sleep(Duration::from_millis(200)).await;
 
-	// Try to connect to echo server through SOCKS5 proxy
 	info!("[Proxy Config Test] Testing connection through SOCKS5 proxy to echo server...");
 	let test_data = b"Hello through SOCKS5 proxy!";
 	let success = test_tcp_through_socks5(local_socks, echo_addr, test_data, "Proxy Test 1").await;
@@ -883,7 +813,6 @@ async fn test_client_proxy_configuration() -> eyre::Result<()> {
 		info!("[Proxy Config Test] ⚠ Could not verify SOCKS5 proxy connectivity (may be expected)");
 	}
 
-	// Clean up
 	echo_handle.abort();
 	client_handle.abort();
 	socks5_handle.abort();

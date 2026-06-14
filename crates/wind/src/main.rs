@@ -13,10 +13,6 @@ use wind_tuic::quinn::outbound::TuicOutbound;
 
 use crate::conf::runtime::{InboundOpts, InboundRuntime, OutboundOpts, OutboundRuntime};
 
-// ============================================================================
-// Inbound enum — dyn-compatible wrapper over AbstractInbound
-// ============================================================================
-
 enum InboundHandle {
 	Socks(SocksInbound),
 }
@@ -29,10 +25,7 @@ impl AbstractInbound for InboundHandle {
 	}
 }
 
-// ============================================================================
 // Router — always forwards to the first outbound (TODO: ACL rules)
-// ============================================================================
-
 struct DefaultRouter {
 	default: String,
 }
@@ -47,10 +40,6 @@ impl Router for DefaultRouter {
 	}
 }
 
-// ============================================================================
-// Manager — one inbound + shared dispatcher
-// ============================================================================
-
 struct Manager<R: Router> {
 	inbound: InboundHandle,
 	dispatcher: Arc<Dispatcher<R>>,
@@ -63,19 +52,11 @@ impl<R: Router> Manager<R> {
 	}
 }
 
-// ============================================================================
-// Modules
-// ============================================================================
-
 mod util;
 use crate::{cli::Cli, conf::persistent::PersistentConfig};
 mod cli;
 mod conf;
 mod log;
-
-// ============================================================================
-// main
-// ============================================================================
 
 // curl --socks5 127.0.0.1:6666 https://www.bing.com
 #[tokio::main]
@@ -130,11 +111,9 @@ async fn main() -> eyre::Result<()> {
 	let runtime_config = conf::runtime::Config::from_persist(persistent_config);
 	let ctx = Arc::new(AppContext::default());
 
-	// ── Build outbounds & dispatcher ───────────────────────────────────
 	let dispatcher = build_dispatcher(runtime_config.outbounds, ctx.clone()).await?;
 	let dispatcher = Arc::new(dispatcher);
 
-	// ── Start inbounds ─────────────────────────────────────────────────
 	for ib in runtime_config.inbounds {
 		start_inbound(ib, &dispatcher, &ctx).await?;
 	}
@@ -148,10 +127,6 @@ async fn main() -> eyre::Result<()> {
 	info!(target: "wind_main", "Shutdown complete");
 	Ok(())
 }
-
-// ============================================================================
-// Boot helpers
-// ============================================================================
 
 async fn build_dispatcher(outbounds: Vec<OutboundRuntime>, ctx: Arc<AppContext>) -> eyre::Result<Dispatcher<DefaultRouter>> {
 	let default_tag = outbounds.first().map(|o| o.tag.clone()).unwrap_or_else(|| "default".into());

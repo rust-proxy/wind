@@ -130,10 +130,6 @@ pub enum AclPortSpec {
 	Range(u16, u16),
 }
 
-// ============================================================================
-// Matching Logic
-// ============================================================================
-
 #[cfg(test)]
 impl AclRule {
 	/// Returns `true` if the supplied socket address, port and transport
@@ -216,10 +212,6 @@ impl AclPortEntry {
 		}
 	}
 }
-
-// ============================================================================
-// Parsing Functions
-// ============================================================================
 
 /// Parse a single ACL rule from string format
 pub(crate) fn parse_acl_rule(rule: &str) -> eyre::Result<AclRule> {
@@ -377,10 +369,6 @@ fn parse_multiline_acl_string(input: &str) -> eyre::Result<Vec<AclRule>> {
 		.map(|(i, line)| parse_acl_rule(line).map_err(|e| eyre::eyre!("Line {}: {}", i + 1, e)))
 		.collect()
 }
-
-// ============================================================================
-// Serde Deserialize Implementations
-// ============================================================================
 
 impl<'de> Deserialize<'de> for AclAddress {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -550,10 +538,6 @@ where
 	deserializer.deserialize_any(AclVisitor)
 }
 
-// ============================================================================
-// ACL → Metacubex Rule conversion
-// ============================================================================
-
 /// Convert a list of legacy ACL rules into Metacubex-style [`wrule::Rule`]s.
 ///
 /// Each [`AclRule`] may expand to *multiple* Metacubex rules because:
@@ -571,13 +555,10 @@ pub fn acl_to_rules(acl: &[AclRule]) -> Vec<wrule::Rule> {
 fn acl_rule_to_rules(acl: &AclRule) -> Vec<wrule::Rule> {
 	let target = normalize_outbound(&acl.outbound);
 
-	// --- Build address-level condition(s) ---
 	let addr_rules = address_to_rule_types(&acl.addr);
 
-	// --- Build port/protocol condition(s) ---
 	let port_conds = ports_to_conditions(&acl.ports);
 
-	// --- Combine ---
 	// When there are no port conditions, one rule per address condition.
 	// When there are port conditions, AND(addr, port) for each combination.
 	if port_conds.is_empty() {
@@ -785,10 +766,6 @@ mod tests {
 	fn v6(addr: &str, port: u16) -> SocketAddr {
 		SocketAddr::new(IpAddr::V6(addr.parse::<Ipv6Addr>().unwrap()), port)
 	}
-
-	// ========================================================================
-	// Address Matching Tests
-	// ========================================================================
 
 	#[tokio::test]
 	async fn ip_exact_match() {
@@ -1039,10 +1016,6 @@ mod tests {
 		assert!(!rule.matching(v6("2001:db8::1", 80), 80, true).await);
 	}
 
-	// ========================================================================
-	// Port Matching Tests
-	// ========================================================================
-
 	#[tokio::test]
 	async fn ports_none_matches_everything() {
 		let rule = AclRule {
@@ -1266,10 +1239,6 @@ mod tests {
 		assert!(!rule.matching(v4("1.2.3.4", 5101), 5101, false).await);
 	}
 
-	// ========================================================================
-	// Parsing Tests
-	// ========================================================================
-
 	#[tokio::test]
 	async fn parse_simple_rule() -> eyre::Result<()> {
 		let rule_str = "allow 192.168.1.0/24 tcp/443,udp/53";
@@ -1418,10 +1387,6 @@ block 10.0.0.0/8 udp/53
 		Ok(())
 	}
 
-	// ========================================================================
-	// Display Tests
-	// ========================================================================
-
 	#[tokio::test]
 	async fn display_acl_rule() {
 		let rule = AclRule {
@@ -1500,10 +1465,6 @@ block 10.0.0.0/8 udp/53
 
 		assert_eq!(ports.to_string(), "tcp/80,udp/53");
 	}
-
-	// ========================================================================
-	// Deserialization Tests
-	// ========================================================================
 
 	#[tokio::test]
 	async fn deserialize_address_ip() -> eyre::Result<()> {
@@ -1710,10 +1671,6 @@ addr = "private"
 		assert_eq!(config.acl[2].addr, AclAddress::Private);
 		Ok(())
 	}
-
-	// ========================================================================
-	// ACL → Metacubex Conversion Tests
-	// ========================================================================
 
 	#[test]
 	fn convert_ip_acl_to_rule() {
@@ -2127,7 +2084,7 @@ addr = "private"
 	/// tried first; `ipnet` accepts `/32` for IPv6 too and silently returned
 	/// the network `2001:db8::/32`, expanding the ACL by ~96 bits.
 	#[test]
-	fn pr4_acl_ipv6_address_yields_128_host_route() {
+	fn acl_ipv6_address_yields_128_host_route() {
 		let acl = AclRule {
 			outbound: "direct".into(),
 			addr: AclAddress::Ip("2001:db8::1".into()),
@@ -2154,7 +2111,7 @@ addr = "private"
 
 	/// IPv4 case stays correct.
 	#[test]
-	fn pr4_acl_ipv4_address_yields_32_host_route() {
+	fn acl_ipv4_address_yields_32_host_route() {
 		let acl = AclRule {
 			outbound: "direct".into(),
 			addr: AclAddress::Ip("10.0.0.5".into()),
@@ -2178,7 +2135,7 @@ addr = "private"
 	/// of falling back to `0.0.0.0/32`, which previously turned bad data into
 	/// a silently "matches nothing" rule that hid the configuration error.
 	#[test]
-	fn pr4_acl_malformed_ip_drops_rule() {
+	fn acl_malformed_ip_drops_rule() {
 		let acl = AclRule {
 			outbound: "direct".into(),
 			addr: AclAddress::Ip("not-an-ip".into()),
@@ -2195,14 +2152,14 @@ addr = "private"
 	// ------------------------------------------------------------------
 
 	#[test]
-	fn pr5_format_protocol_zero_alloc_output() {
+	fn format_protocol_zero_alloc_output() {
 		assert_eq!(super::format_protocol(&Some(super::AclProtocol::Tcp)), "tcp/");
 		assert_eq!(super::format_protocol(&Some(super::AclProtocol::Udp)), "udp/");
 		assert_eq!(super::format_protocol(&None), "");
 	}
 
 	#[test]
-	fn pr5_format_optional_parts_display() {
+	fn format_optional_parts_display() {
 		// Empty case — no ports + no hijack ⇒ empty Display.
 		let s = super::format_optional_parts(&None, &None).to_string();
 		assert_eq!(s, "");

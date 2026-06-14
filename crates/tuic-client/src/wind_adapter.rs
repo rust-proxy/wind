@@ -11,7 +11,6 @@ use wind_tuic::quinn::outbound::{TuicOutbound, TuicOutboundOpts};
 
 use crate::config::Relay;
 
-// Global wind-tuic connection
 static WIND_CONNECTION: OnceCell<TuicOutboundAdapter> = OnceCell::new();
 
 /// Wind-tuic outbound wrapper for tuic-client
@@ -21,11 +20,9 @@ pub struct TuicOutboundAdapter {
 
 impl TuicOutboundAdapter {
 	pub async fn new(ctx: Arc<AppContext>, relay: Relay) -> eyre::Result<Self> {
-		// Parse server address
 		let server_addr = if let Some(ip) = relay.ip {
 			SocketAddr::new(ip, relay.server.1)
 		} else {
-			// Resolve domain
 			let addrs = tokio::net::lookup_host(format!("{}:{}", relay.server.0, relay.server.1)).await?;
 			addrs
 				.into_iter()
@@ -33,7 +30,6 @@ impl TuicOutboundAdapter {
 				.ok_or_else(|| eyre::eyre!("Failed to resolve server address"))?
 		};
 
-		// Convert password to Arc<[u8]>
 		let password: Arc<[u8]> = relay.password.clone();
 
 		// Pick the SNI to send during TLS handshake.
@@ -66,7 +62,6 @@ impl TuicOutboundAdapter {
 			}
 		};
 
-		// Create wind-tuic outbound options
 		let opts = TuicOutboundOpts {
 			peer_addr: server_addr,
 			sni,
@@ -83,10 +78,8 @@ impl TuicOutboundAdapter {
 				.collect(),
 		};
 
-		// Create outbound
 		let outbound: TuicOutbound = TuicOutbound::new(ctx, opts).await?;
 
-		// Start polling
 		outbound.start_poll().await?;
 
 		Ok(Self { outbound })

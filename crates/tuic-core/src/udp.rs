@@ -112,7 +112,7 @@ impl FragmentReassemblyBuffer {
 
 		let key = (assoc_id, pkt_id);
 
-		// Check if this is a placeholder address (used for non-first fragments)
+		// Placeholder address used for non-first fragments.
 		let is_placeholder_addr = matches!(target, TargetAddr::IPv4(ip, 0) if ip.is_unspecified());
 		// Wrap in Arc once so both the `or_insert_with` future and the
 		// post-lookup `store` path can share a reference without cloning the
@@ -120,7 +120,6 @@ impl FragmentReassemblyBuffer {
 		let target_arc = Arc::new(target);
 		let source_arc = source.map(Arc::new);
 
-		// Get or create the fragment metadata
 		let is_complete = {
 			let meta = self
 				.fragments
@@ -164,27 +163,22 @@ impl FragmentReassemblyBuffer {
 				meta.value().target.store(target_arc);
 			}
 
-			// Update timestamp
 			meta.value()
 				.last_updated
 				.store(init_time().elapsed().as_secs(), Ordering::Relaxed);
 
-			// Store this fragment
 			meta.value().fragments.insert(frag_id, payload).await;
 
-			// Ensure all pending cache operations are completed
 			meta.value().fragments.run_pending_tasks().await;
 
-			// Check if all fragments have been received
 			meta.value().fragments.entry_count() == meta.value().frag_total as u64
 		};
 
 		if is_complete {
-			// All fragments received, reassemble the packet
 			return self.reassemble_packet(key).await;
 		}
 
-		None // Not all fragments received yet
+		None
 	}
 
 	/// Clean up expired fragments.
@@ -206,7 +200,6 @@ impl FragmentReassemblyBuffer {
 	/// Reassemble a complete packet from fragments.
 	async fn reassemble_packet(&self, key: (u16, u16)) -> Option<UdpPacket> {
 		if let Some(meta) = self.fragments.remove(&key).await {
-			// Create a buffer to hold the reassembled packet
 			let mut total_size = 0;
 			for i in 0..meta.frag_total {
 				let fragment = meta.fragments.get(&i).await?;
@@ -214,13 +207,12 @@ impl FragmentReassemblyBuffer {
 			}
 			let mut buffer = BytesMut::with_capacity(total_size);
 
-			// Combine fragments in order
+			// Combine fragments in order.
 			for i in 0..meta.frag_total {
 				let fragment = meta.fragments.get(&i).await?;
 				buffer.put_slice(&fragment);
 			}
 
-			// Return the reassembled packet
 			let payload = buffer.freeze();
 			match Arc::try_unwrap(meta) {
 				Ok(m) => {
@@ -251,14 +243,12 @@ mod tests {
 
 	use super::*;
 
-	/// Test fragment reassembly buffer
 	#[test_log::test(tokio::test)]
 	async fn test_fragment_reassembly_single_fragment() {
 		let buffer = FragmentReassemblyBuffer::new();
 		let target = TargetAddr::IPv4(Ipv4Addr::new(127, 0, 0, 1), 8080);
 		let payload = Bytes::from("test payload");
 
-		// Single fragment packet
 		let result = buffer
 			.add_fragment(
 				FragmentInfo {
@@ -278,7 +268,6 @@ mod tests {
 		assert_eq!(packet.payload, payload);
 	}
 
-	/// Test fragment reassembly with multiple fragments
 	#[test_log::test(tokio::test)]
 	async fn test_fragment_reassembly_multiple_fragments() {
 		let buffer = FragmentReassemblyBuffer::new();
@@ -287,7 +276,6 @@ mod tests {
 		let frag1 = Bytes::from("Hello ");
 		let frag2 = Bytes::from("World");
 
-		// Add first fragment
 		let result1 = buffer
 			.add_fragment(
 				FragmentInfo {
@@ -303,7 +291,6 @@ mod tests {
 			.await;
 		assert!(result1.is_none(), "First fragment should not complete packet");
 
-		// Add second fragment - should complete
 		let result2 = buffer
 			.add_fragment(
 				FragmentInfo {
@@ -323,7 +310,6 @@ mod tests {
 		assert_eq!(packet.payload, Bytes::from("Hello World"));
 	}
 
-	/// Test fragment reassembly with out-of-order fragments
 	#[test_log::test(tokio::test)]
 	async fn test_fragment_reassembly_out_of_order() {
 		let buffer = FragmentReassemblyBuffer::new();
@@ -333,7 +319,6 @@ mod tests {
 		let frag1 = Bytes::from("B");
 		let frag2 = Bytes::from("C");
 
-		// Add fragments out of order: 2, 0, 1
 		assert!(
 			buffer
 				.add_fragment(
@@ -386,13 +371,11 @@ mod tests {
 		assert_eq!(packet.payload, Bytes::from("ABC"));
 	}
 
-	/// Test multiple simultaneous fragmentations
 	#[test_log::test(tokio::test)]
 	async fn test_multiple_simultaneous_fragmentations() {
 		let buffer = FragmentReassemblyBuffer::new();
 		let target = TargetAddr::IPv4(Ipv4Addr::new(127, 0, 0, 1), 8080);
 
-		// Start two different packets
 		buffer
 			.add_fragment(
 				FragmentInfo {
@@ -420,7 +403,6 @@ mod tests {
 			)
 			.await;
 
-		// Complete first packet
 		let result1 = buffer
 			.add_fragment(
 				FragmentInfo {
@@ -437,7 +419,6 @@ mod tests {
 		assert!(result1.is_some());
 		assert_eq!(result1.unwrap().payload, Bytes::from("A1A2"));
 
-		// Complete second packet
 		let result2 = buffer
 			.add_fragment(
 				FragmentInfo {
@@ -455,13 +436,11 @@ mod tests {
 		assert_eq!(result2.unwrap().payload, Bytes::from("B1B2"));
 	}
 
-	/// Test fragment cleanup (expired fragments)
 	#[test_log::test(tokio::test)]
 	async fn test_fragment_cleanup() {
 		let buffer = FragmentReassemblyBuffer::new();
 		let target = TargetAddr::IPv4(Ipv4Addr::new(127, 0, 0, 1), 8080);
 
-		// Add incomplete fragment
 		buffer
 			.add_fragment(
 				FragmentInfo {
@@ -476,20 +455,14 @@ mod tests {
 			)
 			.await;
 
-		// Wait for pending tasks to ensure the fragment is properly stored
 		buffer.fragments.run_pending_tasks().await;
 		assert_eq!(buffer.fragments.entry_count(), 1, "Should have one incomplete packet");
 
-		// Manually remove the entry to simulate cleanup
 		buffer.fragments.remove(&(1, 400)).await;
 		buffer.fragments.run_pending_tasks().await;
 
 		assert_eq!(buffer.fragments.entry_count(), 0, "Fragments should be cleaned up");
 	}
-
-	// ----------------------------------------------------------------------
-	// PR2 regression tests
-	// ----------------------------------------------------------------------
 
 	/// `frag_total == 0` and `frag_id >= frag_total` are both forbidden by
 	/// the spec, but are attacker-controlled on the wire. The buffer must

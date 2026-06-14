@@ -33,7 +33,6 @@ pub enum ProtoError {
 	// Caller should yield
 	BytesRemaining,
 	Io {
-		// #[snafu(backtrace)]
 		source: std::io::Error,
 		backtrace: Backtrace,
 	},

@@ -1,6 +1,3 @@
-// Library interface for tuic-server
-// This allows the server to be used as a library in integration tests
-
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -39,11 +36,9 @@ pub async fn run(cfg: Config) -> eyre::Result<()> {
 pub async fn run_with_cancel(cfg: Config, cancel: CancellationToken) -> eyre::Result<()> {
 	let ctx = Arc::new(AppContext { cancel, cfg });
 
-	// Create the inbound (quinn or quiche, per `backend.mode`) and adapter.
 	let (inbound, adapter) = wind_adapter::create_inbound(ctx).await?;
 
 	tracing::info!("Starting TUIC server");
 
-	// Start the server
 	inbound.listen(&adapter).await
 }

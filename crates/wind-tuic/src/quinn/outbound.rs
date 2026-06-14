@@ -108,7 +108,6 @@ impl TuicOutbound {
 	}
 
 	pub async fn start_poll(&self) -> eyre::Result<()> {
-		// Monitor cancellation token for shutdown
 		let cancel_token = self.ctx.token.child_token();
 		let connection = self.connection.clone();
 		let udp_session = self.udp_session.clone();
@@ -153,10 +152,8 @@ impl TuicOutbound {
 					}
 					Ok(mut buf) = datagram_rx.recv() => {
 						info!(target: "tuic_out", "Received datagram: {} bytes", buf.len());
-						// Process the received datagram
 						use bytes::Buf;
 
-						// Parse header, command, and address using helper functions
 						let header = match crate::proto::decode_header(&mut buf, "datagram") {
 							Ok(h) => h,
 							Err(e) => {
@@ -173,7 +170,6 @@ impl TuicOutbound {
 							}
 						};
 
-						// Process UDP packet
 						if let crate::proto::Command::Packet {
 							assoc_id,
 							pkt_id,
@@ -181,7 +177,6 @@ impl TuicOutbound {
 							frag_id,
 							size,
 						} = cmd {
-							// Parse address
 							let addr = match crate::proto::decode_address(&mut buf, "UDP packet") {
 								Ok(a) => a,
 								Err(e) => {
@@ -205,7 +200,6 @@ impl TuicOutbound {
 							}
 							let payload = buf.copy_to_bytes(size);
 
-							// Convert address to TargetAddr and handle logging
 							let (target, has_address) = match crate::proto::address_to_target(addr) {
 								Ok(t) => (t, true),
 								Err(_) => {
@@ -221,7 +215,6 @@ impl TuicOutbound {
 									assoc_id, pkt_id, frag_id + 1, frag_total, size);
 							}
 
-							// Find the corresponding UDP session
 							if let Some(tuic_udp_stream) = udp_session.get(&assoc_id).await {
 								let complete_packet = if frag_total > 1 {
 									tuic_udp_stream.process_fragment(assoc_id, pkt_id, frag_total, frag_id, payload, None, target).await
@@ -276,7 +269,6 @@ impl AbstractOutbound for TuicOutbound {
 		_dialer: Option<impl AbstractOutbound>,
 	) -> eyre::Result<()> {
 		use std::sync::atomic::Ordering;
-		// Create a cancel token for single udp session
 		let cancel = self.token.child_token();
 
 		// Allocate a u16 association id, skipping ids that already have a live
@@ -338,7 +330,6 @@ impl AbstractOutbound for TuicOutbound {
 							info!(target: "tuic_out", "Received UDP packet forward to local (assoc {:#06x})", assoc_id);
 						}
 					}
-					// send queue
 					packet = client_rx.recv() => {
 						let packet = match packet {
 							None => {
@@ -357,7 +348,6 @@ impl AbstractOutbound for TuicOutbound {
 						}
 					}
 					_ = gc_interval.tick() => {
-						// Perform garbage collection of expired fragments
 						tuic_stream.collect_garbage().await;
 					}
 				}
@@ -377,7 +367,6 @@ impl AbstractOutbound for TuicOutbound {
 			}
 		}
 
-		// Clean up the UDP association before exiting
 		if let Err(err) = self.connection.drop_udp(assoc_id).await {
 			info!(target: "tuic_out", "Error dropping UDP association {:#06x}: {}", assoc_id, err);
 		}

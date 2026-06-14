@@ -7,10 +7,6 @@ use wind_core::types::TargetAddr;
 
 use crate::proto::{BytesRemainingSnafu, DomainTooLongSnafu, ProtoError};
 
-//-----------------------------------------------------------------------------
-// Type Definitions
-//-----------------------------------------------------------------------------
-
 /// Codec for TUIC address encoding and decoding
 #[derive(Debug, Clone, Copy)]
 pub struct AddressCodec;
@@ -40,10 +36,6 @@ pub enum AddressType {
 	Other(u8),
 }
 
-//-----------------------------------------------------------------------------
-// Implementations
-//-----------------------------------------------------------------------------
-
 impl From<TargetAddr> for Address {
 	fn from(value: TargetAddr) -> Self {
 		match value {
@@ -53,10 +45,6 @@ impl From<TargetAddr> for Address {
 		}
 	}
 }
-
-//-----------------------------------------------------------------------------
-// Codec Implementation
-//-----------------------------------------------------------------------------
 
 /// Implementation according to TUIC specification:
 /// https://github.com/proxy-rs/wind/blob/main/crates/wind-tuic/SPEC.md#6-address-encoding
@@ -111,7 +99,6 @@ impl Encoder<Address> for AddressCodec {
 				dst.put_u16(port);
 			}
 			Address::Domain(domain, port) => {
-				// Validate domain length
 				if domain.len() > u8::MAX as usize {
 					return DomainTooLongSnafu { domain }.fail();
 				}
@@ -127,10 +114,6 @@ impl Encoder<Address> for AddressCodec {
 		Ok(())
 	}
 }
-
-//-----------------------------------------------------------------------------
-// Tests
-//-----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod test {
@@ -154,7 +137,6 @@ mod test {
 			Address::Domain(String::from("www.google.com"), 443),
 		];
 
-		// Test encoding
 		let mut writer = FramedWrite::new(buffer, AddressCodec);
 		let mut expect_len = 0;
 		for var in &vars {
@@ -168,7 +150,6 @@ mod test {
 			assert_eq!(writer.get_ref().len(), expect_len);
 		}
 
-		// Test decoding
 		let buffer = writer.get_ref();
 		let mut reader = FramedRead::new(buffer.as_slice(), AddressCodec);
 		for var in vars {
@@ -188,7 +169,6 @@ mod test {
 		];
 
 		for addr in vars {
-			// Encode the address
 			let buffer = Vec::with_capacity(128);
 			let mut writer = FramedWrite::new(buffer, AddressCodec);
 			writer.send(addr.clone()).await?;

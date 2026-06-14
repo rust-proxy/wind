@@ -592,7 +592,6 @@ async fn handle_bi_stream<C: QuicConnection, CB: InboundCallback>(
 
 			info!(target = %target_addr, "TCP connect");
 
-			// Join the recv/send halves into one duplex stream for the relay.
 			let stream = tokio::io::join(recv, send);
 
 			callback.handle_tcpstream(target_addr, stream).await?;
@@ -931,7 +930,6 @@ async fn read_address_exact<R: AsyncRead + Unpin>(recv: &mut R) -> eyre::Result<
 	}
 }
 
-/// Handle UDP dissociate
 async fn handle_dissociate<C: QuicConnection>(connection: &InboundCtx<C>, assoc_id: u16) -> eyre::Result<()> {
 	connection.udp_sessions.remove(&assoc_id).await;
 	info!("Dissociated UDP session {}", assoc_id);

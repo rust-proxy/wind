@@ -32,7 +32,6 @@ use tuic_tests::{
 async fn quiche_tcp_and_udp_relay() -> eyre::Result<()> {
 	let socks = start_quiche_pair(8460, 1090, false).await;
 
-	// --- TCP relay ---
 	let (tcp_echo, tcp_addr) = run_tcp_echo_server("127.0.0.1:0", "Quiche TCP").await;
 	tokio::time::sleep(Duration::from_millis(200)).await;
 	let tcp_ok = timeout(

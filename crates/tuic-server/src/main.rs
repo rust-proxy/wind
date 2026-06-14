@@ -26,7 +26,6 @@ async fn main() -> eyre::Result<()> {
 	let cfg = match parse_config(cli, env_state).await {
 		Ok(cfg) => cfg,
 		Err(err) => {
-			// Check if it's a Control error (Help or Version)
 			if let Some(control) = err.downcast_ref::<Control>() {
 				println!("{}", control);
 				process::exit(0);

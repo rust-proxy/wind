@@ -22,7 +22,7 @@ pub struct UdpStream<C: QuicConnection> {
 	connection: C,
 	assoc_id: u16,
 	receive_tx: UdpPacketTx,
-	next_pkt_id: AtomicU16, // Track packet IDs for fragmentation
+	next_pkt_id: AtomicU16,
 	// Fragment reassembly state machine (backend-agnostic, from tuic-core).
 	fragment_buffer: FragmentReassemblyBuffer,
 }
@@ -53,7 +53,6 @@ impl<C: QuicConnection> UdpStream<C> {
 			}
 		};
 
-		// Calculate header overhead for single packet sending
 		// Header (2 bytes) + Command (8 bytes) + Address
 		let header_overhead = 10 + addr_size;
 		// `saturating_sub` so that a transiently tiny `max_datagram_size`
@@ -81,7 +80,6 @@ impl<C: QuicConnection> UdpStream<C> {
 	async fn send_fragmented_packet(&self, packet: UdpPacket) -> eyre::Result<()> {
 		let payload_len = packet.payload.len();
 
-		// Calculate address size for proper fragment size calculation
 		let first_frag_addr_size = match packet.target {
 			TargetAddr::IPv4(..) => 1 + 4 + 2,
 			TargetAddr::IPv6(..) => 1 + 16 + 2,
@@ -90,7 +88,6 @@ impl<C: QuicConnection> UdpStream<C> {
 		// Subsequent fragments use Address::None which is only 1 byte
 		let subsequent_frag_addr_size = 1;
 
-		// Calculate max fragment payload size for first and subsequent fragments
 		// Header (2 bytes) + Command (8 bytes) + Address
 		let max_datagram_size = self.connection.max_datagram_size().unwrap_or(1200);
 		let first_frag_header_overhead = 10 + first_frag_addr_size;
@@ -125,7 +122,6 @@ impl<C: QuicConnection> UdpStream<C> {
 			subsequent_frag_max_payload,
 		);
 
-		// Calculate number of fragments needed
 		// First fragment can hold first_frag_max_payload bytes
 		// Each subsequent fragment can hold subsequent_frag_max_payload bytes
 		let mut remaining_payload = payload_len;
@@ -148,10 +144,8 @@ impl<C: QuicConnection> UdpStream<C> {
 		let frag_total =
 			u8::try_from(fragment_count).map_err(|_| eyre::eyre!("Fragment count {} exceeds u8 range", fragment_count))?;
 
-		// Fragment and send each piece
 		let mut offset = 0;
 		for frag_id in 0..fragment_count {
-			// Calculate fragment size based on whether it's the first fragment or not
 			let max_frag_payload = if frag_id == 0 {
 				first_frag_max_payload
 			} else {
@@ -162,7 +156,6 @@ impl<C: QuicConnection> UdpStream<C> {
 			let fragment_size = remaining.min(max_frag_payload);
 			let end = offset + fragment_size;
 
-			// Extract this fragment's payload
 			let fragment_payload = packet.payload.slice(offset..end);
 
 			// Allocate one buffer sized for header + payload so we can append
@@ -174,7 +167,6 @@ impl<C: QuicConnection> UdpStream<C> {
 			};
 			let mut buf = BytesMut::with_capacity(header_overhead + fragment_payload.len());
 
-			// Create packet command with fragmentation info
 			HeaderCodec.encode(Header::new(CmdType::Packet), &mut buf)?;
 			CmdCodec(CmdType::Packet).encode(
 				Command::Packet {
@@ -217,12 +209,10 @@ impl<C: QuicConnection> UdpStream<C> {
 				);
 			}
 
-			// Send using datagram
 			self.connection
 				.send_datagram(combined_payload)
 				.map_err(|e| eyre::eyre!("Failed to send fragment: {}", e))?;
 
-			// Update offset for next fragment
 			offset = end;
 		}
 
@@ -230,7 +220,6 @@ impl<C: QuicConnection> UdpStream<C> {
 	}
 
 	/// Process an incoming packet fragment
-	/// This would be called by the packet handler in the TUIC protocol
 	#[allow(clippy::too_many_arguments)]
 	pub async fn process_fragment(
 		&self,
@@ -272,7 +261,6 @@ impl<C: QuicConnection> UdpStream<C> {
 	}
 
 	pub async fn close(&mut self) -> Result<(), crate::Error> {
-		// Close the UDP association
 		self.connection.drop_udp(self.assoc_id).await
 	}
 }
@@ -308,7 +296,6 @@ mod tests {
 		let first_frag_max = MAX_DATAGRAM_SIZE - first_frag_overhead;
 		let subsequent_frag_max = MAX_DATAGRAM_SIZE - subsequent_frag_overhead;
 
-		// Helper function to calculate fragment count
 		let calc_frags = |payload_size: usize| -> usize {
 			if payload_size <= first_frag_max {
 				1
@@ -318,7 +305,6 @@ mod tests {
 			}
 		};
 
-		// Test various payload sizes
 		let test_cases = vec![
 			(1000, 1),                                     // Small payload, 1 fragment
 			(first_frag_max, 1),                           // Exactly max size for first fragment, 1 fragment
@@ -358,7 +344,6 @@ mod tests {
 		// First fragment + 254 subsequent fragments
 		let max_payload = first_frag_max + (subsequent_frag_max * (MAX_FRAGMENTS as usize - 1));
 
-		// Calculate fragment count
 		let remaining = max_payload - first_frag_max;
 		let fragment_count = 1 + remaining.div_ceil(subsequent_frag_max);
 

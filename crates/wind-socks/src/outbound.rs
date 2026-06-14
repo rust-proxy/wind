@@ -43,10 +43,8 @@ impl AbstractOutbound for SocksOutbound {
 			});
 
 		if let Some(via) = via {
-			// Connect to the SOCKS server via the provided outbound
 			let (local_stream, remote_stream) = tokio::io::duplex(8192);
 
-			// We need to run the via outbound handling in a background task
 			let server_addr_target = match self.opts.server_addr.ip() {
 				std::net::IpAddr::V4(v4) => TargetAddr::IPv4(v4, self.opts.server_addr.port()),
 				std::net::IpAddr::V6(v6) => TargetAddr::IPv6(v6, self.opts.server_addr.port()),
@@ -70,7 +68,6 @@ impl AbstractOutbound for SocksOutbound {
 			res_via?;
 			res_socks?;
 		} else {
-			// Direct connection to the SOCKS server
 			let tcp_stream = tokio::net::TcpStream::connect(self.opts.server_addr).await?;
 			// Disable Nagle on the hop to the SOCKS proxy (small-write latency).
 			if let Err(e) = tcp_stream.set_nodelay(true) {

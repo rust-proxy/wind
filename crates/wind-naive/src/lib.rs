@@ -38,10 +38,6 @@ fn to_cronet(cc: QuicCongestionControl) -> CronetCongestionControl {
 	}
 }
 
-// ============================================================================
-// Options
-// ============================================================================
-
 /// Configuration for the Naive outbound.
 #[derive(Clone, Debug)]
 pub struct NaiveOutboundOpts {
@@ -104,10 +100,6 @@ impl Default for NaiveOutboundOpts {
 		}
 	}
 }
-
-// ============================================================================
-// NaiveOutbound
-// ============================================================================
 
 /// An outbound that tunnels traffic through a NaiveProxy server via Cronet.
 ///
@@ -173,10 +165,6 @@ impl NaiveOutbound {
 		Ok(Self { client })
 	}
 }
-
-// ============================================================================
-// AbstractOutbound implementation
-// ============================================================================
 
 impl AbstractOutbound for NaiveOutbound {
 	async fn handle_tcp(
@@ -252,10 +240,6 @@ impl AbstractOutbound for NaiveOutbound {
 	}
 }
 
-// ============================================================================
-// UDP-over-TCP (UoT v2) bridge
-// ============================================================================
-
 /// Bridge a [`UdpStream`] across a blocking
 /// [`cronet_rs::naive_conn::NaiveConn`] using UoT v2 framing.
 ///
@@ -285,7 +269,6 @@ async fn naive_uot_bridge(
 	let mut initial = uot::encode_request(&first.target)?;
 	uot::encode_packet_into(&mut initial, &first.target, &first.payload)?;
 
-	// ── I/O thread (owns NaiveConn) ──────────────────────────────────────
 	let io_handle = std::thread::Builder::new()
 		.name("wind-naive-uot-io".into())
 		.spawn(move || {
@@ -295,7 +278,6 @@ async fn naive_uot_bridge(
 			let _ = naive.flush();
 
 			loop {
-				// Drain any queued uplink frames (non-blocking).
 				let mut wrote = false;
 				while let Ok(frame) = uplink_rx.try_recv() {
 					if naive.write_all(&frame).is_err() {
@@ -307,7 +289,6 @@ async fn naive_uot_bridge(
 					let _ = naive.flush();
 				}
 
-				// Block on one downlink frame.
 				match uot::read_packet(&mut naive) {
 					Ok((source, payload)) => {
 						let packet = UdpPacket {
@@ -332,7 +313,6 @@ async fn naive_uot_bridge(
 		})
 		.expect("spawn wind-naive-uot-io thread");
 
-	// ── Uplink: async rx → framed bytes → io thread ──────────────────────
 	let uplink = async move {
 		while let Some(packet) = rx.recv().await {
 			match uot::encode_packet(&packet.target, &packet.payload) {
@@ -348,7 +328,6 @@ async fn naive_uot_bridge(
 		}
 	};
 
-	// ── Downlink: io thread → async tx ───────────────────────────────────
 	let downlink = async move {
 		while let Some(packet) = downlink_rx.recv().await {
 			if tx.send(packet).await.is_err() {
@@ -368,10 +347,6 @@ async fn naive_uot_bridge(
 	drop(io_handle);
 	Ok(())
 }
-
-// ============================================================================
-// Async bridge — blocking NaiveConn → async I/O
-// ============================================================================
 
 /// Bridge data between a blocking [`cronet_rs::naive_conn::NaiveConn`] and a
 /// tokio [`AsyncRead`] + [`AsyncWrite`] stream.
@@ -396,14 +371,12 @@ async fn naive_async_bridge(
 		let (naive_write_tx, mut naive_write_rx) = mpsc::channel::<Vec<u8>>(NAIVE_BRIDGE_QUEUE);
 		let (naive_read_tx, mut naive_read_rx) = mpsc::channel::<Vec<u8>>(NAIVE_BRIDGE_QUEUE);
 
-		// ── I/O thread (owns NaiveConn) ──────────────────────────────
 		let io_handle = std::thread::Builder::new()
 			.name("wind-naive-io".into())
 			.spawn(move || {
 				let mut read_buf = [0u8; 65535];
 
 				loop {
-					// Drain pending writes.
 					while let Ok(data) = naive_write_rx.try_recv() {
 						if naive.write_all(&data).is_err() {
 							return;
@@ -411,7 +384,6 @@ async fn naive_async_bridge(
 						let _ = naive.flush();
 					}
 
-					// Block on a read.
 					match naive.read(&mut read_buf) {
 						Ok(0) => {
 							tracing::debug!("naive conn EOF");
@@ -434,7 +406,6 @@ async fn naive_async_bridge(
 			})
 			.expect("spawn wind-naive-io thread");
 
-		// ── Local I/O (async, select! across both directions) ────────
 		let mut local_buf = vec![0u8; 65535];
 
 		loop {
@@ -478,15 +449,11 @@ async fn naive_async_bridge(
 	.await
 }
 
-// ============================================================================
-// libcronet loader
-// ============================================================================
-
 /// Default search paths for `libcronet` (dynamic loading only).
 #[cfg(feature = "dynamic")]
 const CRONET_SEARCH_PATHS: &[&str] = &[
-	"libcronet.so",   // system LD_LIBRARY_PATH
-	"./libcronet.so", // CWD
+	"libcronet.so",
+	"./libcronet.so",
 	"/usr/local/lib/libcronet.so",
 	"/opt/cronet/libcronet.so",
 ];
@@ -546,10 +513,6 @@ fn load_cronet_dynamic(path: Option<String>) -> eyre::Result<()> {
 		paths.join(", "),
 	))
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

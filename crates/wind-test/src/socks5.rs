@@ -19,9 +19,6 @@ fn setup_crypto() {
 		_ = rustls::crypto::ring::default_provider().install_default()
 	}
 }
-// =============================================================================
-// Public API - Direct Connection Tests (no proxy)
-// =============================================================================
 
 /// Basic TCP connection test using native Tokio (without proxy)
 /// Used to verify if the target server is reachable
@@ -32,7 +29,6 @@ pub async fn test_direct_tcp(target_host: &str, target_port: u16) -> eyre::Resul
 	let mut stream = TcpStream::connect(&addr).await?;
 	println!("Connection successful!");
 
-	// Send simple HTTP GET request
 	let request = format!("GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", target_host);
 	stream.write_all(request.as_bytes()).await?;
 
@@ -52,7 +48,6 @@ pub async fn test_direct_udp(target_host: &str, target_port: u16) -> eyre::Resul
 	let socket = UdpSocket::bind(local_addr).await?;
 	socket.connect(&addr).await?;
 
-	// Send simple DNS query
 	let dns_query: Vec<u8> = vec![
 		0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65,
 		0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
@@ -68,10 +63,6 @@ pub async fn test_direct_udp(target_host: &str, target_port: u16) -> eyre::Resul
 	Ok(())
 }
 
-// =============================================================================
-// Public API - SOCKS5 Proxy Tests
-// =============================================================================
-
 pub async fn test_socks5_tcp(proxy_addr: &str, target_host: &str, target_port: u16) -> eyre::Result<()> {
 	use fast_socks5::client::Socks5Stream;
 
@@ -79,7 +70,6 @@ pub async fn test_socks5_tcp(proxy_addr: &str, target_host: &str, target_port: u
 	println!("Proxy address: {}", proxy_addr);
 	println!("Target address: {}:{}", target_host, target_port);
 
-	// Establish connection through SOCKS5 proxy (no authentication)
 	let mut stream = Socks5Stream::connect(
 		proxy_addr,
 		target_host.to_string(),
@@ -91,7 +81,6 @@ pub async fn test_socks5_tcp(proxy_addr: &str, target_host: &str, target_port: u
 
 	println!("✓ Connected to target through proxy");
 
-	// Send HTTP GET request
 	let request = format!(
 		"GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: wind-test/1.0\r\n\r\n",
 		target_host
@@ -100,13 +89,11 @@ pub async fn test_socks5_tcp(proxy_addr: &str, target_host: &str, target_port: u
 	stream.flush().await?;
 	println!("✓ HTTP request sent ({} bytes)", request.len());
 
-	// Read response
 	let mut response = Vec::new();
 	let bytes_read = stream.read_to_end(&mut response).await?;
 
 	println!("✓ Response received: {} bytes", bytes_read);
 
-	// Parse and print response headers
 	if bytes_read == 0 {
 		return Err(eyre::eyre!("TCP proxy test failed: received zero bytes from target"));
 	}
@@ -135,13 +122,11 @@ pub async fn test_socks5_udp(proxy_addr: &str, target_host: &str, target_port: u
 	println!("Proxy address: {}", proxy_addr);
 	println!("Target address: {}:{}", target_host, target_port);
 
-	// Establish TCP connection to SOCKS5 proxy for UDP association
 	let backing_socket = TcpStream::connect(proxy_addr)
 		.await
 		.map_err(|e| eyre::eyre!("Failed to connect to proxy: {}", e))?;
 	println!("✓ TCP connection established with proxy");
 
-	// Establish UDP association through SOCKS5 proxy (no authentication)
 	// Use 127.0.0.1:0 to bind to any available interface and let the system choose
 	// an available port
 	let udp_socket_addr = "127.0.0.1:0".parse::<SocketAddr>()?;
@@ -152,7 +137,6 @@ pub async fn test_socks5_udp(proxy_addr: &str, target_host: &str, target_port: u
 	println!("✓ UDP association established through proxy");
 	println!("✓ Local UDP socket bound to: {}", socket.get_ref().local_addr()?);
 
-	// Prepare DNS query packet
 	let dns_query: Vec<u8> = vec![
 		0xAB, 0xCD, // Transaction ID
 		0x01, 0x00, // Flags: standard query
@@ -167,11 +151,9 @@ pub async fn test_socks5_udp(proxy_addr: &str, target_host: &str, target_port: u
 
 	println!("✓ DNS query prepared ({} bytes)", dns_query.len());
 
-	// Send DNS query through SOCKS5 UDP
 	socket.send_to(&dns_query, (target_host, target_port)).await?;
 	println!("✓ DNS query sent through proxy");
 
-	// Receive UDP response with timeout
 	let mut buffer = vec![0u8; 1024];
 	match tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut buffer)).await {
 		Ok(Ok((len, _from_addr))) => {
@@ -225,7 +207,6 @@ pub async fn test_socks5_udp_large_packet(
 	println!("Target address: {}:{}", target_host, target_port);
 	println!("Packet size: {} bytes", packet_size);
 
-	// Calculate if this packet will require fragmentation
 	const IPV4_HEADER_SIZE: usize = 20;
 	const UDP_HEADER_SIZE: usize = 8;
 	const ETHERNET_MTU: usize = 1500;
@@ -244,13 +225,11 @@ pub async fn test_socks5_udp_large_packet(
 		);
 	}
 
-	// Establish TCP connection to SOCKS5 proxy for UDP association
 	let backing_socket = TcpStream::connect(proxy_addr)
 		.await
 		.map_err(|e| eyre::eyre!("Failed to connect to proxy: {}", e))?;
 	println!("✓ TCP connection established with proxy");
 
-	// Establish UDP association through SOCKS5 proxy
 	let udp_socket_addr = "127.0.0.1:0".parse::<SocketAddr>()?;
 	let socket = Socks5Datagram::bind(backing_socket, udp_socket_addr)
 		.await
@@ -259,10 +238,8 @@ pub async fn test_socks5_udp_large_packet(
 	println!("✓ UDP association established through proxy");
 	println!("✓ Local UDP socket bound to: {}", socket.get_ref().local_addr()?);
 
-	// Create a large test packet with a recognizable pattern
 	let mut large_packet = Vec::with_capacity(packet_size);
 
-	// Add a header to identify the packet
 	large_packet.extend_from_slice(b"WIND_FRAG_TEST");
 	large_packet.extend_from_slice(&(packet_size as u32).to_be_bytes());
 
@@ -283,7 +260,6 @@ pub async fn test_socks5_udp_large_packet(
 		checksum = checksum.wrapping_add(*byte as u32);
 	}
 
-	// Replace last 4 bytes with checksum
 	if large_packet.len() >= 4 {
 		let checksum_bytes = checksum.to_be_bytes();
 		let len = large_packet.len();
@@ -294,7 +270,6 @@ pub async fn test_socks5_udp_large_packet(
 	println!("  Pattern: repeating '0123456789ABCDEF'");
 	println!("  Checksum: 0x{:08X}", checksum);
 
-	// Send large packet through SOCKS5 UDP
 	let start_time = std::time::Instant::now();
 	socket.send_to(&large_packet, (target_host, target_port)).await?;
 	let send_duration = start_time.elapsed();
@@ -303,7 +278,6 @@ pub async fn test_socks5_udp_large_packet(
 		send_duration.as_secs_f64() * 1000.0
 	);
 
-	// Receive UDP response with extended timeout for large packets
 	let mut buffer = vec![0u8; packet_size + 1024]; // Extra buffer for potential overhead
 	match tokio::time::timeout(Duration::from_secs(10), socket.recv_from(&mut buffer)).await {
 		Ok(Ok((len, from_addr))) => {
@@ -315,18 +289,15 @@ pub async fn test_socks5_udp_large_packet(
 				receive_duration.as_secs_f64() * 1000.0
 			);
 
-			// Verify the response
 			if len == large_packet.len() {
 				let received_data = &buffer[..len];
 
-				// Check header
 				if received_data.starts_with(b"WIND_FRAG_TEST") {
 					println!("✓ Packet header verified");
 				} else {
 					return Err(eyre::eyre!("Packet header mismatch"));
 				}
 
-				// Verify checksum
 				if len >= 4 {
 					let received_checksum_bytes = &received_data[len - 4..];
 					let received_checksum = u32::from_be_bytes([
@@ -336,7 +307,6 @@ pub async fn test_socks5_udp_large_packet(
 						received_checksum_bytes[3],
 					]);
 
-					// Calculate checksum of received data (excluding the checksum itself)
 					let mut calc_checksum: u32 = 0;
 					for byte in &received_data[..len - 4] {
 						calc_checksum = calc_checksum.wrapping_add(*byte as u32);
@@ -355,7 +325,6 @@ pub async fn test_socks5_udp_large_packet(
 					}
 				}
 
-				// Compare entire packet
 				if received_data == large_packet {
 					println!("✓ Complete packet integrity verified - fragmentation handled correctly");
 				} else {
@@ -406,10 +375,6 @@ pub async fn test_socks5_udp_large_packet(
 	Ok(())
 }
 
-// =============================================================================
-// Test Infrastructure - Proxy Server Setup
-// =============================================================================
-
 /// Helper function to start the proxy server for testing
 ///
 /// This function creates a complete test proxy setup with:
@@ -435,7 +400,6 @@ async fn start_test_proxy(socks_port: u16) -> eyre::Result<(Arc<wind_core::AppCo
 
 	let ctx = Arc::new(wind_core::AppContext::default());
 
-	// Create test configuration with dynamic port
 	let config = TestConfig {
 		socks_opt: SocksInboundOpt {
 			listen_addr: format!("127.0.0.1:{}", socks_port).parse()?,
@@ -470,12 +434,10 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 
 	use wind_core::{InboundCallback, inbound::AbstractInbound, tcp::AbstractTcpStream, types::TargetAddr};
 
-	// Generate self-signed certificate for testing
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
 	let cert_der = cert.cert.der().to_vec();
 	let key_der = cert.key_pair.serialize_der();
 
-	// Setup TUIC server options
 	let tuic_opts = wind_tuic::quinn::inbound::TuicInboundOpts {
 		listen_addr: format!("127.0.0.1:{}", config.tuic_port).parse()?,
 		certificate: vec![rustls::pki_types::CertificateDer::from(cert_der)],
@@ -494,7 +456,6 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 		..Default::default()
 	};
 
-	// Define the Manager struct for handling inbound connections
 	#[derive(Clone)]
 	struct TestManager {
 		socks_inbound: Arc<wind_socks::inbound::SocksInbound>,
@@ -503,27 +464,22 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 
 	impl InboundCallback for TestManager {
 		async fn handle_tcpstream(&self, target_addr: TargetAddr, stream: impl AbstractTcpStream) -> eyre::Result<()> {
-			// Direct connection - connect directly to target
 			handle_tcp_direct(target_addr, stream).await?;
 			Ok(())
 		}
 
 		async fn handle_udpstream(&self, stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
-			// Direct UDP relay
 			handle_udp_direct(stream).await?;
 			Ok(())
 		}
 	}
 
-	// Helper function to handle TCP direct connection
 	async fn handle_tcp_direct(target_addr: TargetAddr, mut inbound_stream: impl AbstractTcpStream) -> eyre::Result<()> {
 		use tokio::io::AsyncWriteExt;
 
-		// Connect to target
 		let addr = target_addr.to_string();
 		let mut outbound_stream = tokio::net::TcpStream::connect(&addr).await?;
 
-		// Bidirectional relay
 		let (mut inbound_read, mut inbound_write) = tokio::io::split(&mut inbound_stream);
 		let (mut outbound_read, mut outbound_write) = outbound_stream.split();
 
@@ -543,7 +499,6 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 		Ok(())
 	}
 
-	// Helper function to handle UDP direct relay
 	async fn handle_udp_direct(stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
 		use std::{collections::HashMap, sync::Arc};
 
@@ -557,7 +512,6 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 			while let Some(packet) = rx.recv().await {
 				let target_key = packet.target.to_string();
 
-				// Get or create target socket
 				let target_socket = {
 					let mut sockets = target_sockets_clone.lock().await;
 					if let Some(sock) = sockets.get(&target_key) {
@@ -566,7 +520,6 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 						let new_sock = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap());
 						sockets.insert(target_key.clone(), new_sock.clone());
 
-						// Spawn receive task for this target
 						let tx_for_recv = tx.clone();
 						let target_sock_for_recv = new_sock.clone();
 						let source_addr = packet.target.clone();
@@ -593,7 +546,6 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 					}
 				};
 
-				// Send to target
 				if let Err(e) = target_socket.send_to(&packet.payload, target_key).await {
 					eprintln!("UDP relay: failed to send to target: {}", e);
 				}
@@ -604,7 +556,6 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 		Ok(())
 	}
 
-	// Initialize inbound servers
 	let tuic_inbound = Arc::new(wind_tuic::quinn::inbound::TuicInbound::new(ctx.clone(), tuic_opts));
 	let socks_inbound = Arc::new(wind_socks::inbound::SocksInbound::new(
 		config.socks_opt,
@@ -616,14 +567,12 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 		tuic_inbound: tuic_inbound.clone(),
 	});
 
-	// Start TUIC inbound listening task
 	let manager_for_tuic = manager.clone();
 	ctx.tasks.spawn(async move {
 		manager_for_tuic.tuic_inbound.listen(manager_for_tuic.as_ref()).await?;
 		eyre::Ok(())
 	});
 
-	// Start SOCKS inbound listening task
 	let manager_for_socks = manager.clone();
 	ctx.tasks.spawn(async move {
 		manager_for_socks.socks_inbound.listen(manager_for_socks.as_ref()).await?;
@@ -633,17 +582,9 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 	Ok(())
 }
 
-// =============================================================================
-// Tests Module
-// =============================================================================
-
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	// =========================================================================
-	// Basic Connection Tests
-	// =========================================================================
 
 	#[tokio::test]
 	async fn test_direct_tcp_connection() {
@@ -657,19 +598,13 @@ mod tests {
 		assert!(result.is_ok(), "Direct UDP connection failed: {:?}", result.err());
 	}
 
-	// =========================================================================
-	// Proxy Tests - Basic
-	// =========================================================================
-
 	#[tokio::test]
 	async fn test_tcp_through_proxy() {
-		// Start proxy server on a test port
 		let test_port = 16666;
 		let (ctx, _server_handle) = start_test_proxy(test_port).await.expect("Failed to start proxy");
 
 		let result = test_socks5_tcp(&format!("127.0.0.1:{}", test_port), "example.com", 80).await;
 
-		// Cleanup
 		ctx.token.cancel();
 		let _ = tokio::time::timeout(Duration::from_secs(5), ctx.tasks.wait()).await;
 
@@ -685,15 +620,12 @@ mod tests {
 
 		use tokio::net::UdpSocket;
 
-		// Start proxy server on a test port
 		let test_port = 16667;
 		let (ctx, _server_handle) = start_test_proxy(test_port).await.expect("Failed to start proxy");
 
-		// Start a local UDP echo server for testing
 		let echo_server_running = Arc::new(AtomicBool::new(true));
 		let echo_server_running_clone = echo_server_running.clone();
 
-		// Bind echo server to dynamic port
 		let echo_socket = UdpSocket::bind("127.0.0.1:0")
 			.await
 			.expect("Failed to bind echo server socket");
@@ -702,7 +634,6 @@ mod tests {
 
 		println!("✓ UDP Echo Server started on port {}", echo_port);
 
-		// Spawn the echo server task
 		let echo_task = tokio::spawn(async move {
 			let mut buffer = vec![0u8; 65536];
 			let mut packet_count = 0;
@@ -715,7 +646,6 @@ mod tests {
 							"  Echo server received packet #{}: {} bytes from {}",
 							packet_count, len, from_addr
 						);
-						// Echo the packet back
 						if let Err(e) = echo_socket.send_to(&buffer[..len], from_addr).await {
 							println!("  Echo server send error: {}", e);
 						}
@@ -730,20 +660,16 @@ mod tests {
 			println!("✓ UDP Echo Server stopped after handling {} packets", packet_count);
 		});
 
-		// Give the echo server a moment to start
 		tokio::time::sleep(Duration::from_millis(100)).await;
 
-		// Test UDP through proxy using local echo server
 		let result = test_socks5_udp(&format!("127.0.0.1:{}", test_port), "127.0.0.1", echo_port).await;
 
-		// Signal the echo server to stop
 		echo_server_running.store(false, Ordering::Relaxed);
 		match tokio::time::timeout(Duration::from_secs(5), echo_task).await {
 			Ok(_) => {}
 			Err(_) => panic!("Echo server stop timeout in test_udp_through_proxy"),
 		}
 
-		// Cleanup proxy
 		ctx.token.cancel();
 		let _ = tokio::time::timeout(Duration::from_secs(5), ctx.tasks.wait()).await;
 
@@ -762,10 +688,6 @@ mod tests {
 		}
 	}
 
-	// =========================================================================
-	// Proxy Tests - Advanced (Large Packets & Fragmentation)
-	// =========================================================================
-
 	#[tokio::test]
 	async fn test_udp_large_packet_through_proxy() {
 		use std::sync::{
@@ -775,20 +697,16 @@ mod tests {
 
 		use tokio::net::UdpSocket;
 
-		// Start with a smaller packet to test basic functionality first
 		let test_packet_size = 512; // Start small to ensure basic UDP works
 
 		println!("Testing UDP functionality with {} byte packet", test_packet_size);
 
-		// Start proxy server on a test port
 		let test_port = 16668;
 		let (ctx, _server_handle) = start_test_proxy(test_port).await.expect("Failed to start proxy");
 
-		// Start a UDP echo server in the background
 		let echo_server_running = Arc::new(AtomicBool::new(true));
 		let echo_server_running_clone = echo_server_running.clone();
 
-		// Find an available port for the echo server
 		let echo_socket = UdpSocket::bind("127.0.0.1:0")
 			.await
 			.expect("Failed to bind echo server socket");
@@ -797,7 +715,6 @@ mod tests {
 
 		println!("✓ UDP Echo Server started on port {}", echo_port);
 
-		// Spawn the echo server task
 		let echo_task = tokio::spawn(async move {
 			let mut buffer = vec![0u8; 65536]; // Large buffer for fragmented packets
 			let mut packet_count = 0;
@@ -811,7 +728,6 @@ mod tests {
 							packet_count, len, from_addr
 						);
 
-						// Echo the packet back
 						if let Err(e) = echo_socket.send_to(&buffer[..len], from_addr).await {
 							println!("  Echo server send error: {}", e);
 						} else {
@@ -832,7 +748,6 @@ mod tests {
 			println!("✓ UDP Echo Server stopped after handling {} packets", packet_count);
 		});
 
-		// Give the echo server a moment to start
 		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
 		// First, test the echo server directly (without proxy) to ensure it works
@@ -842,14 +757,12 @@ mod tests {
 			Ok(_) => println!("✓ Direct UDP echo test passed"),
 			Err(e) => {
 				println!("✗ Direct UDP echo test failed: {}", e);
-				// Signal the echo server to stop
 				echo_server_running.store(false, Ordering::Relaxed);
 				let _ = tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await;
 				panic!("Echo server is not working correctly");
 			}
 		}
 
-		// Test small packet through proxy
 		println!("\n=== Testing small packet through proxy (512 bytes) ===");
 		let result_small = test_socks5_udp_large_packet(
 			&format!("127.0.0.1:{}", test_port),
@@ -863,7 +776,6 @@ mod tests {
 			Ok(_) => {
 				println!("✓ Small packet test passed - now testing large packet");
 
-				// If small packet works, try the large packet
 				println!("\n=== Testing large packet through proxy (2000 bytes) ===");
 				let result_large = test_socks5_udp_large_packet(
 					&format!("127.0.0.1:{}", test_port),
@@ -894,29 +806,21 @@ mod tests {
 			}
 		}
 
-		// Signal the echo server to stop
 		echo_server_running.store(false, Ordering::Relaxed);
 
-		// Wait for the echo server to finish (with timeout)
 		match tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await {
 			Ok(_) => println!("✓ Echo server stopped successfully"),
 			Err(_) => panic!("Echo server stop timeout in test_udp_large_packet_through_proxy"),
 		}
 
-		// Cleanup proxy server
 		ctx.token.cancel();
 		let _ = tokio::time::timeout(Duration::from_secs(5), ctx.tasks.wait()).await;
 	}
-
-	// =========================================================================
-	// Test Helper Functions
-	// =========================================================================
 
 	/// Helper function to test UDP echo server directly without proxy
 	async fn test_direct_udp_with_echo_server(host: &str, port: u16, packet_size: usize) -> eyre::Result<()> {
 		let test_socket = UdpSocket::bind("127.0.0.1:0").await?;
 
-		// Create test packet
 		let mut test_packet = Vec::with_capacity(packet_size);
 		test_packet.extend_from_slice(b"TEST_DIRECT");
 		test_packet.extend_from_slice(&(packet_size as u32).to_be_bytes());
@@ -927,10 +831,8 @@ mod tests {
 			test_packet.push(byte);
 		}
 
-		// Send packet
 		test_socket.send_to(&test_packet, (host, port)).await?;
 
-		// Receive response
 		let mut buffer = vec![0u8; packet_size + 100];
 		let (len, _) = tokio::time::timeout(std::time::Duration::from_secs(5), test_socket.recv_from(&mut buffer)).await??;
 
@@ -957,7 +859,6 @@ mod tests {
 		println!("=== UDP Fragmentation Demonstration ===");
 		println!("This test demonstrates UDP packet fragmentation without requiring a working SOCKS5 proxy");
 
-		// Start a UDP echo server
 		let echo_server_running = Arc::new(AtomicBool::new(true));
 		let echo_server_running_clone = echo_server_running.clone();
 
@@ -997,7 +898,6 @@ mod tests {
 
 		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-		// Test different packet sizes to demonstrate fragmentation behavior
 		let test_sizes = vec![
 			512,  // Small packet
 			1400, // Just under MTU
@@ -1028,7 +928,6 @@ mod tests {
 				);
 			}
 
-			// Test direct UDP (no proxy) to demonstrate that large packets work
 			match test_direct_udp_with_echo_server("127.0.0.1", echo_port, size).await {
 				Ok(_) => {
 					println!("✓ Direct UDP test passed for {} bytes", size);
@@ -1042,7 +941,6 @@ mod tests {
 			}
 		}
 
-		// Signal the echo server to stop
 		echo_server_running.store(false, Ordering::Relaxed);
 		let _ = tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await;
 	}
@@ -1056,7 +954,6 @@ mod tests {
 
 		use tokio::net::UdpSocket;
 
-		// Start proxy server on a test port
 		let test_port = 16669;
 		let (ctx, _server_handle) = start_test_proxy(test_port).await.expect("Failed to start proxy");
 
@@ -1070,11 +967,9 @@ mod tests {
 			4000, // Much larger packet
 		];
 
-		// Start a UDP echo server in the background
 		let echo_server_running = Arc::new(AtomicBool::new(true));
 		let echo_server_running_clone = echo_server_running.clone();
 
-		// Find an available port for the echo server
 		let echo_socket = UdpSocket::bind("127.0.0.1:0")
 			.await
 			.expect("Failed to bind echo server socket");
@@ -1083,7 +978,6 @@ mod tests {
 
 		println!("✓ UDP Echo Server started on port {} for MTU size testing", echo_port);
 
-		// Spawn the echo server task
 		let echo_task = tokio::spawn(async move {
 			let mut buffer = vec![0u8; 65536]; // Large buffer for fragmented packets
 			let mut packet_count = 0;
@@ -1097,7 +991,6 @@ mod tests {
 							packet_count, len, from_addr
 						);
 
-						// Echo the packet back
 						if let Err(e) = echo_socket.send_to(&buffer[..len], from_addr).await {
 							println!("    Echo server send error: {}", e);
 						}
@@ -1116,19 +1009,12 @@ mod tests {
 			println!("✓ UDP Echo Server stopped after handling {} packets", packet_count);
 		});
 
-		// Give the echo server a moment to start
 		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
 		for size in test_sizes {
 			println!("\n--- Testing packet size: {} bytes ---", size);
 
-			let result = test_socks5_udp_large_packet(
-				&format!("127.0.0.1:{}", test_port),
-				"127.0.0.1",
-				echo_port, // Use the dynamically allocated port
-				size,
-			)
-			.await;
+			let result = test_socks5_udp_large_packet(&format!("127.0.0.1:{}", test_port), "127.0.0.1", echo_port, size).await;
 
 			match &result {
 				Ok(_) => println!("✓ Packet size {} bytes: SUCCESS", size),
@@ -1136,10 +1022,8 @@ mod tests {
 					let err_str = e.to_string();
 					if err_str.contains("Command not supported") {
 						println!("⚠ SOCKS5 server does not support UDP ASSOCIATE - skipping remaining tests");
-						// Signal the echo server to stop
 						echo_server_running.store(false, Ordering::Relaxed);
 						let _ = tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await;
-						// Cleanup proxy server
 						ctx.token.cancel();
 						let _ = tokio::time::timeout(Duration::from_secs(5), ctx.tasks.wait()).await;
 						panic!("UDP ASSOCIATE command not supported by SOCKS5 server");
@@ -1150,16 +1034,13 @@ mod tests {
 			}
 		}
 
-		// Signal the echo server to stop
 		echo_server_running.store(false, Ordering::Relaxed);
 
-		// Wait for the echo server to finish (with timeout)
 		match tokio::time::timeout(std::time::Duration::from_secs(5), echo_task).await {
 			Ok(_) => println!("✓ Echo server stopped successfully"),
 			Err(_) => panic!("Echo server stop timeout in test_udp_multiple_mtu_sizes"),
 		}
 
-		// Cleanup proxy server
 		ctx.token.cancel();
 		let _ = tokio::time::timeout(Duration::from_secs(5), ctx.tasks.wait()).await;
 	}

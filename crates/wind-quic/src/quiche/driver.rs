@@ -548,7 +548,6 @@ impl ApplicationOverQuic for BridgeDriver {
 		let span = self.span.clone();
 		let _enter = span.enter();
 
-		// Datagrams.
 		loop {
 			match qconn.dgram_recv(&mut self.buffer) {
 				Ok(n) => {
@@ -565,7 +564,6 @@ impl ApplicationOverQuic for BridgeDriver {
 			.max_dgram
 			.store(qconn.dgram_max_writable_len().unwrap_or(0), Ordering::Relaxed);
 
-		// Streams.
 		let ids: Vec<u64> = qconn.readable().collect();
 		for sid in ids {
 			if self.is_peer_initiated(sid) {
@@ -587,13 +585,11 @@ impl ApplicationOverQuic for BridgeDriver {
 			let _ = qconn.close(true, code as u64, &reason);
 		}
 
-		// Keying-material exports.
 		while let Some((out_len, label, context, reply)) = self.pending_exports.pop_front() {
 			let res = export_keying_material(qconn, out_len, &label, &context);
 			let _ = reply.send(res);
 		}
 
-		// Local stream opens.
 		while let Some(op) = self.pending_opens.pop_front() {
 			match op {
 				PendingOpen::Bi(reply) => {
@@ -607,13 +603,11 @@ impl ApplicationOverQuic for BridgeDriver {
 			}
 		}
 
-		// Stream shutdowns.
 		while let Some((sid, write, code)) = self.pending_shutdowns.pop_front() {
 			let dir = if write { Shutdown::Write } else { Shutdown::Read };
 			let _ = qconn.stream_shutdown(sid, dir, code);
 		}
 
-		// Outbound datagrams.
 		while let Some(dg) = self.out_datagrams.front() {
 			match qconn.dgram_send(dg.as_ref()) {
 				Ok(()) => {
@@ -627,7 +621,6 @@ impl ApplicationOverQuic for BridgeDriver {
 			}
 		}
 
-		// Per-stream sends + FINs.
 		let sids: Vec<u64> = self.streams.keys().copied().collect();
 		for sid in &sids {
 			self.write_stream(qconn, *sid);

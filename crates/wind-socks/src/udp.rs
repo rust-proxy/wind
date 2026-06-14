@@ -40,10 +40,8 @@ fn parse_udp_request_sync(data: &[u8]) -> Result<(u8, SocksTargetAddr, &[u8]), S
 
 	let mut offset = 4;
 
-	// Parse target address based on address type
 	let target_addr = match atyp {
 		0x01 => {
-			// IPv4
 			if data.len() < offset + 6 {
 				return Err("Incomplete IPv4 address in SOCKS5 UDP header".into());
 			}
@@ -53,7 +51,6 @@ fn parse_udp_request_sync(data: &[u8]) -> Result<(u8, SocksTargetAddr, &[u8]), S
 			SocksTargetAddr::Ip(SocketAddr::V4(std::net::SocketAddrV4::new(ip, port)))
 		}
 		0x03 => {
-			// Domain name
 			if data.len() < offset + 1 {
 				return Err("Incomplete domain length in SOCKS5 UDP header".into());
 			}
@@ -71,7 +68,6 @@ fn parse_udp_request_sync(data: &[u8]) -> Result<(u8, SocksTargetAddr, &[u8]), S
 			SocksTargetAddr::Domain(domain, port)
 		}
 		0x04 => {
-			// IPv6
 			if data.len() < offset + 18 {
 				return Err("Incomplete IPv6 address in SOCKS5 UDP header".into());
 			}
