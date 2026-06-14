@@ -59,7 +59,8 @@ pub fn quinn_server_config(
 ) -> tuic_server::Config {
 	// Default `BackendMode` is `Quinn`, so leave `backend.mode` untouched. On the
 	// quinn backend `zero_rtt_handshake` flows into the inbound's
-	// `max_early_data_size`/`into_0rtt()` accept path (see wind-tuic quinn::inbound).
+	// `max_early_data_size`/`into_0rtt()` accept path (see wind-tuic
+	// quinn::inbound).
 	tuic_server::Config {
 		log_level: tuic_server::config::LogLevel::Debug,
 		server,
@@ -92,7 +93,8 @@ pub fn quinn_server_config(
 /// Build a `tuic-client` config (quinn) pointing at a local server.
 ///
 /// The client is always quinn-based regardless of the *server's* backend, so
-/// this builder is shared by both [`start_quiche_pair`] and [`start_quinn_pair`].
+/// this builder is shared by both [`start_quiche_pair`] and
+/// [`start_quinn_pair`].
 pub fn tuic_client_config(
 	server_port: u16,
 	socks_port: u16,
