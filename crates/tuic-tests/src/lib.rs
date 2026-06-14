@@ -48,8 +48,52 @@ pub fn quiche_server_config(
 	cfg
 }
 
+/// Build a `tuic-server` config that uses the default quinn backend
+/// (`wind-tuic`) with a self-signed certificate.
+pub fn quinn_server_config(
+	server: SocketAddr,
+	data_dir: PathBuf,
+	uuid: Uuid,
+	password: &str,
+	zero_rtt: bool,
+) -> tuic_server::Config {
+	// Default `BackendMode` is `Quinn`, so leave `backend.mode` untouched. On the
+	// quinn backend `zero_rtt_handshake` flows into the inbound's
+	// `max_early_data_size`/`into_0rtt()` accept path (see wind-tuic quinn::inbound).
+	tuic_server::Config {
+		log_level: tuic_server::config::LogLevel::Debug,
+		server,
+		users: {
+			let mut users = HashMap::new();
+			users.insert(uuid, password.to_string());
+			users
+		},
+		tls: tuic_server::config::TlsConfig {
+			self_sign: true,
+			hostname: "localhost".to_string(),
+			// The quinn backend passes `tls.alpn` straight through to the QUIC
+			// server config (unlike the quiche backend, which forces `h3`), so it
+			// must be set explicitly or ALPN negotiation fails against the client's
+			// `h3`.
+			alpn: vec!["h3".to_string()],
+			..Default::default()
+		},
+		data_dir,
+		zero_rtt_handshake: zero_rtt,
+		experimental: tuic_server::config::ExperimentalConfig {
+			// Echo servers run on 127.0.0.1, so loopback must be allowed.
+			drop_loopback: false,
+			drop_private: false,
+		},
+		..Default::default()
+	}
+}
+
 /// Build a `tuic-client` config (quinn) pointing at a local server.
-pub fn quiche_client_config(
+///
+/// The client is always quinn-based regardless of the *server's* backend, so
+/// this builder is shared by both [`start_quiche_pair`] and [`start_quinn_pair`].
+pub fn tuic_client_config(
 	server_port: u16,
 	socks_port: u16,
 	uuid: Uuid,
@@ -116,12 +160,50 @@ pub async fn start_quiche_pair(server_port: u16, socks_port: u16, zero_rtt: bool
 	});
 	tokio::time::sleep(Duration::from_secs(1)).await;
 
-	let ccfg = quiche_client_config(server_port, socks_port, uuid, password, zero_rtt);
+	let ccfg = tuic_client_config(server_port, socks_port, uuid, password, zero_rtt);
 	tokio::spawn(async move {
 		match timeout(Duration::from_secs(20), tuic_client::run(ccfg)).await {
 			Ok(Ok(())) => info!("[quiche test] client exited ok"),
 			Ok(Err(e)) => error!("[quiche test] client error: {e}"),
 			Err(_) => info!("[quiche test] client timed out (expected at test end)"),
+		}
+	});
+	tokio::time::sleep(Duration::from_secs(2)).await;
+
+	format!("127.0.0.1:{socks_port}")
+}
+
+/// Start a quinn-backed `tuic-server` plus a `tuic-client`, waiting for the
+/// client's SOCKS5 proxy to come up. Returns the SOCKS5 address. Mirrors
+/// [`start_quiche_pair`] but exercises the default quinn backend.
+///
+/// NOTE: `tuic_client::run` installs a **process-global** connection
+/// (`OnceCell`), so at most one client may run per test process — keep to one
+/// client-starting test per `tests/*.rs` file.
+pub async fn start_quinn_pair(server_port: u16, socks_port: u16, zero_rtt: bool) -> String {
+	install_crypto_provider();
+
+	let uuid = Uuid::new_v4();
+	let password = "test_password";
+	let server_addr: SocketAddr = format!("127.0.0.1:{server_port}").parse().unwrap();
+	let data_dir = std::env::temp_dir().join(format!("wind-tuic-quinn-test-{server_port}"));
+
+	let scfg = quinn_server_config(server_addr, data_dir, uuid, password, zero_rtt);
+	tokio::spawn(async move {
+		match timeout(Duration::from_secs(20), tuic_server::run(scfg)).await {
+			Ok(Ok(())) => info!("[quinn test] server exited ok"),
+			Ok(Err(e)) => error!("[quinn test] server error: {e}"),
+			Err(_) => info!("[quinn test] server timed out (expected at test end)"),
+		}
+	});
+	tokio::time::sleep(Duration::from_secs(1)).await;
+
+	let ccfg = tuic_client_config(server_port, socks_port, uuid, password, zero_rtt);
+	tokio::spawn(async move {
+		match timeout(Duration::from_secs(20), tuic_client::run(ccfg)).await {
+			Ok(Ok(())) => info!("[quinn test] client exited ok"),
+			Ok(Err(e)) => error!("[quinn test] client error: {e}"),
+			Err(_) => info!("[quinn test] client timed out (expected at test end)"),
 		}
 	});
 	tokio::time::sleep(Duration::from_secs(2)).await;
