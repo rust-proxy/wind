@@ -1014,13 +1014,7 @@ mod tests {
 		for size in test_sizes {
 			println!("\n--- Testing packet size: {} bytes ---", size);
 
-			let result = test_socks5_udp_large_packet(
-				&format!("127.0.0.1:{}", test_port),
-				"127.0.0.1",
-				echo_port,
-				size,
-			)
-			.await;
+			let result = test_socks5_udp_large_packet(&format!("127.0.0.1:{}", test_port), "127.0.0.1", echo_port, size).await;
 
 			match &result {
 				Ok(_) => println!("✓ Packet size {} bytes: SUCCESS", size),
