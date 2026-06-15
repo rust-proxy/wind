@@ -140,7 +140,7 @@ fn domain_body(host: &str, port: u16) -> Vec<u8> {
 	b
 }
 
-/// Assert a CONNECTed stream echoes a payload back unchanged.
+/// Assert a connected stream echoes a payload back unchanged.
 async fn assert_echo_roundtrip(s: &mut TcpStream) {
 	let msg = b"hello socks5";
 	s.write_all(msg).await.unwrap();
