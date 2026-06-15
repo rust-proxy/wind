@@ -597,6 +597,9 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 			gc_lifetime: Duration::from_secs(15),
 			skip_cert_verify: true,
 			proxy: None,
+			reconnect: true,
+			reconnect_initial_backoff: Duration::from_millis(500),
+			reconnect_max_backoff: Duration::from_secs(30),
 		},
 		local: tuic_client::config::Local {
 			server: "[::1]:1081".parse()?,

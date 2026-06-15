@@ -250,3 +250,125 @@ fn unmap_v4_mapped(ip: std::net::IpAddr) -> std::net::IpAddr {
 		v4 => v4,
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+	use super::*;
+
+	#[test]
+	fn parse_ipv4_request() {
+		let mut data = vec![0x00, 0x00, 0x00, 0x01];
+		data.extend_from_slice(&[192, 168, 1, 1]);
+		data.extend_from_slice(&[0x1f, 0x90]); // port 8080
+		data.extend_from_slice(b"payload");
+
+		let (frag, addr, payload) = parse_udp_request_sync(&data).unwrap();
+		assert_eq!(frag, 0);
+		assert_eq!(payload, b"payload");
+		match addr {
+			SocksTargetAddr::Ip(SocketAddr::V4(v4)) => {
+				assert_eq!(*v4.ip(), Ipv4Addr::new(192, 168, 1, 1));
+				assert_eq!(v4.port(), 8080);
+			}
+			_ => panic!("expected IPv4 target"),
+		}
+	}
+
+	#[test]
+	fn parse_domain_request() {
+		let mut data = vec![0x00, 0x00, 0x00, 0x03, 11];
+		data.extend_from_slice(b"example.com");
+		data.extend_from_slice(&[0x01, 0xbb]); // port 443
+		data.extend_from_slice(b"hi");
+
+		let (_, addr, payload) = parse_udp_request_sync(&data).unwrap();
+		assert_eq!(payload, b"hi");
+		match addr {
+			SocksTargetAddr::Domain(d, p) => {
+				assert_eq!(d, "example.com");
+				assert_eq!(p, 443);
+			}
+			_ => panic!("expected domain target"),
+		}
+	}
+
+	#[test]
+	fn parse_ipv6_request() {
+		let ip = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+		let mut data = vec![0x00, 0x00, 0x00, 0x04];
+		data.extend_from_slice(&ip.octets());
+		data.extend_from_slice(&[0x01, 0xbb]); // port 443
+
+		let (_, addr, payload) = parse_udp_request_sync(&data).unwrap();
+		assert!(payload.is_empty());
+		match addr {
+			SocksTargetAddr::Ip(SocketAddr::V6(v6)) => {
+				assert_eq!(*v6.ip(), ip);
+				assert_eq!(v6.port(), 443);
+			}
+			_ => panic!("expected IPv6 target"),
+		}
+	}
+
+	#[test]
+	fn parse_rejects_malformed_headers() {
+		// Too short for the 4-byte header.
+		assert!(parse_udp_request_sync(&[0x00, 0x00]).is_err());
+		// Non-zero reserved bytes.
+		assert!(parse_udp_request_sync(&[0x01, 0x00, 0x00, 0x01]).is_err());
+		// Unsupported address type.
+		assert!(parse_udp_request_sync(&[0x00, 0x00, 0x00, 0x05]).is_err());
+		// IPv4 atyp but truncated address.
+		assert!(parse_udp_request_sync(&[0x00, 0x00, 0x00, 0x01, 1, 2]).is_err());
+		// Domain atyp, length 5, but only one domain byte present.
+		assert!(parse_udp_request_sync(&[0x00, 0x00, 0x00, 0x03, 5, b'a']).is_err());
+	}
+
+	#[test]
+	fn unmap_v4_mapped_unwraps_only_mapped_addresses() {
+		let v4 = Ipv4Addr::new(192, 168, 1, 1);
+		assert_eq!(unmap_v4_mapped(IpAddr::V6(v4.to_ipv6_mapped())), IpAddr::V4(v4));
+
+		let pure_v6: IpAddr = "2001:db8::1".parse().unwrap();
+		assert_eq!(unmap_v4_mapped(pure_v6), pure_v6);
+
+		let pure_v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+		assert_eq!(unmap_v4_mapped(pure_v4), pure_v4);
+	}
+
+	#[test]
+	fn target_addr_to_socket_maps_families_and_domain_fallback() {
+		assert_eq!(
+			target_addr_to_socket(&TargetAddr::IPv4(Ipv4Addr::new(192, 168, 1, 1), 443)).to_string(),
+			"192.168.1.1:443"
+		);
+
+		let v6 = target_addr_to_socket(&TargetAddr::IPv6("::1".parse().unwrap(), 8080));
+		assert!(v6.ip().is_ipv6());
+		assert_eq!(v6.port(), 8080);
+
+		// RFC 1928 has no "host" codepoint, so domains report 0.0.0.0:port.
+		assert_eq!(
+			target_addr_to_socket(&TargetAddr::Domain("example.com".into(), 53)).to_string(),
+			"0.0.0.0:53"
+		);
+	}
+
+	#[test]
+	fn convert_target_addr_maps_each_family() {
+		assert_eq!(
+			convert_target_addr(&SocksTargetAddr::Ip("192.168.1.1:80".parse().unwrap())),
+			TargetAddr::IPv4(Ipv4Addr::new(192, 168, 1, 1), 80)
+		);
+		assert_eq!(
+			convert_target_addr(&SocksTargetAddr::Ip("[2001:db8::1]:443".parse().unwrap())),
+			TargetAddr::IPv6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 443)
+		);
+		assert_eq!(
+			convert_target_addr(&SocksTargetAddr::Domain("example.com".into(), 443)),
+			TargetAddr::Domain("example.com".into(), 443)
+		);
+	}
+}

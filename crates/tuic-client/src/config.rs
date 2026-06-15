@@ -158,6 +158,20 @@ pub struct Relay {
 
 	#[educe(Default = None)]
 	pub proxy: Option<ProxyConfig>,
+
+	/// Automatically reconnect to the relay after the connection drops.
+	#[educe(Default = true)]
+	pub reconnect: bool,
+
+	/// Delay before the first reconnect attempt; doubled after each failure.
+	#[educe(Default(expression = Duration::from_millis(500)))]
+	#[serde(with = "humantime_serde")]
+	pub reconnect_initial_backoff: Duration,
+
+	/// Upper bound on the reconnect backoff delay.
+	#[educe(Default(expression = Duration::from_secs(30)))]
+	#[serde(with = "humantime_serde")]
+	pub reconnect_max_backoff: Duration,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, Educe, Clone, PartialEq, Eq)]
@@ -557,8 +571,38 @@ mod tests {
 		assert_eq!(config.relay.gc_interval, Duration::from_secs(3));
 		assert_eq!(config.relay.gc_lifetime, Duration::from_secs(15));
 		assert!(!config.relay.skip_cert_verify);
+		// Reconnect defaults: enabled, 500ms initial backoff capped at 30s.
+		assert!(config.relay.reconnect);
+		assert_eq!(config.relay.reconnect_initial_backoff, Duration::from_millis(500));
+		assert_eq!(config.relay.reconnect_max_backoff, Duration::from_secs(30));
 		assert_eq!(config.local.max_packet_size, 1500);
 	}
+
+	#[test]
+	fn test_reconnect_can_be_disabled_and_tuned() {
+		// A config omitting reconnect keeps the defaults (backward compatible).
+		let default_cfg = r#"{ "relay": { "server": "example.com:8443", "uuid": "00000000-0000-0000-0000-000000000000", "password": "pw" } }"#;
+		let config = test_parse_config(default_cfg, ".json5").unwrap();
+		assert!(config.relay.reconnect);
+
+		// Explicit values are honoured, including disabling reconnect and
+		// humantime-formatted backoff durations.
+		let tuned = r#"{
+			"relay": {
+				"server": "example.com:8443",
+				"uuid": "00000000-0000-0000-0000-000000000000",
+				"password": "pw",
+				"reconnect": false,
+				"reconnect_initial_backoff": "2s",
+				"reconnect_max_backoff": "1m"
+			}
+		}"#;
+		let config = test_parse_config(tuned, ".json5").unwrap();
+		assert!(!config.relay.reconnect);
+		assert_eq!(config.relay.reconnect_initial_backoff, Duration::from_secs(2));
+		assert_eq!(config.relay.reconnect_max_backoff, Duration::from_secs(60));
+	}
+
 	#[test]
 	fn test_tcp_udp_forward() {
 		let json5_config = include_str!("../tests/config/tcp_udp_forward.json5");

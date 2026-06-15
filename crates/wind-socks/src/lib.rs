@@ -70,3 +70,37 @@ pub fn convert_to_socks_addr(addr: &TargetAddr) -> SocksTargetAddr {
 		TargetAddr::IPv6(ipv6, port) => SocksTargetAddr::Ip(SocketAddr::V6(std::net::SocketAddrV6::new(*ipv6, *port, 0, 0))),
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use std::net::{Ipv4Addr, Ipv6Addr};
+
+	use super::*;
+
+	#[test]
+	fn convert_addr_maps_each_family() {
+		assert_eq!(
+			convert_addr(&SocksTargetAddr::Domain("example.com".into(), 443)),
+			TargetAddr::Domain("example.com".into(), 443)
+		);
+		assert_eq!(
+			convert_addr(&SocksTargetAddr::Ip("192.168.1.1:80".parse().unwrap())),
+			TargetAddr::IPv4(Ipv4Addr::new(192, 168, 1, 1), 80)
+		);
+		assert_eq!(
+			convert_addr(&SocksTargetAddr::Ip("[2001:db8::1]:443".parse().unwrap())),
+			TargetAddr::IPv6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 443)
+		);
+	}
+
+	#[test]
+	fn convert_addr_and_back_is_identity() {
+		for t in [
+			TargetAddr::Domain("example.com".into(), 443),
+			TargetAddr::IPv4(Ipv4Addr::new(10, 0, 0, 1), 8080),
+			TargetAddr::IPv6(Ipv6Addr::LOCALHOST, 53),
+		] {
+			assert_eq!(convert_addr(&convert_to_socks_addr(&t)), t, "roundtrip for {t:?}");
+		}
+	}
+}

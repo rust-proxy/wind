@@ -64,6 +64,7 @@ impl OutboundRuntime {
 						gc_lifetime: std::time::Duration::from_secs(t.gc_lifetime_secs),
 						skip_cert_verify: t.skip_cert_verify,
 						alpn: t.alpn.clone(),
+						reconnect: wind_tuic::quinn::outbound::ReconnectConfig::default(),
 					}),
 				}
 			}

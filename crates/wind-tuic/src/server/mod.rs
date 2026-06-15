@@ -935,3 +935,206 @@ async fn handle_dissociate<C: QuicConnection>(connection: &InboundCtx<C>, assoc_
 	info!("Dissociated UDP session {}", assoc_id);
 	Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+	use std::sync::atomic::AtomicUsize;
+
+	// Brings in Arc, Duration, Ordering, CancellationToken, QuicError, CmdType,
+	// and the private helpers under test (`acceptor_loop`, `is_tuic_prefix`,
+	// `read_prefix`).
+	use super::*;
+
+	/// Cancellation must interrupt an accept that is parked forever. This is
+	/// the core of the graceful-shutdown chain: every per-connection acceptor
+	/// loop is blocked in `accept()` when shutdown fires, and must unstick
+	/// promptly without handling another item.
+	#[tokio::test]
+	async fn acceptor_loop_exits_when_cancelled_mid_accept() {
+		let cancel = CancellationToken::new();
+		let handled = Arc::new(AtomicUsize::new(0));
+		let h = handled.clone();
+		let loop_cancel = cancel.clone();
+
+		let task = tokio::spawn(async move {
+			acceptor_loop(
+				loop_cancel,
+				"test-mid-accept",
+				// Never resolves: only the cancel branch can complete the loop.
+				std::future::pending::<Result<(), QuicError>>,
+				move |_item: ()| {
+					let h = h.clone();
+					async move {
+						h.fetch_add(1, Ordering::SeqCst);
+					}
+				},
+			)
+			.await;
+		});
+
+		// Let the loop reach its `select!` and park on `accept()`.
+		tokio::task::yield_now().await;
+		cancel.cancel();
+
+		tokio::time::timeout(Duration::from_secs(1), task)
+			.await
+			.expect("acceptor_loop did not exit within 1s of cancellation")
+			.expect("acceptor_loop task panicked");
+
+		assert_eq!(
+			handled.load(Ordering::SeqCst),
+			0,
+			"no item should be handled when accept never resolves"
+		);
+	}
+
+	/// A loop that is cancelled before it ever runs must exit without spinning.
+	#[tokio::test]
+	async fn acceptor_loop_exits_when_already_cancelled() {
+		let cancel = CancellationToken::new();
+		cancel.cancel();
+		let handled = Arc::new(AtomicUsize::new(0));
+		let h = handled.clone();
+
+		tokio::time::timeout(
+			Duration::from_secs(1),
+			acceptor_loop(
+				cancel,
+				"test-pre-cancelled",
+				std::future::pending::<Result<(), QuicError>>,
+				move |_item: ()| {
+					let h = h.clone();
+					async move {
+						h.fetch_add(1, Ordering::SeqCst);
+					}
+				},
+			),
+		)
+		.await
+		.expect("acceptor_loop did not exit promptly when pre-cancelled");
+
+		assert_eq!(handled.load(Ordering::SeqCst), 0);
+	}
+
+	/// Items accepted before a benign connection close are handled, then the
+	/// loop returns (it does not treat `LocallyClosed` as a fatal error nor
+	/// spin).
+	#[tokio::test]
+	async fn acceptor_loop_handles_items_then_exits_on_benign_close() {
+		let cancel = CancellationToken::new();
+		let handled = Arc::new(AtomicUsize::new(0));
+		let calls = Arc::new(AtomicUsize::new(0));
+		let h = handled.clone();
+		let c = calls.clone();
+
+		tokio::time::timeout(
+			Duration::from_secs(1),
+			acceptor_loop(
+				cancel,
+				"test-benign-close",
+				move || {
+					let n = c.fetch_add(1, Ordering::SeqCst);
+					async move { if n < 3 { Ok(()) } else { Err(QuicError::LocallyClosed) } }
+				},
+				move |_item: ()| {
+					let h = h.clone();
+					async move {
+						h.fetch_add(1, Ordering::SeqCst);
+					}
+				},
+			),
+		)
+		.await
+		.expect("acceptor_loop did not terminate after a benign close");
+
+		assert_eq!(
+			handled.load(Ordering::SeqCst),
+			3,
+			"the three Ok items must be handled before the close ends the loop"
+		);
+	}
+
+	/// `TimedOut` (idle timeout) is a benign lifecycle close: the loop returns.
+	#[tokio::test]
+	async fn acceptor_loop_exits_on_timed_out() {
+		let cancel = CancellationToken::new();
+		let handled = Arc::new(AtomicUsize::new(0));
+		let h = handled.clone();
+
+		tokio::time::timeout(
+			Duration::from_secs(1),
+			acceptor_loop(
+				cancel,
+				"test-timed-out",
+				|| async { Err::<(), _>(QuicError::TimedOut) },
+				move |_item: ()| {
+					let h = h.clone();
+					async move {
+						h.fetch_add(1, Ordering::SeqCst);
+					}
+				},
+			),
+		)
+		.await
+		.expect("acceptor_loop did not terminate on TimedOut");
+
+		assert_eq!(handled.load(Ordering::SeqCst), 0);
+	}
+
+	/// A non-benign error (e.g. connection lost) also ends the loop rather than
+	/// retrying forever.
+	#[tokio::test]
+	async fn acceptor_loop_exits_on_fatal_error() {
+		let cancel = CancellationToken::new();
+		let handled = Arc::new(AtomicUsize::new(0));
+		let h = handled.clone();
+
+		tokio::time::timeout(
+			Duration::from_secs(1),
+			acceptor_loop(
+				cancel,
+				"test-fatal",
+				|| async { Err::<(), _>(QuicError::ConnectionLost("boom".into())) },
+				move |_item: ()| {
+					let h = h.clone();
+					async move {
+						h.fetch_add(1, Ordering::SeqCst);
+					}
+				},
+			),
+		)
+		.await
+		.expect("acceptor_loop did not terminate on a fatal error");
+
+		assert_eq!(handled.load(Ordering::SeqCst), 0);
+	}
+
+	/// The 2-byte classifier must accept only `[VER, CmdType]` framing and
+	/// reject anything an HTTP/3 stream would start with.
+	#[test]
+	fn is_tuic_prefix_distinguishes_tuic_from_h3() {
+		let auth = u8::from(CmdType::Auth);
+		let heartbeat = u8::from(CmdType::Heartbeat);
+
+		assert!(is_tuic_prefix([crate::proto::VER, auth]));
+		assert!(is_tuic_prefix([crate::proto::VER, heartbeat]));
+		// CmdType byte just past the valid range (Auth..=Heartbeat).
+		assert!(!is_tuic_prefix([crate::proto::VER, heartbeat + 1]));
+		// Correct command byte but wrong version byte.
+		assert!(!is_tuic_prefix([crate::proto::VER.wrapping_add(1), auth]));
+	}
+
+	/// `read_prefix` yields the first two bytes, or `None` if the stream closes
+	/// before two bytes arrive.
+	#[tokio::test]
+	async fn read_prefix_returns_two_bytes_or_none() {
+		let mut full: &[u8] = &[0x05, 0x00, 0x42];
+		assert_eq!(read_prefix(&mut full).await, Some([0x05, 0x00]));
+
+		let mut short: &[u8] = &[0x05];
+		assert_eq!(read_prefix(&mut short).await, None);
+
+		let mut empty: &[u8] = &[];
+		assert_eq!(read_prefix(&mut empty).await, None);
+	}
+}

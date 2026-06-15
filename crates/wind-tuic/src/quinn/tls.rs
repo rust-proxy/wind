@@ -123,6 +123,7 @@ mod tests {
 			// between both branches.
 			skip_cert_verify: true,
 			alpn,
+			reconnect: crate::quinn::outbound::ReconnectConfig::default(),
 		}
 	}
 
