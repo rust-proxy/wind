@@ -7,7 +7,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use once_cell::sync::OnceCell;
 use wind_core::{AbstractOutbound, AppContext, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
-use wind_tuic::quinn::outbound::{TuicOutbound, TuicOutboundOpts};
+use wind_tuic::quinn::outbound::{ReconnectConfig, TuicOutbound, TuicOutboundOpts};
 
 use crate::config::Relay;
 
@@ -62,6 +62,12 @@ impl TuicOutboundAdapter {
 			}
 		};
 
+		let reconnect = ReconnectConfig {
+			enabled: relay.reconnect,
+			initial_backoff: relay.reconnect_initial_backoff,
+			max_backoff: relay.reconnect_max_backoff,
+		};
+
 		let opts = TuicOutboundOpts {
 			peer_addr: server_addr,
 			sni,
@@ -76,6 +82,7 @@ impl TuicOutboundAdapter {
 				.into_iter()
 				.map(|v| String::from_utf8_lossy(&v).to_string())
 				.collect(),
+			reconnect,
 		};
 
 		let outbound: TuicOutbound = TuicOutbound::new(ctx, opts).await?;

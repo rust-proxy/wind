@@ -25,6 +25,6 @@ tracing = "0.1"
 async-trait = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "time", "sync"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "time", "sync", "io-util"] }
 eyre = "0.6"
 bytes = "1"

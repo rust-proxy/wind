@@ -140,7 +140,7 @@ mod tests {
 	use wind_core::{AbstractInbound, AbstractOutbound};
 	use wind_tuic::quinn::{
 		inbound::{TuicInbound, TuicInboundOpts},
-		outbound::{TuicOutbound, TuicOutboundOpts},
+		outbound::{ReconnectConfig, TuicOutbound, TuicOutboundOpts},
 	};
 
 	use super::*;
@@ -160,6 +160,21 @@ mod tests {
 	}
 
 	async fn setup_tuic_server() -> eyre::Result<TuicTestSetup> {
+		let (ctx, server_addr, uuid, _listen) = spawn_tuic_server().await?;
+		// The listen task is left detached: `TuicTestSetup::drop` cancels the
+		// context token, which makes the accept loop break on its own.
+		Ok(TuicTestSetup { server_addr, uuid, ctx })
+	}
+
+	/// Lower-level server bring-up that also hands back the `listen`
+	/// accept-loop join handle (and the context, so the caller can cancel it).
+	///
+	/// Used by the graceful-shutdown tests, which need to *await* the accept
+	/// loop to prove it exits on cancellation — something
+	/// [`setup_tuic_server`] can't expose because [`TuicTestSetup`] owns a
+	/// `Drop` guard and can't surrender a field by move.
+	async fn spawn_tuic_server() -> eyre::Result<(Arc<AppContext>, SocketAddr, Uuid, tokio::task::JoinHandle<eyre::Result<()>>)>
+	{
 		let (cert, key) = generate_tuic_test_cert();
 		let uuid = Uuid::new_v4();
 		let mut users = HashMap::new();
@@ -185,17 +200,47 @@ mod tests {
 
 		let server = TuicInbound::new(ctx.clone(), opts);
 		let callback = Arc::new(DirectCallback);
-		tokio::spawn(
-			async move {
-				let _ = server.listen(callback.as_ref()).await;
-			}
-			.in_current_span(),
-		);
+		let listen = tokio::spawn(async move { server.listen(callback.as_ref()).await }.in_current_span());
 
 		// Allow the server time to bind and begin accepting
 		tokio::time::sleep(Duration::from_millis(300)).await;
 
-		Ok(TuicTestSetup { server_addr, uuid, ctx })
+		Ok((ctx, server_addr, uuid, listen))
+	}
+
+	/// Connect a TUIC client to `addr`/`uuid` and start its heartbeat poll.
+	/// Used by the graceful-shutdown tests, which need a client whose lifetime
+	/// is independent of the [`TuicTestSetup`] `Drop` guard.
+	async fn connect_client(addr: SocketAddr, uuid: Uuid) -> eyre::Result<Arc<TuicOutbound>> {
+		connect_client_with(addr, uuid, ReconnectConfig::default()).await
+	}
+
+	/// As [`connect_client`], but with an explicit reconnect policy — lets
+	/// tests disable reconnect or tune its backoff.
+	async fn connect_client_with(addr: SocketAddr, uuid: Uuid, reconnect: ReconnectConfig) -> eyre::Result<Arc<TuicOutbound>> {
+		let ctx = Arc::new(AppContext::default());
+		let opts = TuicOutboundOpts {
+			peer_addr: addr,
+			sni: "localhost".to_string(),
+			auth: (uuid, Arc::from(TEST_PASSWORD)),
+			zero_rtt_handshake: false,
+			heartbeat: Duration::from_secs(5),
+			gc_interval: Duration::from_secs(5),
+			gc_lifetime: Duration::from_secs(30),
+			skip_cert_verify: true,
+			alpn: vec!["h3".to_string()],
+			reconnect,
+		};
+		let client = Arc::new(TuicOutbound::new(ctx, opts).await?);
+		let poll_client = client.clone();
+		tokio::spawn(
+			async move {
+				let _ = poll_client.start_poll().await;
+			}
+			.in_current_span(),
+		);
+		tokio::time::sleep(Duration::from_millis(150)).await;
+		Ok(client)
 	}
 
 	async fn connect_tuic_client(setup: &TuicTestSetup) -> eyre::Result<Arc<TuicOutbound>> {
@@ -210,6 +255,7 @@ mod tests {
 			gc_lifetime: Duration::from_secs(30),
 			skip_cert_verify: true,
 			alpn: vec!["h3".to_string()],
+			reconnect: ReconnectConfig::default(),
 		};
 		let client: std::sync::Arc<TuicOutbound> = std::sync::Arc::new(TuicOutbound::new(ctx.clone(), opts).await?);
 		let poll_client = client.clone();
@@ -257,6 +303,7 @@ mod tests {
 			gc_lifetime: Duration::from_secs(30),
 			skip_cert_verify: true,
 			alpn: vec!["h3".to_string()],
+			reconnect: ReconnectConfig::default(),
 		};
 		let result: eyre::Result<TuicOutbound> = TuicOutbound::new(ctx, opts).await;
 		assert!(
@@ -283,6 +330,7 @@ mod tests {
 			gc_lifetime: Duration::from_secs(30),
 			skip_cert_verify: true,
 			alpn: vec!["h3".to_string()],
+			reconnect: ReconnectConfig::default(),
 		};
 		let result: eyre::Result<TuicOutbound> = TuicOutbound::new(ctx, opts).await;
 		assert!(
@@ -512,5 +560,248 @@ mod tests {
 			}
 			Ok(())
 		});
+	}
+
+	/// Graceful shutdown — idle server. Cancelling the context token must make
+	/// the inbound `listen` accept-loop break, close the QUIC endpoint, and
+	/// return `Ok(())` within a bounded time rather than hanging.
+	#[tokio::test]
+	async fn test_graceful_shutdown_idle_listen_loop_exits() {
+		let (ctx, _addr, _uuid, listen) = spawn_tuic_server().await.expect("Failed to start TUIC server");
+
+		ctx.token.cancel();
+
+		let joined = tokio::time::timeout(Duration::from_secs(5), listen)
+			.await
+			.expect("listen loop did not exit within 5s of cancellation")
+			.expect("listen task panicked");
+		assert!(joined.is_ok(), "listen returned an error on shutdown: {:?}", joined.err());
+	}
+
+	/// Graceful shutdown — active connection. With a live client connected, the
+	/// server's per-connection handler is spawned into `ctx.tasks`. After
+	/// cancellation, the whole cancellation chain (listen loop →
+	/// `serve_connection` → acceptor tasks) must wind down so the tracked
+	/// tasks drain and the accept loop returns — all within a bounded time.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn test_graceful_shutdown_drains_active_connection() {
+		let (ctx, addr, uuid, listen) = spawn_tuic_server().await.expect("Failed to start TUIC server");
+
+		// Establish a connection so the server spawns a handler into ctx.tasks.
+		let _client = connect_client(addr, uuid).await.expect("Failed to connect TUIC client");
+		// Give the server's accept loop a moment to register the connection
+		// handler in the tracker.
+		tokio::time::sleep(Duration::from_millis(200)).await;
+
+		// Trigger graceful shutdown.
+		ctx.token.cancel();
+
+		// The connection handler(s) tracked in ctx.tasks must finish promptly —
+		// before the cancellation-chain fix, the acceptor tasks would keep
+		// `serve_connection` alive and this would hang.
+		ctx.tasks.close();
+		tokio::time::timeout(Duration::from_secs(5), ctx.tasks.wait())
+			.await
+			.expect("tracked connection tasks did not drain within 5s of cancellation");
+
+		// And the accept loop itself exits cleanly.
+		let joined = tokio::time::timeout(Duration::from_secs(5), listen)
+			.await
+			.expect("listen loop did not exit within 5s of cancellation")
+			.expect("listen task panicked");
+		assert!(joined.is_ok(), "listen returned an error on shutdown: {:?}", joined.err());
+	}
+
+	/// Spawn a TUIC relay server bound to a fixed address with a known user;
+	/// returns its context (to cancel) and the listen-loop join handle. Lets
+	/// the reconnect test restart a server on the same address.
+	async fn spawn_server_on(addr: SocketAddr, uuid: Uuid) -> (Arc<AppContext>, tokio::task::JoinHandle<eyre::Result<()>>) {
+		let (cert, key) = generate_tuic_test_cert();
+		let mut users = HashMap::new();
+		users.insert(uuid, String::from_utf8_lossy(TEST_PASSWORD).to_string());
+
+		let ctx = Arc::new(AppContext::default());
+		let opts = TuicInboundOpts {
+			listen_addr: addr,
+			certificate: cert,
+			private_key: key,
+			alpn: vec!["h3".to_string()],
+			users,
+			auth_timeout: Duration::from_secs(5),
+			max_idle_time: Duration::from_secs(30),
+			zero_rtt: false,
+			..Default::default()
+		};
+		let server = TuicInbound::new(ctx.clone(), opts);
+		let callback = Arc::new(DirectCallback);
+		let handle = tokio::spawn(async move { server.listen(callback.as_ref()).await }.in_current_span());
+		tokio::time::sleep(Duration::from_millis(300)).await;
+		(ctx, handle)
+	}
+
+	/// Attempt one proxied TCP echo through the client. Returns the echoed
+	/// bytes, or an error if the relay/connection is currently unavailable
+	/// (e.g. mid reconnect).
+	async fn proxy_echo_once(client: &Arc<TuicOutbound>, echo_port: u16, msg: &[u8]) -> eyre::Result<Vec<u8>> {
+		let (mut local, remote) = tokio::io::duplex(4096);
+		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_port);
+		let c = client.clone();
+		tokio::spawn(async move {
+			let _ = c.handle_tcp(target, remote, None::<TuicOutbound>).await;
+		});
+		local.write_all(msg).await?;
+		let mut buf = vec![0u8; msg.len()];
+		tokio::time::timeout(Duration::from_secs(2), local.read_exact(&mut buf)).await??;
+		Ok(buf)
+	}
+
+	/// The client must transparently reconnect after the relay server restarts
+	/// on the same address: a new proxied request succeeds over the fresh
+	/// connection even though the original connection (and its streams) were
+	/// torn down.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn test_client_reconnects_after_server_restart() {
+		use tokio::net::TcpListener;
+
+		// Persistent echo target.
+		let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let echo_port = echo.local_addr().unwrap().port();
+		tokio::spawn(async move {
+			while let Ok((mut s, _)) = echo.accept().await {
+				tokio::spawn(async move {
+					let (mut r, mut w) = s.split();
+					let _ = tokio::io::copy(&mut r, &mut w).await;
+				});
+			}
+		});
+
+		// Reserve a fixed UDP port for the relay so the second server can rebind it.
+		let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		let server_addr = probe.local_addr().unwrap();
+		drop(probe);
+
+		let uuid = Uuid::new_v4();
+
+		// Server #1 + client; confirm the proxy works.
+		let (ctx1, handle1) = spawn_server_on(server_addr, uuid).await;
+		let client = connect_client(server_addr, uuid).await.expect("connect client");
+		let got = proxy_echo_once(&client, echo_port, b"before")
+			.await
+			.expect("initial proxied echo must succeed");
+		assert_eq!(got, b"before");
+
+		// Drop server #1 and wait for the listen loop to release the UDP port.
+		ctx1.token.cancel();
+		let _ = tokio::time::timeout(Duration::from_secs(5), handle1).await;
+		tokio::time::sleep(Duration::from_millis(300)).await;
+
+		// Server #2 on the SAME address with the same credentials.
+		let (ctx2, _handle2) = spawn_server_on(server_addr, uuid).await;
+
+		// The supervisor should reconnect within a few backoff cycles; retry the
+		// proxied echo until it succeeds (or give up after ~15s).
+		let mut reconnected = false;
+		for _ in 0..60 {
+			if let Ok(got) = proxy_echo_once(&client, echo_port, b"after").await
+				&& got == b"after"
+			{
+				reconnected = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(250)).await;
+		}
+		assert!(reconnected, "client did not reconnect and proxy after server restart");
+
+		ctx2.token.cancel();
+	}
+
+	/// Shutting the client down while its supervisor is stuck in the reconnect
+	/// backoff loop (server still down) must abandon reconnect and drain the
+	/// tracked tasks promptly, not hang.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn test_client_shuts_down_cleanly_while_reconnecting() {
+		let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		let server_addr = probe.local_addr().unwrap();
+		drop(probe);
+		let uuid = Uuid::new_v4();
+
+		let (ctx1, handle1) = spawn_server_on(server_addr, uuid).await;
+		let client = connect_client(server_addr, uuid).await.expect("connect client");
+
+		// Kill the server so the supervisor enters its reconnect backoff loop.
+		ctx1.token.cancel();
+		let _ = tokio::time::timeout(Duration::from_secs(5), handle1).await;
+		// Let the supervisor notice the drop and start retrying.
+		tokio::time::sleep(Duration::from_millis(500)).await;
+
+		// Now shut the client down. The supervisor (sharing `client.ctx`) must
+		// stop reconnecting and its tracked tasks must drain.
+		client.ctx.token.cancel();
+		client.ctx.tasks.close();
+		tokio::time::timeout(Duration::from_secs(5), client.ctx.tasks.wait())
+			.await
+			.expect("client tasks did not drain within 5s while reconnecting");
+	}
+
+	/// With reconnect disabled, a dropped connection is NOT re-established:
+	/// after the server restarts on the same address, proxied requests keep
+	/// failing.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn test_client_does_not_reconnect_when_disabled() {
+		use tokio::net::TcpListener;
+
+		let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let echo_port = echo.local_addr().unwrap().port();
+		tokio::spawn(async move {
+			while let Ok((mut s, _)) = echo.accept().await {
+				tokio::spawn(async move {
+					let (mut r, mut w) = s.split();
+					let _ = tokio::io::copy(&mut r, &mut w).await;
+				});
+			}
+		});
+
+		let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		let server_addr = probe.local_addr().unwrap();
+		drop(probe);
+		let uuid = Uuid::new_v4();
+
+		let (ctx1, handle1) = spawn_server_on(server_addr, uuid).await;
+		let client = connect_client_with(
+			server_addr,
+			uuid,
+			ReconnectConfig {
+				enabled: false,
+				..Default::default()
+			},
+		)
+		.await
+		.expect("connect client");
+
+		// Works while the original connection is alive.
+		let got = proxy_echo_once(&client, echo_port, b"before")
+			.await
+			.expect("initial proxied echo must succeed");
+		assert_eq!(got, b"before");
+
+		// Drop server #1, restart on the same address.
+		ctx1.token.cancel();
+		let _ = tokio::time::timeout(Duration::from_secs(5), handle1).await;
+		tokio::time::sleep(Duration::from_millis(300)).await;
+		let (ctx2, _handle2) = spawn_server_on(server_addr, uuid).await;
+
+		// Reconnect is disabled, so no proxied echo should ever succeed even
+		// though a fresh server is now listening.
+		let mut recovered = false;
+		for _ in 0..16 {
+			if proxy_echo_once(&client, echo_port, b"after").await.is_ok() {
+				recovered = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(250)).await;
+		}
+		assert!(!recovered, "client reconnected despite reconnect being disabled");
+
+		ctx2.token.cancel();
 	}
 }

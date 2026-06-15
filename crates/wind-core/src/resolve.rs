@@ -93,3 +93,76 @@ pub fn filter_addrs_by_preference(addrs: Vec<IpAddr>, prefer: StackPrefer) -> Ve
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn ips(list: &[&str]) -> Vec<IpAddr> {
+		list.iter().map(|s| s.parse().unwrap()).collect()
+	}
+
+	#[test]
+	fn pick_only_modes_require_matching_family() {
+		let mixed = ips(&["192.168.1.1", "2001:db8::1"]);
+		assert!(pick_addr_by_preference(mixed.clone(), StackPrefer::V4only).unwrap().is_ipv4());
+		assert!(pick_addr_by_preference(mixed, StackPrefer::V6only).unwrap().is_ipv6());
+
+		assert!(pick_addr_by_preference(ips(&["2001:db8::1"]), StackPrefer::V4only).is_none());
+		assert!(pick_addr_by_preference(ips(&["192.168.1.1"]), StackPrefer::V6only).is_none());
+	}
+
+	#[test]
+	fn pick_first_modes_fall_back_to_other_family() {
+		assert!(
+			pick_addr_by_preference(ips(&["2001:db8::1", "192.168.1.1"]), StackPrefer::V4first)
+				.unwrap()
+				.is_ipv4()
+		);
+		// V4first with no IPv4 falls back to IPv6.
+		assert!(
+			pick_addr_by_preference(ips(&["2001:db8::1"]), StackPrefer::V4first)
+				.unwrap()
+				.is_ipv6()
+		);
+
+		assert!(
+			pick_addr_by_preference(ips(&["192.168.1.1", "2001:db8::1"]), StackPrefer::V6first)
+				.unwrap()
+				.is_ipv6()
+		);
+		// V6first with no IPv6 falls back to IPv4.
+		assert!(
+			pick_addr_by_preference(ips(&["192.168.1.1"]), StackPrefer::V6first)
+				.unwrap()
+				.is_ipv4()
+		);
+	}
+
+	#[test]
+	fn pick_empty_list_is_none() {
+		assert!(pick_addr_by_preference(vec![], StackPrefer::V4first).is_none());
+	}
+
+	#[test]
+	fn filter_only_modes_keep_a_single_family() {
+		let addrs = ips(&["192.168.1.1", "2001:db8::1", "10.0.0.1"]);
+		let v4 = filter_addrs_by_preference(addrs.clone(), StackPrefer::V4only);
+		assert_eq!(v4, ips(&["192.168.1.1", "10.0.0.1"]));
+		let v6 = filter_addrs_by_preference(addrs, StackPrefer::V6only);
+		assert_eq!(v6, ips(&["2001:db8::1"]));
+	}
+
+	#[test]
+	fn filter_first_modes_group_preferred_family_first_preserving_order() {
+		let addrs = ips(&["2001:db8::1", "192.168.1.1", "::1", "10.0.0.1"]);
+		assert_eq!(
+			filter_addrs_by_preference(addrs.clone(), StackPrefer::V4first),
+			ips(&["192.168.1.1", "10.0.0.1", "2001:db8::1", "::1"]),
+		);
+		assert_eq!(
+			filter_addrs_by_preference(addrs, StackPrefer::V6first),
+			ips(&["2001:db8::1", "::1", "192.168.1.1", "10.0.0.1"]),
+		);
+	}
+}

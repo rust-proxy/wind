@@ -71,3 +71,82 @@ pub fn is_private_ip(ip: &IpAddr) -> bool {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use std::net::IpAddr;
+
+	use super::*;
+
+	fn ip(s: &str) -> IpAddr {
+		s.parse().unwrap()
+	}
+
+	#[test]
+	fn private_ipv4_ranges_are_private() {
+		for s in [
+			"10.0.0.1",
+			"10.255.255.255",
+			"172.16.0.0",
+			"172.31.255.255",
+			"192.168.0.1",
+			"192.168.255.255",
+			"169.254.0.1",
+		] {
+			assert!(is_private_ip(&ip(s)), "{s} should be private");
+		}
+	}
+
+	#[test]
+	fn public_ipv4_and_boundary_ranges_are_public() {
+		for s in [
+			"8.8.8.8",
+			"1.1.1.1",
+			"11.0.0.1",
+			"172.15.255.255", // just below the 172.16/12 block
+			"172.32.0.0",     // just above it
+			"192.167.255.255",
+			"169.253.0.1",
+		] {
+			assert!(!is_private_ip(&ip(s)), "{s} should be public");
+		}
+	}
+
+	#[test]
+	fn private_ipv6_ranges_are_private() {
+		// fc00::/7 (fc.. and fd..) and fe80::/10 (fe80.. through febf..).
+		for s in ["fc00::1", "fd00::1", "fe80::1", "febf::1"] {
+			assert!(is_private_ip(&ip(s)), "{s} should be private");
+		}
+	}
+
+	#[test]
+	fn public_ipv6_ranges_are_public() {
+		// 2001:db8 doc range, loopback, and fec0 (outside fe80::/10).
+		for s in ["2001:db8::1", "::1", "fec0::1"] {
+			assert!(!is_private_ip(&ip(s)), "{s} should be public");
+		}
+	}
+
+	#[test]
+	fn stack_prefer_parses_all_aliases_case_insensitively() {
+		for s in ["v4", "v4only", "only_v4", "V4ONLY"] {
+			assert_eq!(s.parse::<StackPrefer>(), Ok(StackPrefer::V4only), "{s}");
+		}
+		for s in ["v6", "v6only", "only_v6"] {
+			assert_eq!(s.parse::<StackPrefer>(), Ok(StackPrefer::V6only), "{s}");
+		}
+		for s in ["v4v6", "v4first", "prefer_v4", "auto"] {
+			assert_eq!(s.parse::<StackPrefer>(), Ok(StackPrefer::V4first), "{s}");
+		}
+		for s in ["v6v4", "v6first", "prefer_v6"] {
+			assert_eq!(s.parse::<StackPrefer>(), Ok(StackPrefer::V6first), "{s}");
+		}
+	}
+
+	#[test]
+	fn stack_prefer_rejects_unknown() {
+		assert!("nonsense".parse::<StackPrefer>().is_err());
+		assert!("".parse::<StackPrefer>().is_err());
+	}
+}
