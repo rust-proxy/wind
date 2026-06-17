@@ -103,6 +103,7 @@ impl fmt::Display for UserId {
 pub enum Protocol {
 	Tuic,
 	Socks5,
+	Naive,
 }
 
 /// Per-connection context handed to [`ConnectionHooks`].
