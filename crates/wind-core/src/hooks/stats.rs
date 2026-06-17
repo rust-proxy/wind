@@ -193,7 +193,7 @@ mod tests {
 	use super::*;
 
 	fn uid(s: &str) -> UserId {
-		UserId::new(s)
+		UserId::from(s)
 	}
 
 	#[test]

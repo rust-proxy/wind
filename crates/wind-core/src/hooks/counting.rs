@@ -100,7 +100,7 @@ mod tests {
 	async fn counts_reads_as_upload_and_writes_as_download() {
 		let (client, server) = tokio::io::duplex(1024);
 		let stats = Arc::new(StatsCollector::new());
-		let user = UserId::new("u1");
+		let user = UserId::from("u1");
 		let mut counted = CountingStream::new(server, stats.clone(), user.clone());
 
 		// Peer writes 5 bytes → our wrapper reads them → counted as upload.

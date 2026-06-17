@@ -37,41 +37,64 @@ pub use counting::CountingStream;
 pub use stats::{StatsCollector, UserTraffic};
 
 /// Opaque per-user identity that ties auth → stats → connection-management
-/// together. Cheap to clone (`Arc<str>`).
+/// together. Backed by raw bytes (`Arc<[u8]>`) so identities need not be valid
+/// UTF-8 (e.g. binary tokens or raw UUID bytes); cheap to clone.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct UserId(Arc<str>);
+pub struct UserId(Arc<[u8]>);
 
 impl UserId {
-	pub fn new(s: impl Into<Arc<str>>) -> Self {
-		Self(s.into())
+	pub fn new(bytes: impl Into<Arc<[u8]>>) -> Self {
+		Self(bytes.into())
 	}
 
-	pub fn as_str(&self) -> &str {
+	pub fn as_bytes(&self) -> &[u8] {
 		&self.0
 	}
 }
 
 impl From<Uuid> for UserId {
 	fn from(u: Uuid) -> Self {
-		Self(Arc::from(u.to_string().as_str()))
+		Self(Arc::from(u.into_bytes().as_slice()))
 	}
 }
 
 impl From<String> for UserId {
 	fn from(s: String) -> Self {
-		Self(Arc::from(s.as_str()))
+		Self(Arc::from(s.into_bytes().as_slice()))
 	}
 }
 
 impl From<&str> for UserId {
 	fn from(s: &str) -> Self {
-		Self(Arc::from(s))
+		Self(Arc::from(s.as_bytes()))
+	}
+}
+
+impl From<Vec<u8>> for UserId {
+	fn from(v: Vec<u8>) -> Self {
+		Self(Arc::from(v.as_slice()))
+	}
+}
+
+impl From<&[u8]> for UserId {
+	fn from(b: &[u8]) -> Self {
+		Self(Arc::from(b))
 	}
 }
 
 impl fmt::Display for UserId {
+	/// Render as UTF-8 when the bytes are valid (string- or UUID-string-derived
+	/// ids print verbatim), otherwise as lowercase hex.
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(&self.0)
+		match std::str::from_utf8(&self.0) {
+			Ok(s) => f.write_str(s),
+			Err(_) => {
+				for b in self.0.iter() {
+					write!(f, "{b:02x}")?;
+				}
+				Ok(())
+			}
+		}
 	}
 }
 
