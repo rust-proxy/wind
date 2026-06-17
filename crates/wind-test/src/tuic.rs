@@ -804,4 +804,170 @@ mod tests {
 
 		ctx2.token.cancel();
 	}
+
+	/// End-to-end hooks test (quinn backend): a custom-configured TUIC server
+	/// with a [`StatsCollector`] and a per-user connection-limit
+	/// [`ConnectionHooks`]. After a TCP relay, the collector must show non-zero
+	/// per-user upload/download (proving the QUIC-stats sampler ran) and at
+	/// least one request; a second connection for the same user must be
+	/// rejected.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn test_tuic_hooks_stats_and_conn_limit() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		use wind_core::{ConnInfo, ConnectDecision, ConnectionHooks, InboundHooks, StatsCollector, UserId};
+
+		// Per-user concurrent-connection limiter.
+		struct Limiter {
+			limit: usize,
+			active: AtomicUsize,
+			rejected: AtomicUsize,
+		}
+		#[async_trait::async_trait]
+		impl ConnectionHooks for Limiter {
+			async fn on_authenticated(&self, _i: &ConnInfo, _u: &UserId) -> ConnectDecision {
+				if self.active.fetch_add(1, Ordering::SeqCst) + 1 > self.limit {
+					self.active.fetch_sub(1, Ordering::SeqCst);
+					self.rejected.fetch_add(1, Ordering::SeqCst);
+					ConnectDecision::Reject("connection limit".into())
+				} else {
+					ConnectDecision::Accept
+				}
+			}
+
+			async fn on_disconnect(&self, _i: &ConnInfo, u: Option<&UserId>) {
+				if u.is_some() {
+					self.active.fetch_sub(1, Ordering::SeqCst);
+				}
+			}
+		}
+
+		// TCP echo target.
+		let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let echo_addr = echo.local_addr().unwrap();
+		tokio::spawn(async move {
+			while let Ok((stream, _)) = echo.accept().await {
+				tokio::spawn(async move {
+					let (mut r, mut w) = stream.into_split();
+					tokio::io::copy(&mut r, &mut w).await.ok();
+				});
+			}
+		});
+
+		let stats = Arc::new(StatsCollector::new());
+		let limiter = Arc::new(Limiter {
+			limit: 1,
+			active: AtomicUsize::new(0),
+			rejected: AtomicUsize::new(0),
+		});
+
+		// Bring up a TUIC server with hooks wired in.
+		let (cert, key) = generate_tuic_test_cert();
+		let uuid = Uuid::new_v4();
+		let mut users = HashMap::new();
+		users.insert(uuid, String::from_utf8_lossy(TEST_PASSWORD).to_string());
+		let temp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		let server_addr = temp.local_addr().unwrap();
+		drop(temp);
+
+		let ctx = Arc::new(AppContext::default());
+		let hooks = InboundHooks {
+			stats: Some(stats.clone()),
+			connection: Some(limiter.clone()),
+			sample_interval: Duration::from_millis(200),
+			..Default::default()
+		};
+		let opts = TuicInboundOpts {
+			listen_addr: server_addr,
+			certificate: cert,
+			private_key: key,
+			alpn: vec!["h3".to_string()],
+			users,
+			auth_timeout: Duration::from_secs(5),
+			max_idle_time: Duration::from_secs(30),
+			zero_rtt: false,
+			hooks,
+			..Default::default()
+		};
+		let server = TuicInbound::new(ctx.clone(), opts);
+		let cb = Arc::new(DirectCallback);
+		let listen = tokio::spawn(async move { server.listen(cb.as_ref()).await }.in_current_span());
+		tokio::time::sleep(Duration::from_millis(300)).await;
+
+		let connect = |reconnect: ReconnectConfig| async move {
+			let cctx = Arc::new(AppContext::default());
+			let opts = TuicOutboundOpts {
+				peer_addr: server_addr,
+				sni: "localhost".to_string(),
+				auth: (uuid, Arc::from(TEST_PASSWORD)),
+				zero_rtt_handshake: false,
+				heartbeat: Duration::from_secs(5),
+				gc_interval: Duration::from_secs(5),
+				gc_lifetime: Duration::from_secs(30),
+				skip_cert_verify: true,
+				alpn: vec!["h3".to_string()],
+				reconnect,
+			};
+			let c = Arc::new(TuicOutbound::new(cctx, opts).await.unwrap());
+			let pc = c.clone();
+			tokio::spawn(
+				async move {
+					let _ = pc.start_poll().await;
+				}
+				.in_current_span(),
+			);
+			tokio::time::sleep(Duration::from_millis(250)).await;
+			c
+		};
+
+		// Client 1: authenticates and relays a payload through the echo target.
+		let client = connect(ReconnectConfig::default()).await;
+		let (mut local, remote) = tokio::io::duplex(65536);
+		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
+		{
+			let client = client.clone();
+			tokio::spawn(
+				async move {
+					let _ = client.handle_tcp(target, remote, None::<TuicOutbound>).await;
+				}
+				.in_current_span(),
+			);
+		}
+		let payload: Vec<u8> = (0u8..=255).cycle().take(32 * 1024).collect();
+		local.write_all(&payload).await.unwrap();
+		let mut recv = vec![0u8; payload.len()];
+		tokio::time::timeout(Duration::from_secs(10), local.read_exact(&mut recv))
+			.await
+			.expect("relay timed out")
+			.expect("relay read failed");
+		assert_eq!(recv, payload, "echoed payload must match");
+
+		// Let at least one sampler tick fold the QUIC byte counters into the collector.
+		tokio::time::sleep(Duration::from_millis(500)).await;
+
+		let user = UserId::from(uuid);
+		let s = stats.snapshot_user(&user).expect("stats must be recorded for the user");
+		assert!(s.request_count >= 1, "expected >=1 request, got {}", s.request_count);
+		assert!(s.upload > 0, "expected upload > 0");
+		assert!(s.download > 0, "expected download > 0");
+
+		// Client 2 (same user) must be rejected by the per-user limit. Disable
+		// reconnect so it doesn't spin re-auth attempts.
+		let c2 = connect(ReconnectConfig {
+			enabled: false,
+			..ReconnectConfig::default()
+		})
+		.await;
+		let (_l2, r2) = tokio::io::duplex(1024);
+		let t2 = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
+		let _ = c2.handle_tcp(t2, r2, None::<TuicOutbound>).await;
+		tokio::time::sleep(Duration::from_millis(400)).await;
+		assert!(
+			limiter.rejected.load(Ordering::SeqCst) >= 1,
+			"a second connection for the same user must be rejected by the limit hook"
+		);
+
+		ctx.token.cancel();
+		let _ = tokio::time::timeout(Duration::from_secs(5), listen).await;
+	}
 }

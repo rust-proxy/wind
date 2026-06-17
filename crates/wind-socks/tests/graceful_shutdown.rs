@@ -45,6 +45,7 @@ async fn spawn_inbound(cancel: CancellationToken) -> (SocketAddr, tokio::task::J
 		auth: AuthMode::NoAuth,
 		skip_auth: false,
 		allow_udp: false,
+		hooks: Default::default(),
 	};
 	let inbound = SocksInbound::new(opts, cancel);
 	let handle = tokio::spawn(async move {

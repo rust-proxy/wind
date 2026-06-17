@@ -163,4 +163,10 @@ impl QuicConnection for QuicheConnection {
 	fn peer_addr(&self) -> Option<SocketAddr> {
 		Some(self.0.peer_addr)
 	}
+
+	async fn byte_stats(&self) -> Option<(u64, u64)> {
+		let (tx, rx) = oneshot::channel();
+		self.0.cmd_tx.send(DriverCommand::ByteStats(tx)).ok()?;
+		rx.await.ok().flatten()
+	}
 }

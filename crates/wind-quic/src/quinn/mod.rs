@@ -162,6 +162,11 @@ impl QuicConnection for QuinnConnection {
 	fn peer_addr(&self) -> Option<SocketAddr> {
 		Some(self.conn.remote_address())
 	}
+
+	async fn byte_stats(&self) -> Option<(u64, u64)> {
+		let stats = self.conn.stats();
+		Some((stats.udp_tx.bytes, stats.udp_rx.bytes))
+	}
 }
 
 /// A quinn server endpoint that yields [`QuinnConnection`]s.

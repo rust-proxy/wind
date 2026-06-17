@@ -1,4 +1,6 @@
+pub mod app;
 pub mod dispatcher;
+pub mod hooks;
 pub mod inbound;
 mod interface;
 pub mod io;
@@ -7,7 +9,12 @@ pub mod resolve;
 pub mod rule;
 pub mod types;
 
+pub use app::{App, Plugin};
 pub use dispatcher::{AclRouter, Dispatcher, OutboundAction, RouteAction, Router};
+pub use hooks::{
+	ConnInfo, ConnectDecision, ConnectionHooks, InboundHooks, Protocol, StaticTuicAuth, StaticUserPass, StatsCollector,
+	TrafficSink, TuicAuthenticator, UserId, UserPassAuthenticator, UserTraffic,
+};
 pub use inbound::*;
 pub use interface::*;
 pub use outbound::*;

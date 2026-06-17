@@ -86,6 +86,8 @@ pub(crate) enum DriverCommand {
 		context: Vec<u8>,
 		reply: oneshot::Sender<Option<Vec<u8>>>,
 	},
+	/// Read cumulative `(sent, recv)` wire byte counters.
+	ByteStats(oneshot::Sender<Option<(u64, u64)>>),
 	/// Shut down one direction of a stream with an error code.
 	StreamShutdown { sid: u64, write: bool, code: u64 },
 	/// Close the connection.
@@ -192,6 +194,7 @@ pub(crate) struct BridgeDriver {
 	out_datagrams: VecDeque<Bytes>,
 	pending_opens: VecDeque<PendingOpen>,
 	pending_exports: VecDeque<ExportReq>,
+	pending_byte_stats: VecDeque<oneshot::Sender<Option<(u64, u64)>>>,
 	pending_shutdowns: VecDeque<(u64, bool, u64)>,
 	pending_close: Option<(u32, Vec<u8>)>,
 
@@ -239,6 +242,7 @@ impl BridgeDriver {
 			out_datagrams: VecDeque::new(),
 			pending_opens: VecDeque::new(),
 			pending_exports: VecDeque::new(),
+			pending_byte_stats: VecDeque::new(),
 			pending_shutdowns: VecDeque::new(),
 			pending_close: None,
 			shared,
@@ -448,6 +452,7 @@ impl BridgeDriver {
 				context,
 				reply,
 			} => self.pending_exports.push_back((out_len, label, context, reply)),
+			DriverCommand::ByteStats(reply) => self.pending_byte_stats.push_back(reply),
 			DriverCommand::StreamShutdown { sid, write, code } => self.pending_shutdowns.push_back((sid, write, code)),
 			DriverCommand::Close { code, reason } => self.pending_close = Some((code, reason)),
 		}
@@ -588,6 +593,11 @@ impl ApplicationOverQuic for BridgeDriver {
 		while let Some((out_len, label, context, reply)) = self.pending_exports.pop_front() {
 			let res = export_keying_material(qconn, out_len, &label, &context);
 			let _ = reply.send(res);
+		}
+
+		while let Some(reply) = self.pending_byte_stats.pop_front() {
+			let stats = qconn.stats();
+			let _ = reply.send(Some((stats.sent_bytes, stats.recv_bytes)));
 		}
 
 		while let Some(op) = self.pending_opens.pop_front() {

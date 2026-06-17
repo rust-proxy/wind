@@ -407,6 +407,7 @@ async fn start_test_proxy(socks_port: u16) -> eyre::Result<(Arc<wind_core::AppCo
 			auth: wind_socks::inbound::AuthMode::NoAuth,
 			skip_auth: false,
 			allow_udp: true,
+			hooks: Default::default(),
 		},
 		tuic_port: 0, // Let OS assign a port
 	};

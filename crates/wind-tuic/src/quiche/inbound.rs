@@ -11,7 +11,10 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, info};
 use uuid::Uuid;
-use wind_core::inbound::{AbstractInbound, InboundCallback};
+use wind_core::{
+	InboundHooks,
+	inbound::{AbstractInbound, InboundCallback},
+};
 use wind_quic::{
 	QuicConnection as _, ServerTlsConfig,
 	quiche::{CertStore, bind_server},
@@ -43,6 +46,9 @@ pub struct TuicheInbound {
 	/// HTTP/3 masquerade config; when `Some`, non-TUIC connections are served
 	/// as a reverse-proxy HTTP/3 web server.
 	masquerade: Option<crate::server::MasqueradeConfig>,
+	/// Downstream extensibility hooks (auth / traffic stats / connection
+	/// management). Defaults to all-`None` (no behavior change).
+	hooks: InboundHooks,
 }
 
 impl TuicheInbound {
@@ -101,8 +107,10 @@ impl AbstractInbound for TuicheInbound {
 			let cb = cb.clone();
 			let cancel = root_cancel.child_token();
 			let masquerade = self.masquerade.clone();
+			let hooks = self.hooks.clone();
 			conn_tasks.spawn(
-				crate::server::serve_connection(conn, remote, users, AUTH_TIMEOUT, cb, cancel, masquerade).instrument(span),
+				crate::server::serve_connection(conn, remote, users, AUTH_TIMEOUT, cb, cancel, masquerade, hooks)
+					.instrument(span),
 			);
 		}
 
@@ -122,6 +130,7 @@ pub struct TuicheInboundBuilder {
 	opts: ConnectionOpts,
 	cancel: Option<CancellationToken>,
 	masquerade: Option<crate::server::MasqueradeConfig>,
+	hooks: InboundHooks,
 }
 
 impl TuicheInboundBuilder {
@@ -135,7 +144,15 @@ impl TuicheInboundBuilder {
 			opts: ConnectionOpts::default(),
 			cancel: None,
 			masquerade: None,
+			hooks: InboundHooks::default(),
 		}
+	}
+
+	/// Set the downstream extensibility hooks (auth / traffic stats /
+	/// connection management).
+	pub fn hooks(mut self, hooks: InboundHooks) -> Self {
+		self.hooks = hooks;
+		self
 	}
 
 	/// Enable the HTTP/3 masquerade: non-TUIC connections are reverse-proxied
@@ -214,6 +231,7 @@ impl TuicheInboundBuilder {
 			cert_store,
 			cancel: self.cancel.unwrap_or_default(),
 			masquerade: self.masquerade,
+			hooks: self.hooks,
 		})
 	}
 }
