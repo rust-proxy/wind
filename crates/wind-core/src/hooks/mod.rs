@@ -6,15 +6,15 @@
 //! * **Authentication** — [`TuicAuthenticator`] (supplies password material;
 //!   the core keeps the constant-time token compare) and
 //!   [`UserPassAuthenticator`] (SOCKS5 username/password).
-//! * **Traffic statistics** — a central, lock-free [`StatsCollector`] written as
-//!   bytes flow, drained periodically to a [`TrafficSink`].
+//! * **Traffic statistics** — a central, lock-free [`StatsCollector`] written
+//!   as bytes flow, drained periodically to a [`TrafficSink`].
 //! * **Connection management** — [`ConnectionHooks`] lifecycle callbacks with a
 //!   veto ([`ConnectDecision`]) for per-user limits.
 //!
 //! All traits are object-safe (`#[async_trait]` + `Arc<dyn _>`), mirroring
 //! [`OutboundAction`](crate::OutboundAction). They are bundled in
-//! [`InboundHooks`], which is threaded into each inbound via its opts struct and
-//! defaults to all-`None` (no behavior change).
+//! [`InboundHooks`], which is threaded into each inbound via its opts struct
+//! and defaults to all-`None` (no behavior change).
 
 use std::{
 	collections::HashMap,
@@ -217,10 +217,7 @@ impl StaticTuicAuth {
 	/// Build from the existing `HashMap<Uuid, String>` password config.
 	pub fn from_passwords(users: &HashMap<Uuid, String>) -> Self {
 		Self {
-			users: users
-				.iter()
-				.map(|(uuid, pw)| (*uuid, Arc::from(pw.as_bytes())))
-				.collect(),
+			users: users.iter().map(|(uuid, pw)| (*uuid, Arc::from(pw.as_bytes()))).collect(),
 		}
 	}
 }

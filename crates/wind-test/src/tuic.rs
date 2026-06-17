@@ -808,8 +808,9 @@ mod tests {
 	/// End-to-end hooks test (quinn backend): a custom-configured TUIC server
 	/// with a [`StatsCollector`] and a per-user connection-limit
 	/// [`ConnectionHooks`]. After a TCP relay, the collector must show non-zero
-	/// per-user upload/download (proving the QUIC-stats sampler ran) and at least
-	/// one request; a second connection for the same user must be rejected.
+	/// per-user upload/download (proving the QUIC-stats sampler ran) and at
+	/// least one request; a second connection for the same user must be
+	/// rejected.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn test_tuic_hooks_stats_and_conn_limit() {
 		use std::sync::atomic::{AtomicUsize, Ordering};
@@ -833,6 +834,7 @@ mod tests {
 					ConnectDecision::Accept
 				}
 			}
+
 			async fn on_disconnect(&self, _i: &ConnInfo, u: Option<&UserId>) {
 				if u.is_some() {
 					self.active.fetch_sub(1, Ordering::SeqCst);
@@ -908,7 +910,12 @@ mod tests {
 			};
 			let c = Arc::new(TuicOutbound::new(cctx, opts).await.unwrap());
 			let pc = c.clone();
-			tokio::spawn(async move { let _ = pc.start_poll().await; }.in_current_span());
+			tokio::spawn(
+				async move {
+					let _ = pc.start_poll().await;
+				}
+				.in_current_span(),
+			);
 			tokio::time::sleep(Duration::from_millis(250)).await;
 			c
 		};
@@ -919,7 +926,12 @@ mod tests {
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
 		{
 			let client = client.clone();
-			tokio::spawn(async move { let _ = client.handle_tcp(target, remote, None::<TuicOutbound>).await; }.in_current_span());
+			tokio::spawn(
+				async move {
+					let _ = client.handle_tcp(target, remote, None::<TuicOutbound>).await;
+				}
+				.in_current_span(),
+			);
 		}
 		let payload: Vec<u8> = (0u8..=255).cycle().take(32 * 1024).collect();
 		local.write_all(&payload).await.unwrap();

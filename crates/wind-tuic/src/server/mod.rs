@@ -554,8 +554,8 @@ async fn run_traffic_sampler<C: QuicConnection>(ctx: Arc<InboundCtx<C>>, cancel:
 	}
 }
 
-/// Read the connection's `(sent, recv)` wire counters and record the delta since
-/// `cursor` as download/upload for `user`, then advance the cursor.
+/// Read the connection's `(sent, recv)` wire counters and record the delta
+/// since `cursor` as download/upload for `user`, then advance the cursor.
 async fn sample_once<C: QuicConnection>(
 	ctx: &Arc<InboundCtx<C>>,
 	stats: &StatsCollector,

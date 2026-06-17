@@ -148,8 +148,8 @@ impl TuicheInboundBuilder {
 		}
 	}
 
-	/// Set the downstream extensibility hooks (auth / traffic stats / connection
-	/// management).
+	/// Set the downstream extensibility hooks (auth / traffic stats /
+	/// connection management).
 	pub fn hooks(mut self, hooks: InboundHooks) -> Self {
 		self.hooks = hooks;
 		self

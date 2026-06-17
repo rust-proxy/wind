@@ -155,15 +155,16 @@ impl App {
 		self
 	}
 
-	/// Register an inbound via a factory that receives the finalized hooks bundle
-	/// and the shared context.
+	/// Register an inbound via a factory that receives the finalized hooks
+	/// bundle and the shared context.
 	pub fn add_inbound_with<I, F>(mut self, factory: F) -> Self
 	where
 		I: AbstractInbound + Send + Sync + 'static,
 		F: FnOnce(InboundHooks, Arc<AppContext>) -> I + 'static,
 	{
-		self.inbounds
-			.push(Box::new(move |hooks, ctx| Box::new(factory(hooks, ctx)) as Box<dyn DynInbound>));
+		self.inbounds.push(Box::new(move |hooks, ctx| {
+			Box::new(factory(hooks, ctx)) as Box<dyn DynInbound>
+		}));
 		self
 	}
 

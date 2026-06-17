@@ -1,8 +1,8 @@
 //! Byte-counting stream wrapper for SOCKS5 traffic accounting.
 //!
 //! TUIC samples the QUIC connection's own byte counters (see the TUIC server
-//! stats sampler), but SOCKS5 is plain TCP with no connection-level counters, so
-//! we count at the IO point: this wrapper increments the shared
+//! stats sampler), but SOCKS5 is plain TCP with no connection-level counters,
+//! so we count at the IO point: this wrapper increments the shared
 //! [`StatsCollector`] on every read/write. `poll_flush`/`poll_shutdown` are
 //! forwarded verbatim so half-close semantics (relied on by
 //! `copy_bidirectional`) are preserved.
@@ -70,11 +70,7 @@ impl<S: AsyncWrite> AsyncWrite for CountingStream<S> {
 		self.project().inner.poll_shutdown(cx)
 	}
 
-	fn poll_write_vectored(
-		self: Pin<&mut Self>,
-		cx: &mut Context<'_>,
-		bufs: &[io::IoSlice<'_>],
-	) -> Poll<io::Result<usize>> {
+	fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
 		let this = self.project();
 		let res = this.inner.poll_write_vectored(cx, bufs);
 		if let Poll::Ready(Ok(n)) = &res

@@ -303,8 +303,8 @@ async fn serve_socks(
 	Ok(())
 }
 
-/// Interpose counting forwarders on a callback-facing [`UdpStream`]: payloads the
-/// callback reads (client→proxy) are recorded as upload, payloads it writes
+/// Interpose counting forwarders on a callback-facing [`UdpStream`]: payloads
+/// the callback reads (client→proxy) are recorded as upload, payloads it writes
 /// (proxy→client) as download. Used only when SOCKS5 stats are enabled — the
 /// default path keeps the raw channels with zero overhead. The forwarder tasks
 /// exit when either side closes its channel.

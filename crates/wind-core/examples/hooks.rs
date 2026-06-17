@@ -3,10 +3,10 @@
 //! Demonstrates the three downstream extension points when `wind` is used as a
 //! library:
 //!
-//! 1. **Authentication** — a custom [`TuicAuthenticator`] (here a static map, but
-//!    it could hit a database or an external service).
-//! 2. **Traffic statistics** — a [`TrafficSink`] that receives periodic per-user
-//!    batches drained from the central collector.
+//! 1. **Authentication** — a custom [`TuicAuthenticator`] (here a static map,
+//!    but it could hit a database or an external service).
+//! 2. **Traffic statistics** — a [`TrafficSink`] that receives periodic
+//!    per-user batches drained from the central collector.
 //! 3. **Connection management** — a [`ConnectionHooks`] enforcing a per-user
 //!    concurrent-connection limit.
 //!
@@ -25,10 +25,7 @@ use dashmap::DashMap;
 use uuid::Uuid;
 use wind_core::{
 	AclRouter, App, ConnInfo, ConnectDecision, ConnectionHooks, OutboundAction, TrafficSink, TuicAuthenticator, UserId,
-	UserTraffic,
-	tcp::AbstractTcpStream,
-	types::TargetAddr,
-	udp::UdpStream,
+	UserTraffic, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream,
 };
 
 /// Authentication backed by an in-memory map (stand-in for a DB lookup).

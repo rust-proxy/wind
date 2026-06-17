@@ -1,7 +1,7 @@
 //! Lock-free per-user traffic statistics.
 //!
-//! Ported from naive-rs (`deps/xpanel/xpanel-core/src/stats.rs`) and re-keyed on
-//! [`UserId`] instead of an `i64` panel id. The collector is written to
+//! Ported from naive-rs (`deps/xpanel/xpanel-core/src/stats.rs`) and re-keyed
+//! on [`UserId`] instead of an `i64` panel id. The collector is written to
 //! continuously as bytes flow (one atomic `fetch_add` per IO buffer / packet /
 //! sampler tick), and drained periodically by a flush task via [`reset_all`],
 //! which atomically swaps each user's counters to zero and returns the deltas.
@@ -271,7 +271,11 @@ mod tests {
 			}
 			let collected = drain.join().unwrap();
 			let remaining: u64 = c.reset_all().iter().map(|t| t.upload).sum();
-			assert_eq!(collected + remaining, expected, "data loss: {collected}+{remaining}!={expected}");
+			assert_eq!(
+				collected + remaining,
+				expected,
+				"data loss: {collected}+{remaining}!={expected}"
+			);
 		}
 	}
 }
