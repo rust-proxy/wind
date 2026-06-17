@@ -18,7 +18,7 @@ use rustls::{
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 use uuid::Uuid;
-use wind_core::{AbstractInbound, AppContext, InboundCallback};
+use wind_core::{AbstractInbound, AppContext, InboundCallback, InboundHooks};
 use wind_quic::quinn::QuinnConnection;
 
 use crate::quinn::CongestionControl;
@@ -74,6 +74,10 @@ pub struct TuicInboundOpts {
 	/// first stream byte isn't `0x05`) are served as a reverse-proxy HTTP/3
 	/// web server instead of being dropped.
 	pub masquerade: Option<crate::server::MasqueradeConfig>,
+
+	/// Downstream extensibility hooks (auth / traffic stats / connection
+	/// management). Defaults to all-`None` (no behavior change).
+	pub hooks: InboundHooks,
 }
 
 impl Default for TuicInboundOpts {
@@ -98,6 +102,7 @@ impl Default for TuicInboundOpts {
 			congestion_control: CongestionControl::Bbr,
 			initial_window: 1024 * 1024,
 			masquerade: None,
+			hooks: InboundHooks::default(),
 		}
 	}
 }
@@ -224,6 +229,7 @@ impl AbstractInbound for TuicInbound {
 					let auth_timeout = opts.auth_timeout;
 					let zero_rtt = opts.zero_rtt;
 					let masquerade = opts.masquerade.clone();
+					let hooks = opts.hooks.clone();
 					let cb = cb.clone();
 					let conn_cancel = self.cancel.child_token();
 					let remote = incoming.remote_address();
@@ -234,7 +240,7 @@ impl AbstractInbound for TuicInbound {
 					// `tasks.close()` + `tasks.wait()` after cancelling).
 					self.ctx.tasks.spawn(spawn_logged(
 						"Connection handler",
-						handle_connection(incoming, users, auth_timeout, zero_rtt, masquerade, cb, conn_cancel),
+						handle_connection(incoming, users, auth_timeout, zero_rtt, masquerade, cb, conn_cancel, hooks),
 					).instrument(span));
 				}
 				else => {
@@ -257,6 +263,7 @@ impl AbstractInbound for TuicInbound {
 
 /// Complete the quinn handshake (incl. optional 0-RTT) for one incoming
 /// connection, then drive it through the backend-agnostic server core.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection<C: InboundCallback>(
 	incoming: quinn::Incoming,
 	users: Arc<HashMap<Uuid, String>>,
@@ -265,6 +272,7 @@ async fn handle_connection<C: InboundCallback>(
 	masquerade: Option<crate::server::MasqueradeConfig>,
 	callback: C,
 	cancel: CancellationToken,
+	hooks: InboundHooks,
 ) -> eyre::Result<()> {
 	let remote_addr = incoming.remote_address();
 
@@ -310,6 +318,7 @@ async fn handle_connection<C: InboundCallback>(
 		callback,
 		cancel,
 		masquerade,
+		hooks,
 	)
 	.await;
 

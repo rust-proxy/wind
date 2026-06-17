@@ -5811,6 +5811,7 @@ version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
+ "dashmap",
  "eyre",
  "futures",
  "ipnet",
@@ -5826,6 +5827,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5908,6 +5910,7 @@ dependencies = [
 name = "wind-test"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "aws-lc-rs",
  "bytes",
  "criterion",

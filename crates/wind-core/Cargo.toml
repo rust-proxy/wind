@@ -12,8 +12,11 @@ quic = ["quinn"]
 
 [dependencies]
 pin-project = "1"
-tokio = { version = "1", default-features = false, features = ["io-util", "macros", "time", "net"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "time", "net", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+
+dashmap = "6"
+uuid = "1"
 
 quinn = { workspace = true, default-features = false, optional = true }
 

@@ -99,4 +99,18 @@ pub trait QuicConnection: Clone + Send + Sync + 'static {
 	fn peer_addr(&self) -> Option<SocketAddr> {
 		None
 	}
+
+	/// Cumulative wire byte counters for this connection as `(sent, recv)`,
+	/// or `None` if the backend doesn't expose them.
+	///
+	/// `sent` is bytes the local endpoint has put on the wire (server→client =
+	/// download), `recv` is bytes received from the peer (client→server =
+	/// upload). These are *wire* bytes (including QUIC framing / ACKs /
+	/// retransmits), not relayed payload — used for lightweight per-connection
+	/// traffic accounting. Async to accommodate the quiche backend, where the
+	/// read is routed through the connection's driver task; the quinn backend
+	/// resolves immediately.
+	fn byte_stats(&self) -> impl Future<Output = Option<(u64, u64)>> + Send {
+		async { None }
+	}
 }

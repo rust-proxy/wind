@@ -30,6 +30,7 @@ impl InboundRuntime {
 					},
 					skip_auth: s.skip_auth,
 					allow_udp: s.allow_udp,
+					hooks: Default::default(),
 				}),
 			},
 		}

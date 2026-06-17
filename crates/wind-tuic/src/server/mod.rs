@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, error, info, warn};
 use uuid::Uuid;
 use wind_core::{
-	InboundCallback,
+	ConnInfo, ConnectDecision, InboundCallback, InboundHooks, Protocol, StatsCollector, UserId,
 	udp::{UdpPacket, UdpStream as CoreUdpStream},
 };
 use wind_quic::{QuicConnection, QuicError};
@@ -61,11 +61,11 @@ async fn spawn_logged(label: &str, fut: impl std::future::Future<Output = eyre::
 	}
 }
 
-/// Wait for the connection to be authenticated. Returns `true` once a UUID is
-/// set; returns `false` if the auth timeout elapses first. Callers that get
-/// `false` must drop the request.
+/// Wait for the connection to be authenticated. Returns `true` once an
+/// [`AuthState`] is set; returns `false` if the auth timeout elapses first.
+/// Callers that get `false` must drop the request.
 async fn ensure_authed<C: QuicConnection>(ctx: &InboundCtx<C>) -> bool {
-	if ctx.uuid.load().is_some() {
+	if ctx.auth.load().is_some() {
 		return true;
 	}
 	if tokio::time::timeout(ctx.auth_timeout, ctx.auth_notify.notified())
@@ -74,7 +74,7 @@ async fn ensure_authed<C: QuicConnection>(ctx: &InboundCtx<C>) -> bool {
 	{
 		return false;
 	}
-	ctx.uuid.load().is_some()
+	ctx.auth.load().is_some()
 }
 
 /// Drive an `accept`-style call in a loop until the connection errors or
@@ -116,9 +116,16 @@ async fn acceptor_loop<A, AccFut, HFut, AccFn, HFn>(
 	}
 }
 
+/// Identity published atomically once a connection authenticates. Held behind a
+/// single `ArcSwapOption` so a reader can never observe a half-populated state
+/// (e.g. set but user unset).
+struct AuthState {
+	user: UserId,
+}
+
 struct InboundCtx<C: QuicConnection> {
 	conn: C,
-	uuid: ArcSwapOption<Uuid>,
+	auth: ArcSwapOption<AuthState>,
 	auth_notify: Arc<Notify>,
 	users: Arc<HashMap<Uuid, String>>,
 	auth_timeout: Duration,
@@ -127,6 +134,17 @@ struct InboundCtx<C: QuicConnection> {
 	/// all live bridge tasks at once (used when the parent connection
 	/// terminates).
 	udp_root_cancel: CancellationToken,
+	/// Downstream extensibility hooks (auth / stats / connection management).
+	hooks: InboundHooks,
+	/// Per-connection context handed to connection-management hooks.
+	conn_info: ConnInfo,
+}
+
+impl<C: QuicConnection> InboundCtx<C> {
+	/// The authenticated user's identity, if the connection has authenticated.
+	fn user(&self) -> Option<UserId> {
+		self.auth.load().as_ref().map(|a| a.user.clone())
+	}
 }
 
 /// Per-UDP-session state stored in the LRU cache.
@@ -255,6 +273,7 @@ fn route_non_tuic<C: QuicConnection>(
 /// datagram/uni/bi accept loops, then run until the peer disconnects or
 /// `cancel` fires. Backend-agnostic — both backends call this after their
 /// handshake.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_connection<C, CB>(
 	conn: C,
 	remote_addr: SocketAddr,
@@ -263,10 +282,26 @@ pub async fn serve_connection<C, CB>(
 	callback: CB,
 	cancel: CancellationToken,
 	masq: Option<MasqueradeConfig>,
+	hooks: InboundHooks,
 ) where
 	C: QuicConnection,
 	CB: InboundCallback,
 {
+	let conn_info = ConnInfo {
+		remote_addr,
+		protocol: Protocol::Tuic,
+		conn_id: wind_core::hooks::next_conn_id(),
+	};
+
+	// Connection-level veto (pre-auth — no UserId yet).
+	if let Some(ch) = &hooks.connection
+		&& let ConnectDecision::Reject(reason) = ch.on_connect(&conn_info).await
+	{
+		info!("Connection from {} rejected by hook: {}", remote_addr, reason);
+		conn.close(0, b"rejected");
+		return;
+	}
+
 	let udp_root_cancel = cancel.child_token();
 
 	// Eviction listener fires for both explicit `remove()` (via Dissociate) and
@@ -284,12 +319,14 @@ pub async fn serve_connection<C, CB>(
 
 	let connection = Arc::new(InboundCtx {
 		conn,
-		uuid: ArcSwapOption::empty(),
+		auth: ArcSwapOption::empty(),
 		auth_notify: Arc::new(Notify::new()),
 		users,
 		auth_timeout,
 		udp_sessions,
 		udp_root_cancel,
+		hooks,
+		conn_info,
 	});
 
 	// Per-connection HTTP/3 masquerade router: a parked `run_masquerade` task plus
@@ -309,7 +346,7 @@ pub async fn serve_connection<C, CB>(
 			async move {
 				tokio::select! {
 					_ = tokio::time::sleep(auth_timeout) => {
-						if conn_auth.uuid.load().is_none() && !active.load(Ordering::Relaxed) {
+						if conn_auth.auth.load().is_none() && !active.load(Ordering::Relaxed) {
 							warn!("Connection from {} authentication timeout", remote_addr);
 							conn_auth.conn.close(0, b"auth timeout");
 						}
@@ -320,6 +357,17 @@ pub async fn serve_connection<C, CB>(
 			}
 			.in_current_span(),
 		);
+	}
+
+	// Per-user traffic sampler. A TUIC connection is exactly one authenticated
+	// user, so the QUIC connection's own wire counters are that user's traffic.
+	// Once authenticated, sample the byte counters periodically (and once more on
+	// close), recording deltas against the user — no per-stream/per-packet
+	// counting needed. Unauthenticated / h3-masquerade connections never bill.
+	if connection.hooks.stats.is_some() {
+		let ctx = connection.clone();
+		let sampler_cancel = cancel.clone();
+		tokio::spawn(run_traffic_sampler(ctx, sampler_cancel).in_current_span());
 	}
 
 	// One cancellation token shared by all acceptor tasks; fired after the
@@ -349,7 +397,7 @@ pub async fn serve_connection<C, CB>(
 							if datagram.len() < 2 || !is_tuic_prefix([datagram[0], datagram[1]]) {
 								return;
 							}
-							if conn.uuid.load().is_some() {
+							if conn.auth.load().is_some() {
 								tokio::spawn(
 									spawn_logged("Datagram", handle_datagram(conn, datagram, cb))
 										.instrument(tracing::debug_span!("datagram")),
@@ -466,6 +514,65 @@ pub async fn serve_connection<C, CB>(
 		}
 	}
 	acceptor_cancel.cancel();
+
+	// Connection lifecycle: notify the disconnect hook (user is `None` if the
+	// connection never authenticated).
+	if let Some(ch) = &connection.hooks.connection {
+		ch.on_disconnect(&connection.conn_info, connection.user().as_ref()).await;
+	}
+}
+
+/// Once authenticated, periodically sample the QUIC connection's wire byte
+/// counters and record the deltas as this user's traffic. Runs until the
+/// connection closes or `cancel` fires, doing a final sample on the way out.
+async fn run_traffic_sampler<C: QuicConnection>(ctx: Arc<InboundCtx<C>>, cancel: CancellationToken) {
+	if !ensure_authed(&ctx).await {
+		return; // unauthenticated / h3 masquerade — not billed
+	}
+	let Some(stats) = ctx.hooks.stats.clone() else { return };
+	let Some(user) = ctx.user() else { return };
+
+	// Snap the cursor at auth time so pre-auth handshake bytes are not billed.
+	let mut cursor = ctx.conn.byte_stats().await.unwrap_or((0, 0));
+
+	let mut tick = tokio::time::interval(ctx.hooks.sample_interval);
+	tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+	tick.tick().await; // consume the immediate first tick
+
+	loop {
+		tokio::select! {
+			_ = tick.tick() => sample_once(&ctx, &stats, &user, &mut cursor).await,
+			_ = ctx.conn.closed() => {
+				sample_once(&ctx, &stats, &user, &mut cursor).await;
+				break;
+			}
+			_ = cancel.cancelled() => {
+				sample_once(&ctx, &stats, &user, &mut cursor).await;
+				break;
+			}
+		}
+	}
+}
+
+/// Read the connection's `(sent, recv)` wire counters and record the delta since
+/// `cursor` as download/upload for `user`, then advance the cursor.
+async fn sample_once<C: QuicConnection>(
+	ctx: &Arc<InboundCtx<C>>,
+	stats: &StatsCollector,
+	user: &UserId,
+	cursor: &mut (u64, u64),
+) {
+	if let Some((sent, recv)) = ctx.conn.byte_stats().await {
+		let download = sent.saturating_sub(cursor.0);
+		let upload = recv.saturating_sub(cursor.1);
+		if upload > 0 {
+			stats.record_upload(user, upload);
+		}
+		if download > 0 {
+			stats.record_download(user, download);
+		}
+		*cursor = (sent, recv);
+	}
 }
 
 async fn handle_uni_stream<C: QuicConnection, CB: InboundCallback>(
@@ -549,7 +656,7 @@ async fn handle_uni_stream<C: QuicConnection, CB: InboundCallback>(
 					}
 				}
 				CmdType::Heartbeat => {
-					tracing::trace!("Received heartbeat from {:?}", ctx.uuid.load());
+					tracing::trace!("Received heartbeat from {:?}", ctx.user());
 				}
 				other => {
 					warn!("Unexpected command on uni stream: {:?}", other);
@@ -591,6 +698,12 @@ async fn handle_bi_stream<C: QuicConnection, CB: InboundCallback>(
 			let target_addr = crate::proto::address_to_target(addr)?;
 
 			info!(target = %target_addr, "TCP connect");
+
+			if let Some(stats) = &connection.hooks.stats
+				&& let Some(user) = connection.user()
+			{
+				stats.record_request(&user);
+			}
 
 			let stream = tokio::io::join(recv, send);
 
@@ -675,21 +788,30 @@ async fn handle_datagram<C: QuicConnection, CB: InboundCallback>(
 }
 
 async fn handle_auth<C: QuicConnection>(connection: &InboundCtx<C>, uuid: Uuid, token: [u8; 32]) -> eyre::Result<()> {
-	// Look the user up, but never short-circuit on an unknown UUID — that would
-	// give an attacker both a timing oracle (skipped keying-material export) and
-	// an error-message oracle that reveals whether a UUID exists. Always run the
-	// export against either the real password or a fixed dummy and a constant-time
-	// comparison; both failure paths return the same generic error.
+	// Resolve the user's identity + password material via the auth hook, falling
+	// back to the static user map when no hook is set. Never short-circuit on an
+	// unknown UUID — that would give an attacker both a timing oracle (skipped
+	// keying-material export) and an error-message oracle that reveals whether a
+	// UUID exists. Always run the export against either the real password or a
+	// fixed dummy and a constant-time comparison; both failure paths return the
+	// same generic error.
 	const DUMMY_PASSWORD: &[u8] = b"\x00\x00\x00\x00\x00\x00\x00\x00";
-	let (password_bytes, user_known) = match connection.users.get(&uuid) {
-		Some(pw) => (pw.as_bytes(), true),
-		None => (DUMMY_PASSWORD, false),
+	let looked_up: Option<(UserId, Arc<[u8]>)> = match &connection.hooks.tuic_auth {
+		Some(auth) => auth.lookup(&uuid).await,
+		None => connection
+			.users
+			.get(&uuid)
+			.map(|pw| (UserId::from(uuid), Arc::from(pw.as_bytes()))),
+	};
+	let (user, password_bytes, user_known): (Option<UserId>, Arc<[u8]>, bool) = match looked_up {
+		Some((u, pw)) => (Some(u), pw, true),
+		None => (None, Arc::from(DUMMY_PASSWORD), false),
 	};
 
 	let mut expected_token = [0u8; 32];
 	let export_ok = connection
 		.conn
-		.export_keying_material(&mut expected_token, uuid.as_bytes(), password_bytes)
+		.export_keying_material(&mut expected_token, uuid.as_bytes(), password_bytes.as_ref())
 		.await
 		.is_ok();
 
@@ -705,10 +827,22 @@ async fn handle_auth<C: QuicConnection>(connection: &InboundCtx<C>, uuid: Uuid, 
 		// failed" — do not leak which one triggered.
 		return Err(eyre::eyre!("Invalid authentication"));
 	}
+	let user = user.expect("user_known implies Some(user)");
 
-	connection.uuid.store(Some(Arc::new(uuid)));
+	// Connection-management veto now that the identity is known (e.g. a per-user
+	// concurrent-connection limit). A rejected connection is closed and never
+	// publishes its auth state, so `ensure_authed` drops all subsequent streams.
+	if let Some(ch) = &connection.hooks.connection
+		&& let ConnectDecision::Reject(reason) = ch.on_authenticated(&connection.conn_info, &user).await
+	{
+		info!(uuid = %uuid, "authenticated user rejected by hook: {}", reason);
+		connection.conn.close(0, b"rejected");
+		return Ok(());
+	}
+
+	connection.auth.store(Some(Arc::new(AuthState { user: user.clone() })));
 	connection.auth_notify.notify_waiters();
-	info!(uuid = %uuid, "authenticated");
+	info!(uuid = %uuid, user = %user, "authenticated");
 
 	Ok(())
 }
@@ -759,6 +893,13 @@ async fn get_or_create_session<C: QuicConnection, CB: InboundCallback>(
 ) -> eyre::Result<Arc<UdpStream<C>>> {
 	if let Some(session) = ctx.udp_sessions.get(&assoc_id).await {
 		return Ok(session.tuic_stream.clone());
+	}
+
+	// New UDP association ≈ one request.
+	if let Some(stats) = &ctx.hooks.stats
+		&& let Some(user) = ctx.user()
+	{
+		stats.record_request(&user);
 	}
 
 	let cb = callback.clone();

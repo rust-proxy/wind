@@ -287,6 +287,7 @@ async fn create_quinn_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<TuicInb
 		masquerade: cfg.masquerade.enabled.then(|| wind_tuic::server::MasqueradeConfig {
 			upstream: cfg.masquerade.upstream.clone(),
 		}),
+		..Default::default()
 	};
 	tracing::info!("Initializing quinn (wind-tuic) backend");
 	Ok(TuicInbound::new(wind_ctx, opts))
