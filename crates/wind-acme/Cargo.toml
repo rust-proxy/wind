@@ -22,7 +22,7 @@ http01 = ["dep:instant-acme", "dep:x509-parser", "dep:rcgen", "dep:time"]
 [dependencies]
 # TLS / ACME
 rustls = { version = "0.23", default-features = false }
-rustls-acme = { git = "https://github.com/rust-proxy/rustls-acme", default-features = false, features = ["tower", "webpki-roots"], optional = true }
+rustls-acme = { git = "https://github.com/rust-proxy/rustls-acme", branch = "main-fork", default-features = false, features = ["tower", "webpki-roots"], optional = true }
 
 # HTTP challenge server (used by both the resolver and http01 flows)
 axum = { version = "0.8", features = ["tokio"] }
