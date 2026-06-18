@@ -11,6 +11,10 @@ members = [
 exclude = [
     "patches/datagram-socket",
     "patches/tokio-quiche",
+    # Submodule fork of rustls-acme (forks/). Used via a git dependency pinned to
+    # the `ihsin` branch, not as a workspace member; the local checkout is for
+    # reference/editing only. Excluded so cargo doesn't treat it as a member.
+    "forks/rustls-acme",
 ]
 
 [workspace.package]
