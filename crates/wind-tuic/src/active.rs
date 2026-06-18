@@ -6,8 +6,8 @@
 //! on close — and the host binary's hooks, which read the per-user count (for
 //! limits) and cancel a user's connections (for kicks, e.g. when the panel
 //! removes a user). A TUIC connection is exactly one authenticated user, so the
-//! per-connection cancel token is a precise kick handle: cancelling it trips the
-//! `serve_connection` shutdown path, which closes the QUIC connection.
+//! per-connection cancel token is a precise kick handle: cancelling it trips
+//! the `serve_connection` shutdown path, which closes the QUIC connection.
 
 use std::sync::Arc;
 
