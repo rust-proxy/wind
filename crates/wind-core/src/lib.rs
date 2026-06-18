@@ -1,3 +1,4 @@
+pub mod active;
 pub mod app;
 pub mod dispatcher;
 pub mod hooks;
@@ -9,6 +10,7 @@ pub mod resolve;
 pub mod rule;
 pub mod types;
 
+pub use active::ActiveConnections;
 pub use app::{App, Plugin};
 pub use dispatcher::{AclRouter, Dispatcher, OutboundAction, RouteAction, Router};
 pub use hooks::{
