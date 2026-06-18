@@ -37,7 +37,10 @@ use wind_core::{
 };
 use wind_quic::{QuicConnection, QuicError};
 
-use crate::proto::{CmdType, Command, UdpStream};
+use crate::{
+	active::ActiveConnections,
+	proto::{CmdType, Command, UdpStream},
+};
 
 #[cfg(feature = "masquerade")]
 mod masquerade;
@@ -138,6 +141,14 @@ struct InboundCtx<C: QuicConnection> {
 	hooks: InboundHooks,
 	/// Per-connection context handed to connection-management hooks.
 	conn_info: ConnInfo,
+	/// Live-connection registry for per-user limits + active kick. The
+	/// connection registers itself here once authenticated and deregisters on
+	/// close; `kick_user` cancels `conn_cancel` to drop it.
+	active: Option<ActiveConnections>,
+	/// This connection's cancel token (clone of the one driving
+	/// `serve_connection`). Cancelling it closes the connection — used as the
+	/// kick handle stored in `active`.
+	conn_cancel: CancellationToken,
 }
 
 impl<C: QuicConnection> InboundCtx<C> {
@@ -283,6 +294,7 @@ pub async fn serve_connection<C, CB>(
 	cancel: CancellationToken,
 	masq: Option<MasqueradeConfig>,
 	hooks: InboundHooks,
+	active: Option<ActiveConnections>,
 ) where
 	C: QuicConnection,
 	CB: InboundCallback,
@@ -327,6 +339,8 @@ pub async fn serve_connection<C, CB>(
 		udp_root_cancel,
 		hooks,
 		conn_info,
+		active,
+		conn_cancel: cancel.clone(),
 	});
 
 	// Per-connection HTTP/3 masquerade router: a parked `run_masquerade` task plus
@@ -514,6 +528,12 @@ pub async fn serve_connection<C, CB>(
 		}
 	}
 	acceptor_cancel.cancel();
+
+	// Drop this connection from the live-connection registry (no-op if it never
+	// authenticated and so was never registered).
+	if let Some(active) = &connection.active {
+		active.deregister(connection.conn_info.conn_id);
+	}
 
 	// Connection lifecycle: notify the disconnect hook (user is `None` if the
 	// connection never authenticated).
@@ -842,6 +862,15 @@ async fn handle_auth<C: QuicConnection>(connection: &InboundCtx<C>, uuid: Uuid, 
 
 	connection.auth.store(Some(Arc::new(AuthState { user: user.clone() })));
 	connection.auth_notify.notify_waiters();
+
+	// Register this now-authenticated connection so the host can enforce a
+	// per-user limit (`count_for`) and actively kick it (`kick_user`). Done after
+	// the `on_authenticated` veto so the limit check above only counts *other*
+	// live connections for this user.
+	if let Some(active) = &connection.active {
+		active.register(connection.conn_info.conn_id, user.clone(), connection.conn_cancel.clone());
+	}
+
 	info!(uuid = %uuid, user = %user, "authenticated");
 
 	Ok(())

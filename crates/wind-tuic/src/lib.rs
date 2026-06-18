@@ -9,6 +9,11 @@
 pub mod proto;
 
 #[cfg(feature = "server")]
+pub mod active;
+#[cfg(feature = "server")]
+pub use active::ActiveConnections;
+
+#[cfg(feature = "server")]
 pub mod server;
 
 #[cfg(feature = "client")]
