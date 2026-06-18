@@ -2,8 +2,8 @@
 //! for per-user connection limiting and active kicking.
 //!
 //! Shared (as a cheap `Arc` handle) between an inbound — which registers each
-//! connection with a [`CancellationToken`] and deregisters on close — and a host
-//! binary's hooks, which read the per-user count (for limits) and cancel a
+//! connection with a [`CancellationToken`] and deregisters on close — and a
+//! host binary's hooks, which read the per-user count (for limits) and cancel a
 //! user's connections (for kicks, e.g. when a panel removes a user). Used by
 //! both the naive (per-CONNECT-tunnel) and TUIC (per-authenticated-connection)
 //! inbounds.

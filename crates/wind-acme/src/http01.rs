@@ -1,10 +1,11 @@
 //! One-shot HTTP-01 certificate provisioning via `instant-acme`.
 //!
-//! Unlike the resolver-based [`start_acme`](crate::start_acme) flow (which keeps
-//! a `rustls-acme` state machine running for background renewal), this provisions
-//! or renews a certificate a single time and writes the PEM certificate chain and
-//! private key to disk. Backends that load TLS material from file paths (e.g. the
-//! quiche/tokio-quiche QUIC listeners) consume the on-disk PEMs.
+//! Unlike the resolver-based [`start_acme`](crate::start_acme) flow (which
+//! keeps a `rustls-acme` state machine running for background renewal), this
+//! provisions or renews a certificate a single time and writes the PEM
+//! certificate chain and private key to disk. Backends that load TLS material
+//! from file paths (e.g. the quiche/tokio-quiche QUIC listeners) consume the
+//! on-disk PEMs.
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 

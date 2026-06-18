@@ -30,8 +30,8 @@ pub async fn ensure_self_signed_cert_files(hostname: &str, cert_path: &Path, key
 
 /// Generate a self-signed leaf certificate (ECDSA P-256, ~45-day validity).
 ///
-/// Uses `is_ca = false` so the leaf is a plain end-entity TLS server cert, and a
-/// short validity period (≤398 days) to satisfy Chromium's certificate
+/// Uses `is_ca = false` so the leaf is a plain end-entity TLS server cert, and
+/// a short validity period (≤398 days) to satisfy Chromium's certificate
 /// validation requirements.
 fn generate_short_lived_self_signed(hostname: &str) -> Result<(rcgen::Certificate, rcgen::KeyPair)> {
 	let mut params = rcgen::CertificateParams::new(vec![hostname.to_owned()])

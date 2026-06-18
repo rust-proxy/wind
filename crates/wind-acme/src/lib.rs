@@ -14,12 +14,12 @@
 /// One-shot HTTP-01 provisioning that writes PEM cert/key files to disk.
 #[cfg(feature = "http01")]
 pub mod http01;
-/// Self-signed certificate generation to disk.
-#[cfg(feature = "http01")]
-pub mod selfsigned;
 /// `rustls-acme`-backed resolver flow with background renewal.
 #[cfg(feature = "resolver")]
 pub mod resolver;
+/// Self-signed certificate generation to disk.
+#[cfg(feature = "http01")]
+pub mod selfsigned;
 
 #[cfg(feature = "resolver")]
 pub use resolver::{CertPem, start_acme, start_acme_with_cert};
