@@ -49,6 +49,8 @@ pub struct TuicheInbound {
 	/// Downstream extensibility hooks (auth / traffic stats / connection
 	/// management). Defaults to all-`None` (no behavior change).
 	hooks: InboundHooks,
+	/// Live-connection registry for per-user connection limits + active kick.
+	active: Option<crate::active::ActiveConnections>,
 }
 
 impl TuicheInbound {
@@ -108,8 +110,9 @@ impl AbstractInbound for TuicheInbound {
 			let cancel = root_cancel.child_token();
 			let masquerade = self.masquerade.clone();
 			let hooks = self.hooks.clone();
+			let active = self.active.clone();
 			conn_tasks.spawn(
-				crate::server::serve_connection(conn, remote, users, AUTH_TIMEOUT, cb, cancel, masquerade, hooks)
+				crate::server::serve_connection(conn, remote, users, AUTH_TIMEOUT, cb, cancel, masquerade, hooks, active)
 					.instrument(span),
 			);
 		}
@@ -131,6 +134,7 @@ pub struct TuicheInboundBuilder {
 	cancel: Option<CancellationToken>,
 	masquerade: Option<crate::server::MasqueradeConfig>,
 	hooks: InboundHooks,
+	active: Option<crate::active::ActiveConnections>,
 }
 
 impl TuicheInboundBuilder {
@@ -145,6 +149,7 @@ impl TuicheInboundBuilder {
 			cancel: None,
 			masquerade: None,
 			hooks: InboundHooks::default(),
+			active: None,
 		}
 	}
 
@@ -152,6 +157,14 @@ impl TuicheInboundBuilder {
 	/// connection management).
 	pub fn hooks(mut self, hooks: InboundHooks) -> Self {
 		self.hooks = hooks;
+		self
+	}
+
+	/// Set the live-connection registry for per-user connection limits + active
+	/// kick. Each authenticated connection registers itself; `kick_user` drops
+	/// it.
+	pub fn active(mut self, active: Option<crate::active::ActiveConnections>) -> Self {
+		self.active = active;
 		self
 	}
 
@@ -232,6 +245,7 @@ impl TuicheInboundBuilder {
 			cancel: self.cancel.unwrap_or_default(),
 			masquerade: self.masquerade,
 			hooks: self.hooks,
+			active: self.active,
 		})
 	}
 }

@@ -12,7 +12,9 @@ decode = ["tuic-core/decode"]
 encode = ["tuic-core/encode"]
 # The server decodes client requests AND encodes UDP response datagrams, so it
 # needs both codec directions (matching the former wind-tuiche `server` feature).
-server = ["decode", "encode"]
+# `dashmap` backs the server-only `ActiveConnections` registry (per-user limits +
+# active kick).
+server = ["decode", "encode", "dep:dashmap"]
 client = ["encode"]
 
 # HTTP/3 masquerade: when a connecting client speaks real HTTP/3 instead of TUIC,
@@ -72,6 +74,9 @@ eyre = "0.6"
 uuid = { version = "1", features = ["v4"] }
 crossfire = { version = "3", features = ["tokio"] }
 moka = { version = "0.12", features = ["future"] }
+# Server-only live-connection registry (per-user limits + active kick); enabled
+# by the `server` feature.
+dashmap = { version = "6", optional = true }
 arc-swap = "1.9.1"
 serde = { version = "1", features = ["derive"] }
 enum_dispatch = "0.3"
