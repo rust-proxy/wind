@@ -4,8 +4,8 @@
 //! This mirrors the types in `specs/acl-ir.md`. Where the spec lists a typed
 //! leaf for every Mihomo rule kind, this first implementation gives bespoke
 //! typed variants to the *optimizer-relevant* subset (domain / ip / port /
-//! proto) and routes everything else through [`Match::Predicate`], which wraps a
-//! `wind_core::rule::Rule` and delegates evaluation to it. That keeps the
+//! proto) and routes everything else through [`Match::Predicate`], which wraps
+//! a `wind_core::rule::Rule` and delegates evaluation to it. That keeps the
 //! degenerate embedding (see [`crate::embed`]) byte-for-byte equivalent to the
 //! legacy engine while still exposing the structure the optimizer needs on the
 //! hot path.
@@ -36,7 +36,8 @@ pub enum Match {
 
 	/// Destination/source IP in a CIDR.
 	Ip { side: Side, net: IpNet },
-	/// Destination/source port in an inclusive range (a single port is `p..=p`).
+	/// Destination/source port in an inclusive range (a single port is
+	/// `p..=p`).
 	Port { side: Side, range: RangeInclusive<u16> },
 	/// Network protocol (tcp/udp).
 	Proto(NetworkType),
@@ -44,9 +45,9 @@ pub enum Match {
 	Domain(DomainTest),
 
 	/// Membership in a [`NamedSet`] (`ip daddr @set`). `set` indexes
-	/// [`Ruleset::sets`]. The set's data type selects which `MatchContext` field
-	/// is read; `side` selects dst/src for IP and port sets (ignored for domain
-	/// sets).
+	/// [`Ruleset::sets`]. The set's data type selects which `MatchContext`
+	/// field is read; `side` selects dst/src for IP and port sets (ignored for
+	/// domain sets).
 	InSet { side: Side, set: usize },
 
 	/// Escape hatch for any `wind_core` rule kind without a bespoke typed
@@ -167,7 +168,8 @@ pub struct Ruleset {
 	pub sets: Vec<NamedSet>,
 	pub maps: Vec<VerdictMap>,
 	pub chains: Vec<Chain>,
-	/// Index into [`Ruleset::chains`] of the base chain where evaluation starts.
+	/// Index into [`Ruleset::chains`] of the base chain where evaluation
+	/// starts.
 	pub entry: usize,
 }
 

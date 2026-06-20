@@ -3,10 +3,10 @@
 //! The ordered rule list is ground truth; sets and verdict maps are unordered
 //! and are only introduced when provably order-invariant:
 //!
-//! * **Pass 1** — a contiguous run of rules with identical `(stmts, verdict)` is
-//!   merged into one set-backed rule. Always safe (no overlap analysis needed):
-//!   all members share the verdict, and contiguity means no foreign rule is
-//!   crossed.
+//! * **Pass 1** — a contiguous run of rules with identical `(stmts, verdict)`
+//!   is merged into one set-backed rule. Always safe (no overlap analysis
+//!   needed): all members share the verdict, and contiguity means no foreign
+//!   rule is crossed.
 //! * **Pass 2** — a contiguous run of single `Port` leaves on one side with
 //!   *differing* verdicts becomes a verdict map, but only when the port ranges
 //!   are pairwise disjoint (so at most one entry can match and order is
