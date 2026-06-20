@@ -374,7 +374,7 @@ fn try_vmap(run: &[IrRule], maps: &mut MapTable) -> Option<IrRule> {
 > not longest-prefix. `values_may_overlap(Ip, ..)` returns `true` for
 > overlapping CIDRs, so `try_vmap` automatically bails and the rules stay
 > ordered. This prevents `IP-CIDR,10.0.0.0/8,DIRECT` followed by
-> `IP-CIDR,10.1.0.0/16,PROXY` from being mis-compiled into an LPM table that
+> `IP-CIDR,10.1.0.0/16,PROXY` from being miscompiled into an LPM table that
 > would resolve `10.1.0.5` to `PROXY` instead of `DIRECT`.
 
 ### 7.5. The compiler
