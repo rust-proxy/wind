@@ -6,11 +6,27 @@ edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
-description = "nftables-shaped intermediate representation for wind ACL routing (see specs/acl-ir.md)"
+description = "nftables-shaped intermediate representation and ACL routing engine for wind (see specs/acl-ir.md)"
 
 [dependencies]
+# Wind framework
 wind-core = { path = "../wind-core" }
+wind-base = { path = "../wind-base" }
+
+# Rule parsing / matching
+pest = "2.8"
+pest_derive = "2.8"
 ipnet = { version = "2", features = ["serde"] }
+ip_network = "0.4"
+
+# Serde
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+derive_more = { version = "2", default-features = false, features = ["display"] }
+
+# Logging / errors
+tracing = "0.1"
+eyre = { version = "0.6" }
 
 [dev-dependencies]
-wind-core = { path = "../wind-core" }
+tokio = { version = "1", features = ["macros", "rt"] }
+toml = "1.0"

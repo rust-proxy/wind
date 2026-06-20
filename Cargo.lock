@@ -5395,7 +5395,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
- "wind-acl",
+ "wind-acl-ir",
  "wind-acme",
  "wind-base",
  "wind-core",
@@ -5805,7 +5805,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wind-acl"
+name = "wind-acl-ir"
 version = "0.1.1"
 dependencies = [
  "derive_more",
@@ -5819,14 +5819,6 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "wind-base",
- "wind-core",
-]
-
-[[package]]
-name = "wind-acl-ir"
-version = "0.1.1"
-dependencies = [
- "ipnet",
  "wind-core",
 ]
 

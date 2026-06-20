@@ -42,11 +42,16 @@
 //!   safe) and Pass 2 (port verdict maps over disjoint keys). IP/domain verdict
 //!   maps and the optional non-adjacent hoisting (spec §7.6) are future work.
 
+pub mod acl;
+mod config;
 mod embed;
+mod engine;
 mod eval;
 mod model;
 mod optimize;
 
+pub use config::AclConfig;
+pub use engine::{AclEngine, AclEngineBuilder, GuardConfig};
 pub use model::{
 	Chain, DomainSet, DomainTest, IrRule, MapField, Match, NamedSet, Ruleset, SetData, Side, Statement, Verdict, VerdictMap,
 };
