@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use wind_core::resolve::Resolver;
 
 use crate::{
-	acl::{self, AclRule},
 	engine::{AclEngine, AclEngineBuilder, GuardConfig},
+	syntax::apernet::{self as acl, AclRule},
 };
 
 fn default_outbound() -> String {

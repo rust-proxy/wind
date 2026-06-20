@@ -21,9 +21,8 @@ use wind_core::{
 };
 
 use crate::{
-	Ruleset,
-	acl::{self, AclRule},
-	compile,
+	Ruleset, compile,
+	syntax::apernet::{self as acl, AclRule},
 };
 
 /// Loopback / private-range guards applied *before* rule evaluation.

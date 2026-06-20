@@ -1,3 +1,9 @@
+//! Hysteria ACL syntax (`apernet/hysteria`).
+//!
+//! Parses Hysteria-style ACL lines — `<outbound> [address] [ports] [hijack]`,
+//! e.g. `proxy 10.6.0.0/16 tcp/443` — into [`AclRule`]s and compiles them to
+//! `wind_core::rule::Rule`s via [`acl_to_rules`].
+
 #[cfg(test)]
 use std::net::{IpAddr, SocketAddr};
 
@@ -10,7 +16,7 @@ use wind_core::is_private_ip;
 use wind_core::rule::{self as wrule, NetworkType};
 
 #[derive(Parser)]
-#[grammar = "acl.pest"]
+#[grammar = "syntax/apernet/acl.pest"]
 struct AclParser;
 
 /// Represents a single ACL rule with parsed components
