@@ -252,9 +252,9 @@ Ruleset {
 每条链的有序 `Vec<IrRule>` 是**地面真相**。集合与 verdict map 是无序查找结构;
 把有序规则折叠进它们是一种优化,MUST 仅在可证明保序时施加。
 
-### 7.1. 声音性不变式
+### 7.1. 可靠性不变式
 
-`may_overlap(a, b)`(见 7.2)MUST 是*声音的*:返回 `false` MUST 蕴含两个匹配
+`may_overlap(a, b)`(见 7.2)MUST 是*可靠的*:返回 `false` MUST 蕴含两个匹配
 可证明不相交。存疑时 MUST 返回 `true`。保守的 `true` 只会让优化器少折叠,绝不
 改写语义。
 
@@ -291,7 +291,7 @@ fn domain_may_overlap(x: &DomainTest, y: &DomainTest) -> bool {
         (Exact(a),  Exact(b))  => a.eq_ignore_ascii_case(b),
         (Suffix(s), Suffix(t)) => is_dot_suffix(s, t) || is_dot_suffix(t, s),
         (Exact(e),  Suffix(s)) | (Suffix(s), Exact(e)) => ends_with_label(e, s),
-        _ => true, // Keyword / Wildcard / Regex 不可廉价判定
+        _ => true, // Keyword / Wildcard / Regex 不可低成本判定
     }
 }
 ```
@@ -429,8 +429,8 @@ MATCH,direct                                 policy: Forward(direct)
 
 ## 9. 安全考量
 
-- **重叠上的失败即关闭(fail-closed)。** 优化器唯一的正确性杠杆是
-  `may_overlap` 返回 `false`。由于它被要求声音且默认 `true`,优化器缺陷最坏只
+- **重叠时 fail-closed。** 优化器唯一的正确性杠杆是
+  `may_overlap` 返回 `false`。由于它被要求可靠且默认 `true`,优化器缺陷最坏只
   会让规则不被折叠,绝不会静默改路由或解除拦截。测试套件 SHOULD 包含差分检查,
   在随机化上下文上比对「优化后」与「未优化」的求值结果。
 - **环回/私网守卫。** 把守卫降级为 `@builtin_private` / `@builtin_loopback`
