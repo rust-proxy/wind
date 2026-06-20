@@ -5823,6 +5823,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind-acl-ir"
+version = "0.1.1"
+dependencies = [
+ "ipnet",
+ "wind-core",
+]
+
+[[package]]
 name = "wind-acme"
 version = "0.1.1"
 dependencies = [

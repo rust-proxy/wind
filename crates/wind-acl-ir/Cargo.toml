@@ -1,0 +1,16 @@
+[package]
+name = "wind-acl-ir"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "nftables-shaped intermediate representation for wind ACL routing (see specs/acl-ir.md)"
+
+[dependencies]
+wind-core = { path = "../wind-core" }
+ipnet = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+wind-core = { path = "../wind-core" }
