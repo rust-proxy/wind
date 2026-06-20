@@ -214,7 +214,7 @@ impl AclPortEntry {
 }
 
 /// Parse a single ACL rule from string format
-pub(crate) fn parse_acl_rule(rule: &str) -> eyre::Result<AclRule> {
+pub fn parse_acl_rule(rule: &str) -> eyre::Result<AclRule> {
 	if rule.starts_with('#') || rule.is_empty() {
 		return Err(eyre::eyre!("Comment or empty line"));
 	}
@@ -359,8 +359,11 @@ fn parse_port_spec_from_pair(pair: pest::iterators::Pair<Rule>) -> eyre::Result<
 	}
 }
 
-/// Parse a multiline string into ACL rules
-fn parse_multiline_acl_string(input: &str) -> eyre::Result<Vec<AclRule>> {
+/// Parse a multiline string into ACL rules.
+///
+/// Blank lines and `#` comment lines are skipped; every other line is parsed
+/// as a single [`AclRule`] via [`parse_acl_rule`].
+pub fn parse_multiline_acl_string(input: &str) -> eyre::Result<Vec<AclRule>> {
 	input
 		.lines()
 		.enumerate()

@@ -222,6 +222,10 @@ impl<R: Router> Dispatcher<R> {
 /// The first matching rule determines the outbound.  If no rule matches, the
 /// configured default outbound is used.
 ///
+/// New code should prefer `wind_acl::AclEngine`, which wraps this evaluation
+/// and additionally supports Hysteria-style ACL syntax and loopback/private
+/// guards.
+///
 /// Rule targets are mapped to [`RouteAction`] as follows:
 ///
 /// * `"reject"` / `"block"` / `"deny"` (case-insensitive) →
