@@ -5,10 +5,11 @@
 //!
 //! * [`apernet`] — Hysteria ACL (`apernet/hysteria`): `proxy 10.0.0.0/8
 //!   tcp/443`.
-//! * `metacubex` — Clash / Mihomo rule lines (`MetaCubeX/mihomo`). Not yet a
-//!   dedicated submodule: these are parsed today by `wind_core::rule`.
+//! * [`metacubex`] — Clash / Mihomo rule lines (`MetaCubeX/mihomo`):
+//!   `DOMAIN-SUFFIX,google.com,proxy`.
 //! * `sagernet` — sing-box route rules (`SagerNet/sing-box`). Future work.
 //!
 //! [`Ruleset`]: crate::Ruleset
 
 pub mod apernet;
+pub mod metacubex;

@@ -22,7 +22,10 @@ use wind_core::{
 
 use crate::{
 	Ruleset, compile,
-	syntax::apernet::{self as acl, AclRule},
+	syntax::{
+		apernet::{self as acl, AclRule},
+		metacubex,
+	},
 };
 
 /// Loopback / private-range guards applied *before* rule evaluation.
@@ -149,16 +152,7 @@ impl AclEngineBuilder {
 		I: IntoIterator<Item = S>,
 		S: AsRef<str>,
 	{
-		let lines: Vec<String> = rules.into_iter().map(|s| s.as_ref().to_string()).collect();
-		for (idx, parsed) in Rule::parse_rules(&lines.join("\n")).into_iter().enumerate() {
-			match parsed {
-				Ok(rule) => self.clash.push(rule),
-				Err(e) => {
-					let rule = lines.get(idx).map(String::as_str).unwrap_or("<unknown>");
-					eyre::bail!("invalid clash rule #{} ({rule:?}): {e}", idx + 1);
-				}
-			}
-		}
+		self.clash.extend(metacubex::parse_lines(rules)?);
 		Ok(self)
 	}
 
