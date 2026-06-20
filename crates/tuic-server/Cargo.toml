@@ -32,6 +32,7 @@ wind-dns = { path = "../wind-dns" }
 wind-socks = { path = "../wind-socks" }
 wind-tuic = { path = "../wind-tuic", features = ["server"] }
 wind-acme = { path = "../wind-acme" }
+wind-acl = { path = "../wind-acl" }
 
 toml = "1.0"
 clap = { version = "4", features = ["derive"] }
@@ -64,11 +65,8 @@ figment-json5 = "0.1.1"
 educe = { version = "0.6", default-features = false, features = ["Default"] }
 derive_more = { version = "2", default-features = false, features = ["display"] }
 humantime-serde = "1"
-ip_network = "0.4"
 ipnet = { version = "2", features = ["serde"] }
 regex = "1"
-pest = "2.8"
-pest_derive = "2.8"
 
 # Logging
 time = { version = "0.3", features = ["macros", "local-offset"] }
