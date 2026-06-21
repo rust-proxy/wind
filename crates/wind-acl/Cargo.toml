@@ -1,5 +1,5 @@
 [package]
-name = "wind-acl-ir"
+name = "wind-acl"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

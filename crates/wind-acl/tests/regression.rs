@@ -1,4 +1,4 @@
-//! Zero-regression and optimizer tests for `wind-acl-ir`.
+//! Zero-regression and optimizer tests for `wind-acl`.
 //!
 //! The core guarantee (`specs/acl-ir.md` §5) is that the degenerate embedding
 //! routes identically to the legacy first-match-wins engine, and that the
@@ -8,7 +8,7 @@
 
 use std::net::IpAddr;
 
-use wind_acl_ir::{MapField, Match, Ruleset, Side, Verdict, compile};
+use wind_acl::{MapField, Match, Ruleset, Side, Verdict, compile};
 use wind_core::{
 	RouteAction,
 	rule::{MatchContext, NetworkType, Rule},
@@ -184,7 +184,7 @@ fn chain_jump_returns_to_caller() {
 		maps: vec![],
 		entry: 0,
 		chains: vec![
-			wind_acl_ir::Chain {
+			wind_acl::Chain {
 				name: "main".into(),
 				policy: Verdict::Forward("policy".into()),
 				rules: vec![
@@ -192,7 +192,7 @@ fn chain_jump_returns_to_caller() {
 					rule(Match::Always, Verdict::Forward("fallback".into())),
 				],
 			},
-			wind_acl_ir::Chain {
+			wind_acl::Chain {
 				name: "sub".into(),
 				policy: Verdict::Forward("unused".into()),
 				rules: vec![rule(
@@ -218,7 +218,7 @@ fn chain_jump_returns_to_caller() {
 fn verdict_map_dispatch() {
 	let rs = Ruleset {
 		sets: vec![],
-		maps: vec![wind_acl_ir::VerdictMap {
+		maps: vec![wind_acl::VerdictMap {
 			side: Side::Dst,
 			field: MapField::Port,
 			entries: vec![
@@ -228,7 +228,7 @@ fn verdict_map_dispatch() {
 			default: None,
 		}],
 		entry: 0,
-		chains: vec![wind_acl_ir::Chain {
+		chains: vec![wind_acl::Chain {
 			name: "main".into(),
 			policy: Verdict::Forward("policy".into()),
 			rules: vec![
@@ -247,8 +247,8 @@ fn verdict_map_dispatch() {
 
 // -- small helpers for the hand-built chain tests --
 
-fn rule(matches: Match, verdict: Verdict) -> wind_acl_ir::IrRule {
-	wind_acl_ir::IrRule {
+fn rule(matches: Match, verdict: Verdict) -> wind_acl::IrRule {
+	wind_acl::IrRule {
 		matches,
 		stmts: vec![],
 		verdict,

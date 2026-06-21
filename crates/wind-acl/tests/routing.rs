@@ -1,10 +1,10 @@
-//! End-to-end routing-decision tests for [`wind_acl_ir::AclEngine`].
+//! End-to-end routing-decision tests for [`wind_acl::AclEngine`].
 //!
 //! These exercise the rule pipeline without guards, so no resolver is needed.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use wind_acl_ir::AclEngine;
+use wind_acl::AclEngine;
 use wind_core::{RouteAction, Router, types::TargetAddr};
 
 fn ipv4(addr: &str, port: u16) -> TargetAddr {
@@ -98,7 +98,7 @@ async fn hysteria_rules_precede_clash_rules() {
 #[tokio::test]
 async fn guard_without_resolver_is_build_error() {
 	let err = AclEngine::builder("direct")
-		.guards(wind_acl_ir::GuardConfig {
+		.guards(wind_acl::GuardConfig {
 			drop_private: true,
 			drop_loopback: false,
 		})

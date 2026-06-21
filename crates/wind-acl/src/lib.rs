@@ -1,4 +1,4 @@
-//! `wind-acl-ir` — an nftables-shaped intermediate representation for wind ACL
+//! `wind-acl` — an nftables-shaped intermediate representation for wind ACL
 //! routing.
 //!
 //! This crate implements the design in `specs/acl-ir.md`: a [`Ruleset`] of
@@ -11,7 +11,7 @@
 //! # Pipeline
 //!
 //! ```ignore
-//! use wind_acl_ir::{Ruleset, compile};
+//! use wind_acl::{Ruleset, compile};
 //! use wind_core::rule::Rule;
 //!
 //! let rules: Vec<Rule> = Rule::parse_rules(config)

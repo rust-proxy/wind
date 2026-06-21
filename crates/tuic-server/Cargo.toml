@@ -32,7 +32,7 @@ wind-dns = { path = "../wind-dns" }
 wind-socks = { path = "../wind-socks" }
 wind-tuic = { path = "../wind-tuic", features = ["server"] }
 wind-acme = { path = "../wind-acme" }
-wind-acl-ir = { path = "../wind-acl-ir" }
+wind-acl = { path = "../wind-acl" }
 
 toml = "1.0"
 clap = { version = "4", features = ["derive"] }

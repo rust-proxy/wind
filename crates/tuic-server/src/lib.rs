@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-// The Hysteria ACL types/parsers live in `wind-acl-ir`'s apernet syntax
+// The Hysteria ACL types/parsers live in `wind-acl`'s apernet syntax
 // module; re-export it as `acl` so existing `crate::acl::*` paths keep
 // resolving.
-pub use wind_acl_ir::syntax::apernet as acl;
+pub use wind_acl::syntax::apernet as acl;
 use wind_core::AbstractInbound;
 pub mod compat;
 pub mod config;
