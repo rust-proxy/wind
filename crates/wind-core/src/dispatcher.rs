@@ -223,8 +223,8 @@ impl<R: Router> Dispatcher<R> {
 /// configured default outbound is used.
 ///
 /// New code should prefer `wind_acl::AclEngine`, which compiles the same
-/// rules to the `wind-acl` IR and additionally supports Hysteria-style ACL
-/// syntax and loopback/private guards.
+/// rules to the `wind-acl` IR and additionally supports loopback/private
+/// guards.
 ///
 /// Rule targets are mapped to [`RouteAction`] as follows:
 ///

@@ -548,9 +548,9 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 		stream_timeout: Duration::from_secs(60),
 		outbound: tuic_server::config::OutboundConfig::default(),
 		// Allow localhost connections for testing
-		acl: vec![tuic_server::acl::AclRule {
+		acl: vec![tuic_server::legacy::AclRule {
 			outbound: "allow".to_string(),
-			addr: tuic_server::acl::AclAddress::Localhost,
+			addr: tuic_server::legacy::AclAddress::Localhost,
 			ports: None,
 			hijack: None,
 		}],
@@ -737,9 +737,9 @@ async fn test_client_proxy_configuration() -> eyre::Result<()> {
 		max_external_packet_size: 1500,
 		stream_timeout: Duration::from_secs(60),
 		outbound: tuic_server::config::OutboundConfig::default(),
-		acl: vec![tuic_server::acl::AclRule {
+		acl: vec![tuic_server::legacy::AclRule {
 			outbound: "allow".to_string(),
-			addr: tuic_server::acl::AclAddress::Localhost,
+			addr: tuic_server::legacy::AclAddress::Localhost,
 			ports: None,
 			hijack: None,
 		}],

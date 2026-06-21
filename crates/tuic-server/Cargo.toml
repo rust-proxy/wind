@@ -68,6 +68,10 @@ humantime-serde = "1"
 ipnet = { version = "2", features = ["serde"] }
 regex = "1"
 
+# Legacy ACL parser (space-separated dialect; see `legacy` module)
+pest = "2.8"
+pest_derive = "2.8"
+
 # Logging
 time = { version = "0.3", features = ["macros", "local-offset"] }
 humantime = { version = "2", default-features = false }
@@ -84,6 +88,7 @@ rand = "0.10"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"]}
+ip_network = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-test = "0.4"

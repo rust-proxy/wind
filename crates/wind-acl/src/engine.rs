@@ -1,13 +1,13 @@
 //! The [`AclEngine`] router and its [`AclEngineBuilder`], backed by the
 //! [`Ruleset`](crate::Ruleset) IR.
 //!
-//! The builder collects Clash/Mihomo rules and Hysteria-style ACL rules (the
-//! latter converted via [`acl::acl_to_rules`]), lowers them through the
-//! degenerate embedding ([`Ruleset::from_rules`]), and runs the
+//! The builder collects Clash/Mihomo rules and real Hysteria 2 (apernet) ACL
+//! rules (the latter converted via [`apernet::acl_to_rules`]), lowers them
+//! through the degenerate embedding ([`Ruleset::from_rules`]), and runs the
 //! order-preserving optimizer ([`compile`]). The resulting engine implements
 //! [`wind_core::Router`] and routes by building a `MatchContext` and calling
 //! [`Ruleset::route`] — so its decisions are identical to evaluating the rules
-//! first-match-wins, with the same Hysteria-precedes-Clash ordering as before.
+//! first-match-wins, with apernet-derived rules taking precedence over Clash.
 
 use std::{net::IpAddr, sync::Arc};
 
@@ -23,7 +23,7 @@ use wind_core::{
 use crate::{
 	Ruleset, compile,
 	syntax::{
-		apernet::{self as acl, AclRule},
+		apernet::{self, AclRule},
 		metacubex,
 	},
 };
@@ -56,8 +56,8 @@ impl GuardConfig {
 /// can be handed directly to [`wind_core::Dispatcher::new`] or
 /// [`wind_core::App::set_router`].
 pub struct AclEngine {
-	/// Compiled IR. Hysteria-converted rules precede Clash rules in the source
-	/// order, so first-match-wins keeps the historical precedence.
+	/// Compiled IR. apernet-converted rules precede Clash rules in source order,
+	/// so first-match-wins gives them precedence.
 	ruleset: Ruleset,
 	guards: GuardConfig,
 	/// Required whenever `guards.enabled()`. Validated at build time.
@@ -72,7 +72,7 @@ impl AclEngine {
 	pub fn builder(default_outbound: impl Into<String>) -> AclEngineBuilder {
 		AclEngineBuilder {
 			default_outbound: default_outbound.into(),
-			hysteria: Vec::new(),
+			apernet: Vec::new(),
 			clash: Vec::new(),
 			guards: GuardConfig::default(),
 			resolver: None,
@@ -134,7 +134,7 @@ impl Router for AclEngine {
 /// Builder for [`AclEngine`]. See [`AclEngine::builder`].
 pub struct AclEngineBuilder {
 	default_outbound: String,
-	hysteria: Vec<Rule>,
+	apernet: Vec<Rule>,
 	clash: Vec<Rule>,
 	guards: GuardConfig,
 	resolver: Option<Arc<dyn Resolver>>,
@@ -156,21 +156,22 @@ impl AclEngineBuilder {
 		Ok(self)
 	}
 
-	/// Add already-parsed Hysteria-style ACL rules, compiled to Clash rules via
-	/// [`acl::acl_to_rules`].
-	pub fn hysteria_acl(mut self, acl: &[AclRule]) -> Self {
+	/// Add already-parsed real Hysteria 2 (apernet) ACL rules, converted to
+	/// wind rules via [`apernet::acl_to_rules`]. These take precedence over
+	/// Clash rules (they are placed first in source order).
+	pub fn apernet_acl(mut self, acl: &[AclRule]) -> Self {
 		if acl.iter().any(|r| r.hijack.is_some()) {
 			self.hijack_seen = true;
 		}
-		self.hysteria.extend(acl::acl_to_rules(acl));
+		self.apernet.extend(apernet::acl_to_rules(acl));
 		self
 	}
 
-	/// Parse and add Hysteria-style ACL rules from a multiline string
-	/// (`proxy 10.6.0.0/16 tcp/443` per line; `#` comments and blanks skipped).
-	pub fn hysteria_acl_str(self, input: &str) -> eyre::Result<Self> {
-		let rules = acl::parse_multiline_acl_string(input)?;
-		Ok(self.hysteria_acl(&rules))
+	/// Parse and add real Hysteria 2 (apernet) ACL rules from a multiline string
+	/// (`reject(geoip:cn)` per line; `#` comments and blanks skipped).
+	pub fn apernet_acl_str(self, input: &str) -> eyre::Result<Self> {
+		let rules = apernet::parse_multiline(input)?;
+		Ok(self.apernet_acl(&rules))
 	}
 
 	/// Enable loopback / private-range guards. Requires [`Self::resolver`].
@@ -205,17 +206,17 @@ impl AclEngineBuilder {
 			eyre::bail!("loopback/private guards are enabled but no resolver was provided");
 		}
 		if self.hijack_seen {
-			tracing::warn!("ACL hijack/redirect targets are parsed but not yet honored; they will be ignored");
+			tracing::warn!("apernet ACL hijack/redirect targets are parsed but not yet honored; they will be ignored");
 		}
-		let hysteria_count = self.hysteria.len();
-		if hysteria_count > 0 {
-			tracing::info!("[acl] compiled {hysteria_count} Hysteria-style ACL rule(s) to Metacubex format");
+		let apernet_count = self.apernet.len();
+		if apernet_count > 0 {
+			tracing::info!("[acl] compiled {apernet_count} apernet ACL rule(s) to Metacubex format");
 		}
 
-		// Hysteria-converted rules take precedence over explicit Clash rules,
-		// matching the historical ordering. The IR embedding preserves source
-		// order, and the optimizer preserves first-match-wins semantics.
-		let all: Vec<Rule> = self.hysteria.into_iter().chain(self.clash).collect();
+		// apernet-converted rules take precedence over explicit Clash rules. The
+		// IR embedding preserves source order and the optimizer preserves
+		// first-match-wins semantics.
+		let all: Vec<Rule> = self.apernet.into_iter().chain(self.clash).collect();
 		let ruleset = compile(Ruleset::from_rules(all, self.default_outbound));
 
 		Ok(AclEngine {

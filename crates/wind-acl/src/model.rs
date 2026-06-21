@@ -75,14 +75,14 @@ pub enum DomainTest {
 /// Non-terminal action executed (in order) before a rule's verdict.
 ///
 /// The degenerate embedding never emits statements (legacy rules carry none);
-/// they exist so hand-built rulesets and future lowerings (Hysteria `hijack`
-/// → [`Statement::Dnat`]) can use them.
+/// they exist so hand-built rulesets and future lowerings (the legacy ACL
+/// `hijack` field → [`Statement::Dnat`]) can use them.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
 	Counter,
 	Log(String),
 	Mark(u32),
-	/// Destination rewrite (Hysteria `hijack`). Target kept as a string for v1.
+	/// Destination rewrite (legacy ACL `hijack`). Target kept as a string for v1.
 	Dnat(String),
 }
 

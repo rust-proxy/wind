@@ -19,9 +19,9 @@ use uuid::Uuid;
 use wind_core::rule::Rule;
 
 #[cfg(test)]
-use crate::acl::{AclAddress, AclPorts};
+use crate::legacy::{AclAddress, AclPorts};
 use crate::{
-	acl::AclRule,
+	legacy::AclRule,
 	utils::{CongestionController, StackPrefer},
 };
 
@@ -140,7 +140,7 @@ pub struct Config {
 	pub outbound: OutboundConfig,
 
 	/// Access Control List rules (legacy format)
-	#[serde(default, deserialize_with = "crate::acl::deserialize_acl")]
+	#[serde(default, deserialize_with = "crate::legacy::deserialize_acl")]
 	#[educe(Default(expression = Vec::new()))]
 	pub acl: Vec<AclRule>,
 
@@ -927,7 +927,7 @@ mod tests {
 	use tempfile::tempdir;
 
 	use super::*;
-	use crate::acl::{AclPortSpec, AclProtocol};
+	use crate::legacy::{AclPortSpec, AclProtocol};
 
 	async fn test_parse_config(config_content: &str, extension: &str) -> eyre::Result<Config> {
 		test_parse_config_with_env(config_content, extension, EnvState::default()).await
@@ -1211,7 +1211,7 @@ mod tests {
 		assert_eq!(ports.entries[3].protocol, Some(AclProtocol::Udp));
 
 		// Test rule parsing
-		let rule = crate::acl::parse_acl_rule("allow google.com 80,443").unwrap();
+		let rule = crate::legacy::parse_acl_rule("allow google.com 80,443").unwrap();
 		assert_eq!(rule.outbound, "allow");
 		assert_eq!(rule.addr, AclAddress::Domain("google.com".to_string()));
 		assert!(rule.ports.is_some());
