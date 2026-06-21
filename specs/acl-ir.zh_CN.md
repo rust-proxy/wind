@@ -11,9 +11,10 @@ Date: 2026 年 6 月
 
 ## 摘要
 
-`acl-ir` 是 `wind-acl` 使用的内部路由程序格式。它把 Hysteria 风格 ACL 规则和
-Clash/Mihomo 规则行降低为同一个 `Ruleset`，同时保留 first-match-wins 路由语义、默
-认出站兜底，以及旧有 `wind_core::rule::Rule` 的匹配行为。
+`acl-ir` 是 `wind-acl` 使用的内部路由程序格式。它把 Clash/Mihomo 规则行（以及任何
+外部转换得到的 `wind_core::rule::Rule`，例如 tuic-server 的 legacy ACL 方言）降低为
+同一个 `Ruleset`，同时保留 first-match-wins 路由语义、默认出站兜底，以及旧有
+`wind_core::rule::Rule` 的匹配行为。
 
 IR 的形状类似一个小型 nftables 风格引擎：布尔匹配表达式、集合成员检查、verdict
 map、有序链、语句和终结 verdict。v1 实现有意保持兼容边界较窄：对优化有价值的叶子
@@ -39,7 +40,8 @@ map、有序链、语句和终结 verdict。v1 实现有意保持兼容边界较
 
 ACL 路由器回答一个问题：给定连接上下文，应该由哪个出站处理它，或者是否应该拒绝？
 wind 过去使用扁平的 `Vec<wind_core::rule::Rule>`，并按声明顺序求值。这个模型简单
-且兼容 Clash/Mihomo 语法，但难以优化，也没有给 Hysteria ACL 转换提供结构化目标。
+且兼容 Clash/Mihomo 语法，但难以优化，也没有给转换后的规则（例如 tuic-server 的
+legacy ACL）提供结构化目标。
 
 `acl-ir` 提供这个结构化目标。它有三个目标：
 
@@ -75,17 +77,22 @@ IR 借鉴 nftables 的引擎形状，但它不是 nftables 前端。它运行在
 
 `AclEngineBuilder` 按以下顺序构建引擎：
 
-1. 通过 `syntax::apernet` 解析 Hysteria ACL 条目。
-2. 使用 `acl_to_rules` 把这些条目转换为 `wind_core::rule::Rule`。
-3. 通过 `syntax::metacubex` 解析 Clash/Mihomo 规则行。
-4. 把 Hysteria 派生规则放在 Clash/Mihomo 规则之前并连接起来。
-5. 使用 `Ruleset::from_rules` 构建退化 `Ruleset`。
-6. 运行保序优化器 `compile`。
-7. 路由时，根据 `TargetAddr`、协议和已配置的静态入站元数据构建 `MatchContext`，
+1. 通过 `syntax::apernet` 解析真正的 Hysteria 2（apernet）ACL 条目，并用
+   `apernet::acl_to_rules` 转换为 `wind_core::rule::Rule`。
+2. 通过 `syntax::metacubex` 解析 Clash/Mihomo 规则行。
+3. 把 apernet 派生规则放在 Clash/Mihomo 规则之前并连接起来。
+4. 使用 `Ruleset::from_rules` 构建退化 `Ruleset`。
+5. 运行保序优化器 `compile`。
+6. 路由时，根据 `TargetAddr`、协议和已配置的静态入站元数据构建 `MatchContext`，
    然后对 `Ruleset` 求值。
 
-Hysteria 先于 Clash 的顺序对 `AclEngine` 是规范性的：如果两种表层规则都能匹配同一
-连接，Hysteria 派生规则获胜。
+apernet 先于 Clash 的顺序对 `AclEngine` 是规范性的：如果两种表层规则都能匹配同一
+连接，apernet 派生规则获胜。
+
+拥有*其它*规则来源的调用者自行把它们转换为 `wind_core::rule::Rule`，并直接对这些
+值路由（通过 `wind_core::AclRouter` 或退化嵌入）。tuic-server 对它的空格分隔 legacy
+方言正是这么做：用 `tuic_server::legacy::acl_to_rules` 降低条目，并把转换后的规则连
+接在它的 Clash/Mihomo 规则之前。
 
 `AclEngine::route` 目前只填充该调用点可见的字段：目标域名或 IP、目标端口、网络协
 议、可选入站名称和可选入站类型。源 IP、源端口、入站用户、进程元数据以及外部
@@ -332,20 +339,23 @@ Clash/Mihomo 规则行由 `wind_core::rule::Rule::parse` 解析。多行 helper 
 今天只有第 6 节列出的子集会在 IR 中强类型化。其余规则通过 `Predicate` 保持语义正
 确。
 
-### 7.2. Hysteria 风格 ACL
+### 7.2. tuic-server legacy ACL
 
-Hysteria ACL 行形如：
+tuic-server legacy ACL 是 tuic-server 特有的空格分隔方言（它**不是** Hysteria 的
+ACL——后者使用 `outbound(address, proto/port, hijack)` 函数调用形式）。它的解析器与
+降低逻辑位于 `tuic-server` crate 的 `legacy` 模块，而非 `wind-acl`；本节记录其降低
+过程，因为它的输出会按第 6 节嵌入。行形如：
 
 ```text
 <outbound> [address] [ports] [hijack]
 ```
 
-降低过程先把每个 `AclRule` 转换为一个或多个 `wind_core::rule::Rule`，再按第 6 节嵌
-入这些规则。
+降低过程先把每个 `AclRule` 转换为一个或多个 `wind_core::rule::Rule`
+（`tuic_server::legacy::acl_to_rules`），再按第 6 节嵌入这些规则。
 
 地址降低：
 
-| Hysteria 地址 | 降低后的规则类型 |
+| legacy 地址 | 降低后的规则类型 |
 | --- | --- |
 | 省略或 `*` | `MATCH` |
 | IPv4 字面量 | `IP-CIDR` 主机路由 `/32` |
@@ -372,8 +382,59 @@ Hysteria ACL 行形如：
 - `allow` 和 `default` 规范化为出站名 `default`；
 - 所有其它出站字符串会保留到 target-to-verdict 映射阶段。
 
-`hijack` 会被解析并保留在 `AclRule` 上，但当前 `AclEngine` 只会发出警告，不会执行
-它。`Statement::Dnat` 是未来 redirect 支持预期使用的 IR 位置。
+`hijack` 会被解析并保留在 `AclRule` 上，但当前不会执行它。`Statement::Dnat` 是未来
+redirect 支持预期使用的 IR 位置。
+
+### 7.3. apernet ACL（真正的 Hysteria 2）
+
+apernet 方言是真正的 Hysteria 2 ACL——一种**函数调用**形式
+`outbound(address[, proto/port[, hijack]])`——由 `wind-acl` 的 `syntax::apernet`
+解析，对齐 apernet/hysteria 的 `extras/outbounds/acl` 解析器。降低过程把每个
+`AclRule` 转换为一个或多个 `wind_core::rule::Rule`（`apernet::acl_to_rules`），再按
+第 6 节嵌入。
+
+地址分派是有序且结构化的（小写化并去除尾随 `.` 后，先匹配者胜）：
+
+| apernet 地址 | 降低后的规则类型 |
+| --- | --- |
+| `all` 或 `*` | `MATCH` |
+| IPv4 字面量 | `IP-CIDR` 主机路由 `/32` |
+| IPv6 字面量 | `IP-CIDR` 主机路由 `/128` |
+| CIDR（v4/v6） | `IP-CIDR` |
+| `geoip:<cc>` | `GEOIP,<cc>` |
+| `geosite:<name>[@attr…]` | `GEOSITE,<name>`（属性被丢弃——见下） |
+| `suffix:<domain>` | `DOMAIN-SUFFIX,<domain>` |
+| 含 `*` 的域名（`*.example.com`、`*.google.*`） | `DOMAIN-WILDCARD,<pattern>` |
+| 精确域名 | `DOMAIN,<domain>` |
+
+`suffix:` 匹配 apex 及子域；精确域名只匹配自身；含 `*` 的模式是通配（`*` 跨越标签
+边界，因此 `*.example.com` 匹配子域但**不**匹配裸 apex）。
+
+端口降低（`<proto>` ∈ {`tcp`、`udp`、`*`}；`<port>` ∈ {`*`、单端口、`lo-hi`}）：
+
+- 省略、`*` 或 `*/*` 不增加端口条件（双协议、所有端口）；
+- `tcp` / `tcp/*`（以及 `udp` 形式）变为 `NETWORK,<proto>`（无端口约束）；
+- `*/<port>` 变为 `DST-PORT,<port>` / `DST-PORT,lo-hi`（无协议约束）；
+- `tcp/<port>`（以及 `udp`）变为 `AND(NETWORK, DST-PORT)`；
+- 起始端口为 `0` 是 apernet 的“任意端口”哨兵，不增加端口条件。
+
+当地址条件和端口条件同时存在时，降低会为每个组合发出一条 `AND(address, port)` 规
+则（`all`/`*` 地址是匹配全部，因此只发出端口条件）。
+
+出站降低：出站名原样透传。reject 关键字（`reject`/`block`/`deny`，大小写不敏感）经
+第 6 节变为 reject 裁决；其它名称（`direct`、`default` 或自定义出站）是转发目标。
+
+有两种 apernet 形式忠实保留但无法在 v1 IR 中完整表达：
+
+- **geosite 属性**（`geosite:google@ads`）在 `GeoSite(String)` 中没有槽位，因此降低
+  时被丢弃（保留在解析后的 `AclRule` 上），并发出警告；
+- **hijack**（可选的 IP 第三参数）无法用 `RuleType` 表达；它会被解析并保留，但降低
+  时被丢弃并发出警告。`Statement::Dnat` 是其预期的未来归宿。
+
+该方言对退化输入比上游更严格（拒绝空地址、纯空白参数、以及含字面量 `)` 的参数），
+并在两处无害地不同（仅影响非 DNS 输入）：含 `*` 的模式中 `?` 是单字符通配（上游按字
+面量匹配 `?`），且匹配不对主机做 IDNA `ToUnicode`（punycode `xn--` 主机按原样比较），
+大小写折叠仅限 ASCII。
 
 ## 8. 保序优化
 
@@ -434,7 +495,7 @@ v1 实现有意区分 IR 容量与引擎行为：
 - GeoIP、ASN 和 GeoSite 规则需要 `MatchContext` 中的查找函数。
   `AclEngine::route` 当前不会提供这些函数。
 - 源 IP、源端口、入站用户、进程字段和 UID 需要调用者填入 `MatchContext`。
-- `Dnat` 存在于 IR 中，但 Hysteria `hijack` 目前不会由 `AclEngine` 发出或执行。
+- `Dnat` 存在于 IR 中，但 legacy ACL 的 `hijack` 字段目前不会被发出或执行。
 - `Drop` 存在于 IR 中，但公开 `RouteAction` 目前会把它报告为拒绝。
 - sing-box 路由规则解析不属于 v1。未来可以为 sing-box 风格的环境匹配器增加强类型
   IR 叶子。
@@ -449,7 +510,7 @@ v1 实现有意区分 IR 容量与引擎行为：
   入站用户、GeoIP、ASN 或 GeoSite 的部署必须确保相应字段或查找函数已填充。
 - **Guard 行为。** loopback/private guard 在 IR 求值之前运行。若启用 guard，构建时
   要求提供 resolver，以便在作出 guard 决策前解析域名目标。
-- **重定向行为。** Hysteria `hijack` 会被解析但不会执行。未来启用 `Dnat` 会改变流
+- **重定向行为。** legacy ACL 的 `hijack` 字段会被解析但不会执行。未来启用 `Dnat` 会改变流
   量目的地，应该显式开启并在日志中可观察。
 - **链循环。** 实现必须限制链递归。当前深度上限是 64。
 - **Reject 关键字。** 字符串 `reject`、`block` 和 `deny` 是保留拒绝目标，按大小写
@@ -464,5 +525,6 @@ v1 实现有意区分 IR 容量与引擎行为：
 - `crates/wind-acl/src/model.rs`、`embed.rs`、`eval.rs`、`optimize.rs`。
 - `crates/wind-core/src/rule.rs`。
 - MetaCubeX/Mihomo 规则语法。
-- Hysteria ACL 语法。
+- apernet/hysteria ACL 语法（`wind-acl` crate，`syntax::apernet` 模块）。
+- tuic-server legacy ACL 语法（`tuic-server` crate，`legacy` 模块）。
 - nftables 概念：set、map、chain、statement 和 verdict。

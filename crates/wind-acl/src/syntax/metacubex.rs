@@ -4,8 +4,7 @@
 //! surface form of this crate's shared rule representation:
 //! [`wind_core::rule::Rule`] mirrors Mihomo's rule types one-to-one. This
 //! module is the `syntax`-level entry point for turning Mihomo rule text into
-//! that representation, mirroring [`apernet`](super::apernet)'s `acl_to_rules`
-//! / `parse_multiline_acl_string`.
+//! that representation.
 //!
 //! Because the shared representation *is* the Mihomo model, "conversion" here
 //! is parsing — no lossy mapping step is involved.

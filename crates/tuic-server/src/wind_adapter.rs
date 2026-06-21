@@ -52,8 +52,8 @@ use wind_tuic::quinn::inbound::{TuicInbound, TuicInboundOpts};
 use crate::utils::CongestionController;
 use crate::{
 	AppContext as TuicAppContext,
-	acl::acl_to_rules,
 	config::{BackendMode, OutboundRule},
+	legacy::acl_to_rules,
 };
 
 /// Inbound QUIC listener selected by `backend.mode`.

@@ -1,4 +1,4 @@
-// ACL Rule Grammar
+// tuic-server legacy ACL grammar (space-separated; NOT Hysteria's function-call ACL).
 // Format: <outbound> [address] [ports] [hijack]
 // Example: allow 192.168.1.0/24 tcp/443,udp/53 10.0.0.1
 

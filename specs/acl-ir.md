@@ -14,9 +14,10 @@ protocol. The normative implementation references are the `wind-acl` and
 ## Abstract
 
 `acl-ir` is the internal routing program format used by `wind-acl`. It lowers
-Hysteria-style ACL rules and Clash/Mihomo rule lines into a single `Ruleset`
-that preserves first-match-wins routing, default outbound fallback, and the
-legacy `wind_core::rule::Rule` matching semantics.
+Clash/Mihomo rule lines (and any externally converted `wind_core::rule::Rule`
+values, such as tuic-server's legacy ACL dialect) into a single `Ruleset` that
+preserves first-match-wins routing, default outbound fallback, and the legacy
+`wind_core::rule::Rule` matching semantics.
 
 The IR is shaped like a small nftables-inspired engine: boolean match
 expressions, set membership, verdict maps, ordered chains, statements, and
@@ -46,7 +47,8 @@ An ACL router answers one question: given a connection context, which outbound
 should serve it, or should it be rejected? Historically, wind used a flat
 `Vec<wind_core::rule::Rule>` evaluated in declaration order. That model is
 simple and compatible with Clash/Mihomo syntax, but it is hard to optimize and
-does not give Hysteria ACL conversion a structured target.
+does not give converted rules (e.g. tuic-server's legacy ACL) a structured
+target.
 
 `acl-ir` provides that structured target. It has three goals:
 
@@ -91,19 +93,24 @@ types in `crates/wind-acl/src/model.rs`.
 
 `AclEngineBuilder` builds an engine in this order:
 
-1. Parse Hysteria ACL entries through `syntax::apernet`.
-2. Convert those entries into `wind_core::rule::Rule` values with
-   `acl_to_rules`.
-3. Parse Clash/Mihomo rule lines through `syntax::metacubex`.
-4. Concatenate Hysteria-derived rules before Clash/Mihomo rules.
-5. Build the degenerate `Ruleset` with `Ruleset::from_rules`.
-6. Run `compile`, the order-preserving optimizer.
-7. At route time, build a `MatchContext` from `TargetAddr`, protocol, and any
+1. Parse real Hysteria 2 (apernet) ACL entries through `syntax::apernet` and
+   convert them to `wind_core::rule::Rule` values with `apernet::acl_to_rules`.
+2. Parse Clash/Mihomo rule lines through `syntax::metacubex`.
+3. Concatenate apernet-derived rules before Clash/Mihomo rules.
+4. Build the degenerate `Ruleset` with `Ruleset::from_rules`.
+5. Run `compile`, the order-preserving optimizer.
+6. At route time, build a `MatchContext` from `TargetAddr`, protocol, and any
    configured static inbound metadata, then evaluate the `Ruleset`.
 
-The Hysteria-before-Clash ordering is normative for `AclEngine`: if both
-surfaces produce a rule matching the same connection, the Hysteria-derived rule
+The apernet-before-Clash ordering is normative for `AclEngine`: if both
+surfaces produce a rule matching the same connection, the apernet-derived rule
 wins.
+
+Callers with *other* rule sources convert them to `wind_core::rule::Rule`
+themselves and route those values directly (via `wind_core::AclRouter` or the
+degenerate embedding). tuic-server does this for its space-separated `legacy`
+dialect: it lowers entries with `tuic_server::legacy::acl_to_rules` and
+concatenates the converted rules before its Clash/Mihomo rules.
 
 `AclEngine::route` currently fills only the fields available at that call site:
 destination domain or IP, destination port, network protocol, optional inbound
@@ -369,20 +376,25 @@ The shared rule model supports the following broad classes:
 Only the subset listed in Section 6 is typed in the IR today. The rest remains
 semantically correct through `Predicate`.
 
-### 7.2. Hysteria-style ACL
+### 7.2. tuic-server legacy ACL
 
-Hysteria ACL lines have the shape:
+The tuic-server legacy ACL is a space-separated dialect specific to tuic-server
+(it is **not** Hysteria's ACL, which uses a `outbound(address, proto/port,
+hijack)` function-call form). Its parser and lowering live in the `tuic-server`
+crate's `legacy` module, not in `wind-acl`; this section documents the lowering
+because its output is embedded through Section 6. Lines have the shape:
 
 ```text
 <outbound> [address] [ports] [hijack]
 ```
 
 Lowering first converts each `AclRule` to one or more `wind_core::rule::Rule`
-values, then embeds those rules through Section 6.
+values (`tuic_server::legacy::acl_to_rules`), then embeds those rules through
+Section 6.
 
 Address lowering:
 
-| Hysteria address | Lowered rule type |
+| legacy address | Lowered rule type |
 | --- | --- |
 | omitted or `*` | `MATCH` |
 | IPv4 literal | `IP-CIDR` host route `/32` |
@@ -409,9 +421,70 @@ Outbound lowering:
 - `allow` and `default` normalize to the outbound name `default`;
 - every other outbound string is preserved until target-to-verdict mapping.
 
-`hijack` is parsed and retained on `AclRule`, but the current `AclEngine`
-warns and does not honor it. `Statement::Dnat` is the intended IR home for
-future redirect support.
+`hijack` is parsed and retained on `AclRule`, but it is not currently honored.
+`Statement::Dnat` is the intended IR home for future redirect support.
+
+### 7.3. apernet ACL (real Hysteria 2)
+
+The apernet dialect is the genuine Hysteria 2 ACL — a **function-call** form,
+`outbound(address[, proto/port[, hijack]])` — parsed by `syntax::apernet` in
+`wind-acl`, mirroring apernet/hysteria's `extras/outbounds/acl` parser. Lowering
+converts each `AclRule` to one or more `wind_core::rule::Rule` values
+(`apernet::acl_to_rules`), then embeds them through Section 6.
+
+Address dispatch is ordered and structural (first match wins, after lower-casing
+and trailing-dot trimming):
+
+| apernet address | Lowered rule type |
+| --- | --- |
+| `all` or `*` | `MATCH` |
+| IPv4 literal | `IP-CIDR` host route `/32` |
+| IPv6 literal | `IP-CIDR` host route `/128` |
+| CIDR (v4/v6) | `IP-CIDR` |
+| `geoip:<cc>` | `GEOIP,<cc>` |
+| `geosite:<name>[@attr…]` | `GEOSITE,<name>` (attributes dropped — see below) |
+| `suffix:<domain>` | `DOMAIN-SUFFIX,<domain>` |
+| `*`-bearing domain (`*.example.com`, `*.google.*`) | `DOMAIN-WILDCARD,<pattern>` |
+| exact domain | `DOMAIN,<domain>` |
+
+`suffix:` matches the apex and subdomains; an exact domain matches only itself; a
+`*`-bearing pattern is a glob whose `*` spans label boundaries (so `*.example.com`
+matches subdomains but **not** the bare apex).
+
+Proto/port lowering (`<proto>` ∈ {`tcp`, `udp`, `*`}; `<port>` ∈ {`*`, single,
+`lo-hi`}):
+
+- omitted, `*`, or `*/*` add no port condition (both protocols, all ports);
+- `tcp` / `tcp/*` (and the `udp` forms) become `NETWORK,<proto>` (no port);
+- `*/<port>` becomes `DST-PORT,<port>` / `DST-PORT,lo-hi` (no protocol);
+- `tcp/<port>` (and `udp`) becomes `AND(NETWORK, DST-PORT)`;
+- a resulting start port of `0` is apernet's "any port" sentinel and adds no
+  port condition.
+
+When an address condition and a port condition are both present, lowering emits
+an `AND(address, port)` rule for each combination (an `all`/`*` address is
+match-everything, so only the port conditions are emitted).
+
+Outbound lowering: the outbound name is passed through verbatim. The reject
+keywords (`reject`/`block`/`deny`, case-insensitive) become a reject verdict via
+Section 6; every other name (`direct`, `default`, or a custom outbound) is a
+forward target.
+
+Two apernet forms are faithful but not fully representable in the v1 IR:
+
+- **geosite attributes** (`geosite:google@ads`) have no slot in `GeoSite(String)`,
+  so they are dropped during lowering (retained on the parsed `AclRule`) with a
+  warning;
+- **hijack** (the optional IP third argument) cannot be expressed in a
+  `RuleType`; it is parsed and retained but dropped during lowering with a
+  warning. `Statement::Dnat` is the intended future home.
+
+The dialect is deliberately stricter than upstream on degenerate input (it
+rejects empty addresses, whitespace-only arguments, and arguments containing a
+literal `)`), and it differs in two benign ways that only affect non-DNS input:
+`?` in a `*`-bearing pattern is a single-character wildcard (upstream matches `?`
+literally), and matching applies no IDNA `ToUnicode` to the host (punycode `xn--`
+hosts compare verbatim) with ASCII-only case folding.
 
 ## 8. Order-Preserving Optimization
 
@@ -481,8 +554,8 @@ engine behavior:
   `AclEngine::route` does not currently supply those functions.
 - Source IP, source port, inbound user, process fields, and UID require the
   caller to provide them in `MatchContext`.
-- `Dnat` exists in the IR, but Hysteria `hijack` is not yet emitted or executed
-  by `AclEngine`.
+- `Dnat` exists in the IR, but the legacy ACL `hijack` field is not yet emitted
+  or executed.
 - `Drop` exists in the IR, but the public `RouteAction` currently reports it as
   rejection.
 - sing-box route-rule parsing is not part of v1. The IR can grow typed leaves
@@ -502,7 +575,7 @@ legacy rule engine and MUST keep optimization semantics order-preserving.
 - **Guard behavior.** Loopback/private guards run before IR evaluation. If a
   guard is enabled, a resolver is REQUIRED at build time so domain targets can
   be resolved before the guard decision.
-- **Redirect behavior.** Hysteria `hijack` is parsed but not honored. Enabling
+- **Redirect behavior.** The legacy ACL `hijack` field is parsed but not honored. Enabling
   `Dnat` in the future changes traffic destination and SHOULD be explicit and
   observable in logs.
 - **Chain cycles.** Implementations MUST bound chain recursion. The current
@@ -519,5 +592,6 @@ legacy rule engine and MUST keep optimization semantics order-preserving.
 - `crates/wind-acl/src/model.rs`, `embed.rs`, `eval.rs`, and `optimize.rs`.
 - `crates/wind-core/src/rule.rs`.
 - MetaCubeX/Mihomo rule syntax.
-- Hysteria ACL syntax.
+- apernet/hysteria ACL syntax (`wind-acl` crate, `syntax::apernet` module).
+- tuic-server legacy ACL syntax (`tuic-server` crate, `legacy` module).
 - nftables concepts: sets, maps, chains, statements, and verdicts.

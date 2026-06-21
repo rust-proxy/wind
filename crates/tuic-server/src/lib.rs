@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-// The Hysteria ACL types/parsers live in `wind-acl`'s apernet syntax
-// module; re-export it as `acl` so existing `crate::acl::*` paths keep
-// resolving.
-pub use wind_acl::syntax::apernet as acl;
+// The legacy ACL dialect (space-separated `<outbound> [address] [ports]
+// [hijack]`) is specific to tuic-server — it is not Hysteria's ACL despite the
+// superficial resemblance. The parser lives in this crate's `legacy` module.
+pub mod legacy;
 use wind_core::AbstractInbound;
 pub mod compat;
 pub mod config;

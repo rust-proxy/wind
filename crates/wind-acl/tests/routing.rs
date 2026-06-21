@@ -57,45 +57,6 @@ async fn reject_keyword_rejects() {
 }
 
 #[tokio::test]
-async fn hysteria_acl_compiles_and_matches() {
-	// `reject` is a rejection keyword; `private` expands to RFC1918 + loopback
-	// CIDRs.
-	let engine = AclEngine::builder("direct")
-		.hysteria_acl_str("reject private\nproxy 1.1.1.1 tcp/443")
-		.unwrap()
-		.build()
-		.unwrap();
-
-	// Private destination → rejected by the first ACL rule.
-	let priv_action = engine.route(&ipv4("192.168.1.5", 1234), true).await.unwrap();
-	assert!(matches!(priv_action, RouteAction::Reject(_)));
-
-	// 1.1.1.1:443/tcp → proxy.
-	let proxy_action = engine.route(&ipv4("1.1.1.1", 443), true).await.unwrap();
-	assert_eq!(forwarded(&proxy_action), Some("proxy"));
-
-	// 1.1.1.1:443/udp → no ACL match (tcp-only), falls through to default.
-	let udp_action = engine.route(&ipv4("1.1.1.1", 443), false).await.unwrap();
-	assert_eq!(forwarded(&udp_action), Some("direct"));
-}
-
-#[tokio::test]
-async fn hysteria_rules_precede_clash_rules() {
-	// Both an ACL rule and a Clash rule match 1.1.1.1; the ACL (Hysteria) rule
-	// is evaluated first, so its target ("aclwin") wins.
-	let engine = AclEngine::builder("direct")
-		.clash_rules(["IP-CIDR,1.1.1.1/32,clashwin"])
-		.unwrap()
-		.hysteria_acl_str("aclwin 1.1.1.1")
-		.unwrap()
-		.build()
-		.unwrap();
-
-	let action = engine.route(&ipv4("1.1.1.1", 443), true).await.unwrap();
-	assert_eq!(forwarded(&action), Some("aclwin"));
-}
-
-#[tokio::test]
 async fn guard_without_resolver_is_build_error() {
 	let err = AclEngine::builder("direct")
 		.guards(wind_acl::GuardConfig {
@@ -117,4 +78,43 @@ async fn ipv6_target_routes() {
 	let target = TargetAddr::IPv6("2001:db8::1".parse::<Ipv6Addr>().unwrap(), 443);
 	let action = engine.route(&target, true).await.unwrap();
 	assert_eq!(forwarded(&action), Some("proxy"));
+}
+
+#[tokio::test]
+async fn apernet_acl_compiles_and_matches() {
+	// Real Hysteria 2 function-call ACL. `reject` is a rejection keyword; the
+	// CIDR and protocol/port forms lower to IP + AND(network, port) rules.
+	let engine = AclEngine::builder("direct")
+		.apernet_acl_str("reject(10.0.0.0/8)\nproxy(1.1.1.1, tcp/443)")
+		.unwrap()
+		.build()
+		.unwrap();
+
+	// Private destination → rejected by the first ACL rule.
+	let priv_action = engine.route(&ipv4("10.1.2.3", 1234), true).await.unwrap();
+	assert!(matches!(priv_action, RouteAction::Reject(_)));
+
+	// 1.1.1.1:443/tcp → proxy.
+	let proxy_action = engine.route(&ipv4("1.1.1.1", 443), true).await.unwrap();
+	assert_eq!(forwarded(&proxy_action), Some("proxy"));
+
+	// 1.1.1.1:443/udp → no ACL match (tcp-only), falls through to default.
+	let udp_action = engine.route(&ipv4("1.1.1.1", 443), false).await.unwrap();
+	assert_eq!(forwarded(&udp_action), Some("direct"));
+}
+
+#[tokio::test]
+async fn apernet_rules_precede_clash_rules() {
+	// Both an apernet rule and a Clash rule match 1.1.1.1; the apernet rule is
+	// evaluated first, so its target ("aclwin") wins.
+	let engine = AclEngine::builder("direct")
+		.clash_rules(["IP-CIDR,1.1.1.1/32,clashwin"])
+		.unwrap()
+		.apernet_acl_str("aclwin(1.1.1.1)")
+		.unwrap()
+		.build()
+		.unwrap();
+
+	let action = engine.route(&ipv4("1.1.1.1", 443), true).await.unwrap();
+	assert_eq!(forwarded(&action), Some("aclwin"));
 }
