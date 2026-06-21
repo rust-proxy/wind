@@ -1,4 +1,13 @@
-//! The unified [`AclEngine`] router and its [`AclEngineBuilder`].
+//! The [`AclEngine`] router and its [`AclEngineBuilder`], backed by the
+//! [`Ruleset`](crate::Ruleset) IR.
+//!
+//! The builder collects Clash/Mihomo rules and Hysteria-style ACL rules (the
+//! latter converted via [`acl::acl_to_rules`]), lowers them through the
+//! degenerate embedding ([`Ruleset::from_rules`]), and runs the
+//! order-preserving optimizer ([`compile`]). The resulting engine implements
+//! [`wind_core::Router`] and routes by building a `MatchContext` and calling
+//! [`Ruleset::route`] — so its decisions are identical to evaluating the rules
+//! first-match-wins, with the same Hysteria-precedes-Clash ordering as before.
 
 use std::{net::IpAddr, sync::Arc};
 
@@ -11,7 +20,13 @@ use wind_core::{
 	types::TargetAddr,
 };
 
-use crate::acl::{self, AclRule};
+use crate::{
+	Ruleset, compile,
+	syntax::{
+		apernet::{self as acl, AclRule},
+		metacubex,
+	},
+};
 
 /// Loopback / private-range guards applied *before* rule evaluation.
 ///
@@ -35,16 +50,15 @@ impl GuardConfig {
 	}
 }
 
-/// A protocol-agnostic ACL / routing engine.
+/// A protocol-agnostic ACL / routing engine backed by the [`Ruleset`] IR.
 ///
 /// Construct one via [`AclEngine::builder`]. It implements [`Router`], so it
 /// can be handed directly to [`wind_core::Dispatcher::new`] or
 /// [`wind_core::App::set_router`].
 pub struct AclEngine {
-	/// Hysteria-converted rules first, then explicit Clash rules. First match
-	/// wins.
-	rules: Vec<Rule>,
-	default_outbound: String,
+	/// Compiled IR. Hysteria-converted rules precede Clash rules in the source
+	/// order, so first-match-wins keeps the historical precedence.
+	ruleset: Ruleset,
 	guards: GuardConfig,
 	/// Required whenever `guards.enabled()`. Validated at build time.
 	resolver: Option<Arc<dyn Resolver>>,
@@ -87,7 +101,8 @@ impl AclEngine {
 		}
 
 		// 2. Build the match context from what `route` can see. `src_ip` and
-		// `inbound_user` are intentionally left `None` — see the crate docs.
+		// `inbound_user` are intentionally left `None` — the route signature
+		// carries neither.
 		let (domain, dst_ip, port) = match target {
 			TargetAddr::Domain(d, p) => (Some(d.as_str()), None, *p),
 			TargetAddr::IPv4(ip, p) => (None, Some(IpAddr::V4(*ip)), *p),
@@ -103,16 +118,9 @@ impl AclEngine {
 			..Default::default()
 		};
 
-		// 3. First match wins; otherwise fall back to the default outbound.
-		for rule in &self.rules {
-			if rule.matches(&ctx) {
-				tracing::debug!(rule = %rule, "matched");
-				return Ok(rule_target_to_action(&rule.target, rule));
-			}
-		}
-
-		tracing::debug!(outbound = %self.default_outbound, "no rule matched, using default");
-		Ok(RouteAction::Forward(self.default_outbound.clone()))
+		// 3. The IR evaluates first-match-wins and falls back to the default
+		// outbound policy. It is infallible.
+		Ok(self.ruleset.route(&ctx))
 	}
 }
 
@@ -120,18 +128,6 @@ impl Router for AclEngine {
 	async fn route(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction> {
 		let span = tracing::debug_span!("acl_route", target = %target, proto = if is_tcp { "tcp" } else { "udp" });
 		self.do_route(target, is_tcp).instrument(span).await
-	}
-}
-
-/// Map a rule target string to a [`RouteAction`].
-///
-/// `reject` / `block` / `deny` (case-insensitive) reject the connection;
-/// everything else is forwarded verbatim. The outbound name is NOT lower-cased
-/// — [`wind_core::Dispatcher`] handler lookups are case-sensitive.
-fn rule_target_to_action(target: &str, rule: &Rule) -> RouteAction {
-	match target.to_ascii_lowercase().as_str() {
-		"reject" | "block" | "deny" => RouteAction::Reject(format!("rejected by rule: {rule}")),
-		_ => RouteAction::Forward(target.to_string()),
 	}
 }
 
@@ -156,16 +152,7 @@ impl AclEngineBuilder {
 		I: IntoIterator<Item = S>,
 		S: AsRef<str>,
 	{
-		let lines: Vec<String> = rules.into_iter().map(|s| s.as_ref().to_string()).collect();
-		for (idx, parsed) in Rule::parse_rules(&lines.join("\n")).into_iter().enumerate() {
-			match parsed {
-				Ok(rule) => self.clash.push(rule),
-				Err(e) => {
-					let rule = lines.get(idx).map(String::as_str).unwrap_or("<unknown>");
-					eyre::bail!("invalid clash rule #{} ({rule:?}): {e}", idx + 1);
-				}
-			}
-		}
+		self.clash.extend(metacubex::parse_lines(rules)?);
 		Ok(self)
 	}
 
@@ -224,12 +211,15 @@ impl AclEngineBuilder {
 		if hysteria_count > 0 {
 			tracing::info!("[acl] compiled {hysteria_count} Hysteria-style ACL rule(s) to Metacubex format");
 		}
+
 		// Hysteria-converted rules take precedence over explicit Clash rules,
-		// matching the historical ordering in wind's reference adapter.
-		let rules = self.hysteria.into_iter().chain(self.clash).collect();
+		// matching the historical ordering. The IR embedding preserves source
+		// order, and the optimizer preserves first-match-wins semantics.
+		let all: Vec<Rule> = self.hysteria.into_iter().chain(self.clash).collect();
+		let ruleset = compile(Ruleset::from_rules(all, self.default_outbound));
+
 		Ok(AclEngine {
-			rules,
-			default_outbound: self.default_outbound,
+			ruleset,
 			guards: self.guards,
 			resolver: self.resolver,
 			inbound_name: self.inbound_name,

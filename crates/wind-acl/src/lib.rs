@@ -1,53 +1,58 @@
-//! Generic access-control / routing engine for the wind proxy framework.
+//! `wind-acl` — an nftables-shaped intermediate representation for wind ACL
+//! routing.
 //!
-//! This crate is the single, protocol-agnostic place where wind servers express
-//! "given a destination, which outbound (if any) serves it". It unifies the two
-//! rule dialects that used to live in separate places:
+//! This crate implements the design in `specs/acl-ir.md`: a [`Ruleset`] of
+//! typed [`Match`] expressions, [`NamedSet`]s, [`VerdictMap`]s, and [`Chain`]s
+//! evaluated with statement-then-verdict, chain-jump semantics. It keeps the L7
+//! match vocabulary (domain / process / inbound identity / …) that nftables
+//! lacks by delegating those leaves to `wind_core::rule::Rule` via
+//! [`Match::Predicate`].
 //!
-//! * **Clash / Mihomo rules** (`DOMAIN-SUFFIX,google.com,proxy`) — parsed by
-//!   [`wind_core::rule`].
-//! * **Hysteria-style ACL** (`proxy 10.6.0.0/16 tcp/443 [hijack]`) — parsed by
-//!   this crate's [`acl`] module and compiled down to the same
-//!   [`wind_core::rule::Rule`] representation via [`acl::acl_to_rules`].
-//!
-//! Both dialects feed a single [`AclEngine`], which implements
-//! [`wind_core::Router`] and therefore drops straight into a
-//! [`wind_core::Dispatcher`] / [`wind_core::App`]. The engine also folds in the
-//! loopback / private-range guards that individual servers used to
-//! re-implement.
-//!
-//! # Example
+//! # Pipeline
 //!
 //! ```ignore
-//! use std::sync::Arc;
-//! use wind_acl::{AclEngine, GuardConfig};
+//! use wind_acl::{Ruleset, compile};
+//! use wind_core::rule::Rule;
 //!
-//! let engine = AclEngine::builder("direct")
-//!     .clash_rules(["DOMAIN-SUFFIX,google.com,proxy", "IP-CIDR,10.0.0.0/8,direct"])?
-//!     .hysteria_acl_str("reject private\nproxy *.example.com tcp/443")?
-//!     .guards(GuardConfig { drop_loopback: true, drop_private: false })
-//!     .resolver(resolver)        // required while any guard is enabled
-//!     .build()?;
+//! let rules: Vec<Rule> = Rule::parse_rules(config)
+//!     .into_iter()
+//!     .filter_map(Result::ok)
+//!     .collect();
 //!
-//! let mut dispatcher = wind_core::Dispatcher::new(engine);
-//! // dispatcher.add_handler("direct", ...);
+//! // 1. Degenerate embedding — byte-for-byte equivalent to the legacy engine.
+//! let rs = Ruleset::from_rules(rules, "direct");
+//! // 2. Order-preserving optimization — folds safe runs into sets / maps.
+//! let rs = compile(rs);
+//! // 3. Evaluate.
+//! let action = rs.route(&ctx);
 //! ```
 //!
-//! # Not in v1
+//! The degenerate embedding ([`Ruleset::from_rules`]) is normatively equivalent
+//! to the first-match-wins engine, and [`compile`] preserves that equivalence
+//! (see the differential tests in `tests/`).
 //!
-//! * **Per-user / source-aware matching.** The [`wind_core::Router::route`]
-//!   signature carries only the destination and the transport, so the
-//!   [`MatchContext`](wind_core::rule::MatchContext) fields `src_ip` and
-//!   `inbound_user` are always left `None`. Populating them needs a `route`
-//!   signature change in `wind-core` and is deliberately out of scope.
-//! * **Hijack / destination rewrite.** The Hysteria grammar parses the optional
-//!   `hijack` field, but neither [`acl::acl_to_rules`] nor
-//!   [`wind_core::RouteAction`] honor it today. The engine logs a warning if
-//!   any rule sets it and otherwise ignores it — matching the prior behaviour.
+//! # Scope of this first implementation
+//!
+//! * Typed leaves cover the optimizer-relevant subset (domain exact/suffix/
+//!   keyword, IP CIDR, port, protocol). Every other legacy rule kind — geoip,
+//!   asn, geosite, process, uid, dscp, inbound, domain wildcard/regex, and the
+//!   `AND`/`OR`/`NOT`/`SUB-RULE` compounds — is carried as [`Match::Predicate`]
+//!   and still evaluates correctly.
+//! * The optimizer implements Pass 1 (contiguous same-verdict bucketing, always
+//!   safe) and Pass 2 (port verdict maps over disjoint keys). IP/domain verdict
+//!   maps and the optional non-adjacent hoisting (spec §7.6) are future work.
 
-pub mod acl;
 mod config;
+mod embed;
 mod engine;
+mod eval;
+mod model;
+mod optimize;
+pub mod syntax;
 
 pub use config::AclConfig;
 pub use engine::{AclEngine, AclEngineBuilder, GuardConfig};
+pub use model::{
+	Chain, DomainSet, DomainTest, IrRule, MapField, Match, NamedSet, Ruleset, SetData, Side, Statement, Verdict, VerdictMap,
+};
+pub use optimize::compile;

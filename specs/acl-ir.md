@@ -66,7 +66,7 @@ interpreted as described in [RFC 2119].
   a layer-7 extension that nftables does not provide.
 
 Notation in this document is illustrative Rust-flavored pseudocode; it is not a
-normative API and field names MAY differ in the eventual `wind-acl-ir` crate.
+normative API and field names MAY differ in the eventual `wind-acl` crate.
 
 ## 3. Data Model
 

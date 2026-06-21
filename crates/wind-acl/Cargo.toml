@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
-description = "Generic access-control / routing engine for the wind proxy framework"
+description = "nftables-shaped intermediate representation and ACL routing engine for wind (see specs/acl-ir.md)"
 
 [dependencies]
 # Wind framework
