@@ -1,486 +1,523 @@
-RFC: The wind ACL Intermediate Representation (acl-ir)
+RFC: wind ACL Intermediate Representation (acl-ir)
 Category: Informational
 Date: June 2026
 
-# The wind ACL Intermediate Representation (acl-ir)
+# wind ACL Intermediate Representation (acl-ir)
+
+## Status of This Memo
+
+This document specifies the in-repository ACL intermediate representation used
+by `wind-acl`. It is not an Internet standard and it does not define a wire
+protocol. The normative implementation references are the `wind-acl` and
+`wind-core` crates in this workspace.
 
 ## Abstract
 
-`wind-acl` today compiles two surface dialects — Clash/Mihomo rule lines and
-Hysteria-style ACL lines — down to a single flat `Vec<wind_core::rule::Rule>`
-that is evaluated first-match-wins. This document specifies a richer
-intermediate representation (IR), `acl-ir`, modeled on the *engine shape* of
-nftables (typed match expressions, named sets, verdict maps, chains with
-jump/goto, and statement-then-verdict rules) while keeping the layer-7 match
-vocabulary (domain, geosite, process, inbound identity, sniffed protocol) that
-nftables itself lacks.
+`acl-ir` is the internal routing program format used by `wind-acl`. It lowers
+Hysteria-style ACL rules and Clash/Mihomo rule lines into a single `Ruleset`
+that preserves first-match-wins routing, default outbound fallback, and the
+legacy `wind_core::rule::Rule` matching semantics.
 
-The IR is designed so that the current flat engine is a **strict degenerate
-subset** of it: a single base chain whose rules each carry one match and a
-`Forward`/`Reject` verdict, with the default outbound as the chain policy,
-reproduces the existing behavior byte-for-byte. Every optimization that
-collapses ordered rules into the unordered constructs (sets, verdict maps) is
-applied **only when it is provably order-invariant**, so the IR preserves
-Mihomo's "declaration order = match order" semantics by construction.
+The IR is shaped like a small nftables-inspired engine: boolean match
+expressions, set membership, verdict maps, ordered chains, statements, and
+terminal verdicts. The v1 implementation deliberately keeps the compatibility
+surface narrow. Optimizer-relevant leaves are represented as typed IR nodes
+(domain exact/suffix/keyword, IP CIDR, source/destination port, and network
+protocol); every other Mihomo rule type is carried as `Match::Predicate` and
+delegates evaluation to `wind_core::rule::Rule`.
 
-This is a design document. No code in this repository is changed by it.
+## Table of Contents
+
+1. [Introduction](#1-introduction)
+2. [Conventions and Terminology](#2-conventions-and-terminology)
+3. [Compilation Pipeline](#3-compilation-pipeline)
+4. [Data Model](#4-data-model)
+5. [Evaluation Semantics](#5-evaluation-semantics)
+6. [Degenerate Embedding](#6-degenerate-embedding)
+7. [Surface Dialect Lowering](#7-surface-dialect-lowering)
+8. [Order-Preserving Optimization](#8-order-preserving-optimization)
+9. [Implementation Scope and Extensions](#9-implementation-scope-and-extensions)
+10. [Security Considerations](#10-security-considerations)
+11. [References](#11-references)
 
 ## 1. Introduction
 
-A proxy routing ACL answers one question: *given a destination (and what we
-know about the connection), which outbound — if any — serves it?* The reference
-model for expressiveness is Mihomo (Clash.Meta), whose ~30 rule types
-`wind_core::rule` already mirrors. Hysteria ACL is a strict subset of that
-vocabulary. sing-box is a near-peer: it adds connection/environment matchers
-(`clash_mode`, `wifi_ssid`, `network_type`, `auth_user`) that the Clash model
-lacks, so no single existing dialect is a universal superset.
+An ACL router answers one question: given a connection context, which outbound
+should serve it, or should it be rejected? Historically, wind used a flat
+`Vec<wind_core::rule::Rule>` evaluated in declaration order. That model is
+simple and compatible with Clash/Mihomo syntax, but it is hard to optimize and
+does not give Hysteria ACL conversion a structured target.
 
-nftables provides a more general *engine* than any of them — typed expression
-matching, named sets and maps with interval/longest-prefix lookup, verdict
-maps for O(1) dispatch, chains with `jump`/`goto`/`return`, and a statement
-vocabulary (counters, rate limits, marks, NAT/redirect) — but it operates at
-L3/L4 and has no concept of domains, geosite, process names, or L7 identity.
+`acl-ir` provides that structured target. It has three goals:
 
-`acl-ir` is the deliberate hybrid: **the nftables engine model, extended with
-the L7 match vocabulary of Mihomo and sing-box.** It is intended both as the
-internal evaluation form for `wind-acl` and as a common compile target into
-which the Hysteria, Mihomo, and sing-box dialects can all be lowered.
+- preserve existing routing decisions exactly for rules that already worked in
+  the legacy engine;
+- expose enough typed structure to build safe sets and verdict maps;
+- leave explicit extension points for richer routing constructs without
+  forcing all of them into the initial implementation.
+
+The IR borrows its engine shape from nftables, but it is not an nftables
+frontend. It runs inside wind, reads `wind_core::rule::MatchContext`, and keeps
+proxy-specific layer-7 concepts such as domains, process identity, inbound
+metadata, GeoIP/GeoSite lookups, and rule-set placeholders.
 
 ## 2. Conventions and Terminology
 
-The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD",
-"SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be
-interpreted as described in [RFC 2119].
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+document are to be interpreted as described in BCP 14 [RFC2119] [RFC8174] when,
+and only when, they appear in all capitals.
 
-- **Match**: a boolean expression over a connection's `MatchContext`.
-- **Verdict**: a terminal or chain-control decision (forward, reject, drop,
-  jump, goto, return, or verdict-map lookup).
-- **Statement**: a non-terminal action executed before the verdict when a rule
-  matches (counter, log, limit, mark, dnat, sniff).
-- **Rule**: `match → statement* → verdict`.
-- **Chain**: an ordered list of rules plus a default policy verdict.
-- **Set / Verdict map**: named, typed, unordered lookup structures.
-- **first-match-wins**: for a connection `c`, the result is the verdict of the
-  first rule (in declaration order) whose match contains `c`.
-- **`[nft]` / `[L7]`**: marks each construct as a native nftables concept or as
-  a layer-7 extension that nftables does not provide.
+- **Match**: a boolean expression evaluated against a `MatchContext`.
+- **Predicate**: a `wind_core::rule::Rule` embedded in the IR as an opaque
+  matcher.
+- **Statement**: a non-terminal action associated with a matching rule.
+- **Verdict**: a routing or control-flow decision: forward, reject, drop,
+  return, jump, goto, or verdict-map lookup.
+- **Rule**: one match expression, zero or more statements, and one verdict.
+- **Chain**: an ordered list of rules. The entry chain also has the observable
+  fallback policy.
+- **Set**: an unordered lookup table used by `Match::InSet`.
+- **Verdict map**: an unordered lookup table from a key range to a verdict.
+- **Degenerate embedding**: the single-chain IR form that is equivalent to the
+  legacy flat rule engine.
+- **First-match-wins**: the first rule in declaration order whose match is true
+  decides the route.
 
-Notation in this document is illustrative Rust-flavored pseudocode; it is not a
-normative API and field names MAY differ in the eventual `wind-acl` crate.
+Rust snippets in this document are illustrative, but they follow the public
+types in `crates/wind-acl/src/model.rs`.
 
-## 3. Data Model
+## 3. Compilation Pipeline
 
-### 3.1. Sets and element types
+`AclEngineBuilder` builds an engine in this order:
+
+1. Parse Hysteria ACL entries through `syntax::apernet`.
+2. Convert those entries into `wind_core::rule::Rule` values with
+   `acl_to_rules`.
+3. Parse Clash/Mihomo rule lines through `syntax::metacubex`.
+4. Concatenate Hysteria-derived rules before Clash/Mihomo rules.
+5. Build the degenerate `Ruleset` with `Ruleset::from_rules`.
+6. Run `compile`, the order-preserving optimizer.
+7. At route time, build a `MatchContext` from `TargetAddr`, protocol, and any
+   configured static inbound metadata, then evaluate the `Ruleset`.
+
+The Hysteria-before-Clash ordering is normative for `AclEngine`: if both
+surfaces produce a rule matching the same connection, the Hysteria-derived rule
+wins.
+
+`AclEngine::route` currently fills only the fields available at that call site:
+destination domain or IP, destination port, network protocol, optional inbound
+name, and optional inbound type. Source IP, source port, inbound user, process
+metadata, and external GeoIP/ASN/GeoSite lookup functions are absent unless a
+caller evaluates a `Ruleset` directly with a richer `MatchContext`.
+
+## 4. Data Model
+
+### 4.1. Matches
 
 ```rust
-// Element type of a named set — analogous to nft `type ipv4_addr` / `inet_service`.
-enum ElemType {
-    Ip,                    // [nft] CIDR / longest-prefix
-    Port,                  // [nft] interval
-    Asn,                   // [nft~]
-    Domain,                // [L7] nft has no domain type
-    GeoTag,                // [L7] geoip / geosite database tag
-    Tuple(Vec<ElemType>),  // [nft] concatenation, e.g. `ip . port`
+enum Side {
+    Dst,
+    Src,
 }
 
-// A named set — the unified home for RULE-SET / rule_set / domain-set.
-struct NamedSet { name: String, data: SetData }
-
-enum SetData {
-    Ips(IpLpmSet),                   // [nft] prefix trie
-    Ports(Vec<RangeInclusive<u16>>), // [nft]
-    Asns(HashSet<u32>),
-    Domains(DomainSet),              // [L7] suffix trie + exact + keyword buckets
-    Geo(Vec<String>),               // [L7] resolved against an external DB
-    Tuple(Vec<SetData>),             // [nft] concatenated key
-}
-```
-
-### 3.2. Match expressions
-
-```rust
 enum Match {
-    // Logical composition
-    // [nft anonymous concatenation / sing-box and|or|invert / Mihomo AND|OR|NOT]
     All(Vec<Match>),
     Any(Vec<Match>),
     Not(Box<Match>),
-    Always,                                    // MATCH / catch-all
+    Always,
 
-    // Leaf predicates
-    Ip   { side: Side, test: IpTest },         // [nft] side = Dst | Src
-    Port { side: Side, test: PortTest },       // [nft]
-    Proto(NetworkType),                        // [nft] tcp / udp
-    Asn  { side: Side, asn: u32 },             // [nft~]
-    Geo  { side: Side, code: String },         // [L7] GEOIP / SRC-GEOIP
-    Domain(DomainTest),                        // [L7]
-    GeoSite(String),                           // [L7]
-    Process(ProcessTest),                      // [L7] name/path/regex/uid
-    Identity { field: IdField, eq: String },   // [L7] IN-USER / IN-NAME / auth_user / inbound type
-    Meta(MetaTest),
+    Ip     { side: Side, net: IpNet },
+    Port   { side: Side, range: RangeInclusive<u16> },
+    Proto  (NetworkType),
+    Domain (DomainTest),
 
-    // Set membership: `ip daddr @cn`
-    InSet { side: Side, field: SetField, set: String }, // [nft] includes RULE-SET
+    InSet { side: Side, set: usize },
+    Predicate(Arc<wind_core::rule::Rule>),
 }
 
-enum IpTest   { Cidr(IpNet), Suffix(IpNet), NoResolve(IpNet) } // no-resolve lives here
-enum PortTest { Eq(u16), Range(RangeInclusive<u16>) }
 enum DomainTest {
-    Exact(String), Suffix(String), Keyword(String),
-    Wildcard(Regex), Regex(Regex),
-}
-enum MetaTest {
-    Dscp(u8),                              // [nft]
-    CtState(CtState),                      // [nft] new/established/related — new capability
-    InboundPort(u16),                      // [L7]
-    TimeWindow { from: u32, to: u32 },     // [nft meta time]
-    DayOfWeek(u8),                         // [nft meta day]
-    ClashMode(String),                     // [L7 sing-box]
-    NetworkType(String),                   // [L7 sing-box]
-    WifiSsid(String), WifiBssid(String),   // [L7 sing-box]
-    SniffedProtocol(String),               // [L7 sing-box protocol]
+    Exact(String),
+    Suffix(String),
+    Keyword(String),
 }
 ```
 
-### 3.3. Statements, verdicts, and verdict maps
+`All([])` is true and `Any([])` is false by normal boolean convention, but
+lowering code SHOULD avoid constructing empty logical nodes. `Always` is the IR
+form of `MATCH`.
+
+`DomainTest::Suffix` matches both the exact suffix and subdomains of that
+suffix. Exact and suffix comparisons are ASCII case-insensitive. Keyword
+matching is also ASCII case-insensitive.
+
+`Predicate` is the compatibility escape hatch. It MUST evaluate by calling
+`Rule::matches(ctx)`, so opaque rules keep the exact behavior of
+`wind_core::rule`, including `RULE-SET` currently matching false and
+`SUB-RULE` currently using the legacy contained-rule semantics.
+
+### 4.2. Sets
 
 ```rust
-// Non-terminal: executed in order when a rule matches, then control flows to
-// the verdict. [nft statements]
+struct NamedSet {
+    data: SetData,
+}
+
+enum SetData {
+    Domains(DomainSet),
+    Ips(Vec<IpNet>),
+    Ports(Vec<RangeInclusive<u16>>),
+}
+
+struct DomainSet {
+    exact: Vec<String>,
+    suffix: Vec<String>,
+    keyword: Vec<String>,
+}
+```
+
+The implementation stores sets in `Ruleset::sets` and refers to them by table
+index. The term "NamedSet" is retained for the conceptual role; a future
+serialized form MAY assign stable names.
+
+Membership is type-directed:
+
+- `Domains` reads `ctx.domain` and ignores `side`;
+- `Ips` reads `ctx.dst_ip` or `ctx.src_ip` according to `side`;
+- `Ports` reads `ctx.dst_port` or `ctx.src_port` according to `side`.
+
+### 4.3. Statements and Verdicts
+
+```rust
 enum Statement {
     Counter,
     Log(String),
-    Limit { rate: u32, per: Duration, burst: u32 }, // [nft] rate limit — new capability
     Mark(u32),
-    Dnat(TargetAddr),  // [nft] == Hysteria hijack — finally honored
-    Sniff,             // [L7] trigger protocol sniffing
+    Dnat(String),
 }
 
-// Terminal / chain-control. [nft verdicts]
 enum Verdict {
-    Forward(String),     // pick a named outbound (accept + route)
-    Reject(RejectKind),  // reject / block / deny
-    Drop,                // silent drop
-    Return,              // pop to the calling chain
-    Jump(String),        // call a chain, MAY return via Return — SUB-RULE lowers here
-    Goto(String),        // tail-call a chain, never returns
-    Map { key: MapKey, map: String }, // verdict map: `ip daddr vmap @m` — O(1) dispatch
+    Forward(String),
+    Reject(String),
+    Drop,
+    Return,
+    Jump(String),
+    Goto(String),
+    Map(usize),
+}
+```
+
+Statements are non-terminal. An implementation that exposes statement side
+effects MUST execute them in rule order before applying the rule's verdict. The
+current `RouteAction` API observes only the routing decision, so the built-in
+evaluator ignores statement side effects. The degenerate embedding never emits
+statements.
+
+`Forward` selects a named outbound. `Reject` rejects with a reason string.
+`Drop` is available in the IR, but `wind_core::RouteAction` currently has no
+drop variant; the built-in evaluator reports `Drop` as a rejection with the
+reason `"dropped"`.
+
+### 4.4. Verdict Maps, Chains, and Rulesets
+
+```rust
+enum MapField {
+    Port,
 }
 
-struct VerdictMap {                       // [nft vmap] — Mihomo has no equivalent
-    key_type: ElemType,
-    entries: Vec<(SetKey, Verdict)>,      // interval / exact keys
+struct VerdictMap {
+    side: Side,
+    field: MapField,
+    entries: Vec<(RangeInclusive<u16>, Verdict)>,
     default: Option<Verdict>,
 }
 
-struct IrRule { matches: Match, stmts: Vec<Statement>, verdict: Verdict }
-struct Chain  { name: String, policy: Verdict, rules: Vec<IrRule> }
+struct IrRule {
+    matches: Match,
+    stmts: Vec<Statement>,
+    verdict: Verdict,
+}
+
+struct Chain {
+    name: String,
+    policy: Verdict,
+    rules: Vec<IrRule>,
+}
 
 struct Ruleset {
-    sets:   HashMap<String, NamedSet>,
-    maps:   HashMap<String, VerdictMap>,
-    chains: HashMap<String, Chain>,
-    entry:  String,                       // the base chain to start evaluation at
+    sets: Vec<NamedSet>,
+    maps: Vec<VerdictMap>,
+    chains: Vec<Chain>,
+    entry: usize,
 }
 ```
 
-## 4. Evaluation Semantics
+In v1, verdict maps key only on source or destination port ranges. The
+optimizer only creates maps whose ranges are pairwise disjoint.
 
-Evaluation MUST start at `entry` and scan that chain's rules top-to-bottom:
+`entry` is an index into `chains`; evaluation always starts there.
 
-1. For each `IrRule`, evaluate `matches` against the connection's
-   `MatchContext`.
-2. On a match, execute `stmts` in order, then apply `verdict`.
-3. `Forward` / `Reject` / `Drop` terminate evaluation.
-4. `Jump(c)` pushes a return frame and continues at chain `c`; `Goto(c)`
-   continues at `c` without a return frame; `Return` pops to the caller (or, in
-   a base chain, falls through to the policy).
-5. `Map { key, map }` looks `key` up in the named verdict map and applies the
-   resulting verdict (or the map's `default`, or falls through if neither).
-6. If a chain is exhausted without a terminal verdict, its `policy` applies.
+## 5. Evaluation Semantics
 
-Implementations MUST evaluate the rules of a single chain in order. The
-ordering guarantee is the foundation on which §6 rests.
+Evaluation starts at `Ruleset::entry` and scans the entry chain from top to
+bottom.
 
-## 5. Degenerate Embedding of the Current Engine
+For each rule:
 
-The existing `do_route` (flat `Vec<Rule>`, first-match-wins, default outbound
-fallback) is exactly the following `Ruleset`:
+1. Evaluate `rule.matches` against the supplied `MatchContext`.
+2. If the match is false, continue to the next rule.
+3. If the match is true, process `rule.stmts`, then apply `rule.verdict`.
+
+Terminal verdicts behave as follows:
+
+- `Forward(outbound)` terminates with `RouteAction::Forward(outbound)`.
+- `Reject(reason)` terminates with `RouteAction::Reject(reason)`.
+- `Drop` terminates as a rejection in the current public API.
+
+Control-flow verdicts behave as follows:
+
+- `Return` produces fallthrough to the caller.
+- `Jump(name)` evaluates the named chain. If that chain produces a terminal
+  verdict, the terminal verdict wins. If it falls through, evaluation resumes at
+  the next rule after the jump.
+- `Goto(name)` evaluates the named chain without establishing a semantic return
+  point. In the current evaluator, a non-terminal result from the target chain
+  is still represented as fallthrough at the call site. Configurations SHOULD
+  use explicit terminal rules in `Goto` targets until stricter tail-call
+  semantics are implemented.
+- `Map(index)` looks up the current key in `Ruleset::maps[index]`. A hit applies
+  the entry verdict. A miss with `default` applies the default verdict. A miss
+  without `default` falls through to the next rule.
+
+If the entry chain ultimately falls through, `Ruleset::route` applies the entry
+chain policy. Non-entry chain policies are reserved for future multi-base-chain
+semantics; v1 callers SHOULD use explicit terminal fallback rules inside
+subchains.
+
+Implementations MUST prevent unbounded chain recursion. The current evaluator
+uses a maximum chain depth of 64 and treats excess depth as fallthrough.
+
+## 6. Degenerate Embedding
+
+`Ruleset::from_rules(rules, default_outbound)` embeds legacy rules as a
+single-chain ruleset:
 
 ```rust
 Ruleset {
-    entry: "main",
-    sets: {}, maps: {},
-    chains: { "main": Chain {
-        name: "main",
-        policy: Forward(default_outbound),                 // no-rule-matched fallback
-        rules: vec_rule.into_iter()
-            .map(|r| IrRule { matches: r.into_match(), stmts: vec![],
-                              verdict: r.into_verdict() }) // Forward / Reject
-            .collect(),
-    }},
+    sets: vec![],
+    maps: vec![],
+    entry: 0,
+    chains: vec![Chain {
+        name: "main".to_string(),
+        policy: Verdict::Forward(default_outbound),
+        rules: rules.into_iter().map(rule_to_ir).collect(),
+    }],
 }
 ```
 
-This embedding is normative: any `acl-ir` implementation MUST produce
-identical routing decisions to the current engine for inputs that use only the
-constructs the current engine supports. `wind_core::RouteAction` need only gain
-`Drop` and `Dnat` variants to host the new verdict/statement kinds; existing
-`Forward` / `Reject` semantics are unchanged.
+This embedding is normative: before optimization, routing MUST match the legacy
+first-match-wins engine for the same `MatchContext`. After optimization,
+routing MUST still match it.
 
-## 6. Lowering the Surface Dialects
+The following rule types become typed IR leaves:
 
-The following table maps each external rule type to its `acl-ir` form.
-
-| Surface rule | acl-ir lowering |
+| `wind_core::rule::RuleType` | IR match |
 | --- | --- |
-| Hysteria `out addr ports [hijack]` | `IrRule { matches: All([addr, port]), stmts: [hijack → Dnat], verdict: Forward/Reject }` |
-| Hysteria `private` / `localhost` | `InSet { Dst, @builtin_private / @builtin_loopback }` (replaces the standalone `GuardConfig`) |
-| `DOMAIN` / `-SUFFIX` / `-KEYWORD` / `-WILDCARD` / `-REGEX` | `Match::Domain(Exact/Suffix/Keyword/Wildcard/Regex)` |
-| `GEOSITE` | `Match::GeoSite` |
-| `IP-CIDR` / `IP-CIDR6` / `IP-SUFFIX` | `Match::Ip { Dst, Cidr/Suffix }`; `,no-resolve` → `IpTest::NoResolve` |
-| `IP-ASN` / `GEOIP` | `Match::Asn { Dst }` / `Match::Geo { Dst }` |
-| `SRC-IP-CIDR` / `SRC-GEOIP` / `SRC-IP-ASN` | same, `side: Src` |
-| `DST-PORT` / `SRC-PORT` (incl. ranges) | `Match::Port { side, Eq/Range }` |
-| `NETWORK` | `Match::Proto` |
-| `IN-PORT` / `IN-TYPE` / `IN-USER` / `IN-NAME` | `Meta::InboundPort` / `Identity { field, .. }` |
-| `PROCESS-NAME(-REGEX)` / `PROCESS-PATH(-REGEX)` / `UID` | `Match::Process(..)` |
-| `DSCP` | `Meta::Dscp` |
-| `AND` / `OR` / `NOT` | `Match::All` / `Any` / `Not` |
-| `SUB-RULE` | a child `Chain` + `Verdict::Jump` |
-| `RULE-SET` | `NamedSet` + `Match::InSet` (today a no-op placeholder) |
-| `MATCH,target` | `Chain.policy`, or `IrRule { Always, Forward }` |
-| target `reject` / `block` / `deny` | `Verdict::Reject` |
-| sing-box `and` / `or` / `invert` | `All` / `Any` / `Not` |
-| sing-box `rule_set` | `NamedSet` + `InSet` |
-| sing-box `clash_mode` / `wifi_ssid` / `network_type` / `auth_user` / `protocol` | `Meta::*` / `Identity` |
-| sing-box action `route` / `reject` / `hijack-dns`, `override_*` | `Verdict::Forward` / `Reject` / `Statement::Dnat` |
-| nftables `expr → verdict` | 1:1 (this is the parent model) |
+| `Domain` | `Domain(Exact)` |
+| `DomainSuffix` | `Domain(Suffix)` |
+| `DomainKeyword` | `Domain(Keyword)` |
+| `IpCidr`, `IpSuffix` | `Ip { side: Dst }` |
+| `IpCidr6` | `Ip { side: Dst }` |
+| `SrcIpCidr`, `SrcIpSuffix` | `Ip { side: Src }` |
+| `DstPort`, `DstPortRange` | `Port { side: Dst }` |
+| `SrcPort`, `SrcPortRange` | `Port { side: Src }` |
+| `Network` | `Proto` |
+| `Match` | `Always` |
 
-`RULE-SET` and `SUB-RULE` are the two cases where `acl-ir` upgrades, rather
-than merely re-encodes, the current behavior: `RULE-SET` becomes a real
-matchable set instead of the always-false placeholder in
-`wind_core::rule::RuleType::RuleSet`, and `SUB-RULE` becomes a real chain call
-instead of the AND approximation used today.
+All other rule types are embedded as `Predicate(Arc<Rule>)`.
 
-## 7. Order-Preserving Optimization
+Targets are mapped as follows:
 
-The ordered `Vec<IrRule>` per chain is the **ground truth**. Sets and verdict
-maps are unordered lookup structures; collapsing ordered rules into them is an
-optimization that MUST be applied only when provably order-invariant.
+- `reject`, `block`, and `deny`, case-insensitively, become `Verdict::Reject`
+  with a canonical reason string;
+- every other target becomes `Verdict::Forward(target)`, preserving the target
+  spelling.
 
-### 7.1. Soundness invariant
+The canonical reject reason is not a routing semantic. Tests compare rejection
+as a decision, not as a string payload.
 
-`may_overlap(a, b)` (§7.2) MUST be *sound*: returning `false` MUST imply the
-two matches are provably disjoint. When in doubt it MUST return `true`. A
-conservative `true` only causes the optimizer to fold less; it can never change
-semantics.
+## 7. Surface Dialect Lowering
 
-### 7.2. Overlap predicate
+### 7.1. Clash/Mihomo
 
-```rust
-// May two rules' matches be satisfied by the same connection?
-// `false` MUST be provable; otherwise return `true`.
-fn may_overlap(a: &Match, b: &Match) -> bool {
-    match (leaf(a), leaf(b)) {
-        // Same field & side & single-leaf → field-specific, decidable test.
-        (Some(la), Some(lb)) if la.field == lb.field && la.side == lb.side =>
-            values_may_overlap(la.field, &la.val, &lb.val),
-        // Different fields can be matched together; compound/regex undecidable.
-        _ => true,
-    }
-}
+Clash/Mihomo lines are parsed by `wind_core::rule::Rule::parse`. Blank lines
+and `#` comments are skipped by multiline helpers.
 
-fn values_may_overlap(field: Field, x: &Val, y: &Val) -> bool {
-    match field {
-        Ip     => ipnet_intersects(x, y),  // CIDR intersection, exact
-        Port   => range_intersects(x, y),  // interval intersection, exact
-        Proto  => x == y,                  // tcp vs udp never overlap
-        Asn    => x == y,
-        Geo    => x == y,                  // country codes partition the space
-        Domain => domain_may_overlap(x, y),
-        _      => x == y,                  // scalar identity / meta
-    }
-}
+The shared rule model supports the following broad classes:
 
-fn domain_may_overlap(x: &DomainTest, y: &DomainTest) -> bool {
-    use DomainTest::*;
-    match (x, y) {
-        (Exact(a),  Exact(b))  => a.eq_ignore_ascii_case(b),
-        (Suffix(s), Suffix(t)) => is_dot_suffix(s, t) || is_dot_suffix(t, s),
-        (Exact(e),  Suffix(s)) | (Suffix(s), Exact(e)) => ends_with_label(e, s),
-        _ => true, // Keyword / Wildcard / Regex are not cheaply decidable
-    }
-}
-```
+- domain rules: `DOMAIN`, `DOMAIN-SUFFIX`, `DOMAIN-KEYWORD`,
+  `DOMAIN-WILDCARD`, `DOMAIN-REGEX`, `GEOSITE`;
+- destination IP rules: `IP-CIDR`, `IP-CIDR6`, `IP-SUFFIX`, `IP-ASN`, `GEOIP`;
+- source IP rules: `SRC-IP-CIDR`, `SRC-IP-SUFFIX`, `SRC-IP-ASN`, `SRC-GEOIP`;
+- ports: `DST-PORT`, `SRC-PORT`, including inclusive ranges;
+- inbound metadata: `IN-PORT`, `IN-TYPE`, `IN-USER`, `IN-NAME`;
+- process and user identity: `PROCESS-PATH`, `PROCESS-PATH-REGEX`,
+  `PROCESS-NAME`, `PROCESS-NAME-REGEX`, `UID`;
+- protocol and traffic metadata: `NETWORK`, `DSCP`;
+- compounds and catch-all: `AND`, `OR`, `NOT`, `SUB-RULE`, `RULE-SET`, `MATCH`.
 
-### 7.3. Pass 1 — contiguous same-verdict runs (always safe)
+Only the subset listed in Section 6 is typed in the IR today. The rest remains
+semantically correct through `Predicate`.
 
-**Theorem.** Merging a *contiguous* run of rules whose `(stmts, verdict)` are
-identical into a single rule placed at the run's start position preserves
-first-match-wins, with no overlap analysis required.
+### 7.2. Hysteria-style ACL
 
-*Proof sketch.* All members yield the same verdict, so which one "wins"
-internally is unobservable. Contiguity means no foreign rule is reordered past.
-For a connection matched by the run, no earlier rule matched (those rules keep
-their relative position before the merged rule), so the merged rule at the run's
-start yields the same verdict. For a connection not matched by the run, the
-merged rule does not match and control falls through exactly as before. ∎
-
-Within the run, bucketable leaves are grouped by element type into named sets;
-non-bucketable leaves (regex/wildcard/compound) are kept as alternatives of an
-`Any`:
-
-```rust
-fn bucket_same_verdict(run: &[IrRule], sets: &mut SetTable) -> IrRule {
-    let mut alts: Vec<Match> = vec![];
-    let mut by_type: HashMap<(Field, Side), Vec<Val>> = map![];
-    for r in run {
-        match elementize(&r.matches) {            // single leaf usable as a set element?
-            Some(leaf) => by_type.entry((leaf.field, leaf.side)).or_default().push(leaf.val),
-            None       => alts.push(r.matches.clone()), // kept as-is (still same verdict)
-        }
-    }
-    for ((field, side), vals) in by_type {
-        let name = sets.intern(field, vals);       // dedup → NamedSet (prefix trie / suffix trie / ...)
-        alts.push(Match::InSet { side, field: set_field(field), set: name });
-    }
-    IrRule { matches: Match::Any(alts), stmts: run[0].stmts.clone(), verdict: run[0].verdict.clone() }
-}
-```
-
-### 7.4. Pass 2 — mutually-exclusive verdict maps
-
-A contiguous run of single-leaf rules over the *same* field but with *differing*
-verdicts MAY be compiled into a `VerdictMap` **iff the keys are pairwise
-disjoint** (so at most one entry can match and order is unobservable):
-
-```rust
-fn try_vmap(run: &[IrRule], maps: &mut MapTable) -> Option<IrRule> {
-    let (field, side) = single_field(run)?; // all same field & single-leaf, else None
-    for (i, a) in run.iter().enumerate() {
-        for b in &run[i+1..] {
-            if values_may_overlap(field, val(a), val(b)) { return None; } // not exclusive → bail
-        }
-    }
-    let entries = run.iter().map(|r| (key_of(r), r.verdict.clone())).collect();
-    let name = maps.intern(field, entries);
-    Some(IrRule { matches: Match::Always, stmts: vec![],
-                  verdict: Verdict::Map { key: map_key(field, side), map: name } })
-}
-```
-
-> **IP first-match vs longest-prefix.** Mihomo IP rules are first-declared-wins,
-> not longest-prefix. `values_may_overlap(Ip, ..)` returns `true` for
-> overlapping CIDRs, so `try_vmap` automatically bails and the rules stay
-> ordered. This prevents `IP-CIDR,10.0.0.0/8,DIRECT` followed by
-> `IP-CIDR,10.1.0.0/16,PROXY` from being miscompiled into an LPM table that
-> would resolve `10.1.0.5` to `PROXY` instead of `DIRECT`.
-
-### 7.5. The compiler
-
-```rust
-fn compile(rules: Vec<IrRule>, policy: Verdict) -> Ruleset {
-    let (mut sets, mut maps) = (SetTable::new(), MapTable::new());
-    let mut out: Vec<IrRule> = vec![];
-    let mut i = 0;
-    while i < rules.len() {
-        // Pass 1: longest contiguous run of identical (stmts, verdict) — always safe.
-        let j = run_end(&rules, i, |a, b| a.stmts == b.stmts && a.verdict == b.verdict);
-        if j - i >= 2 { out.push(bucket_same_verdict(&rules[i..j], &mut sets)); i = j; continue; }
-
-        // Pass 2: longest contiguous same-field single-leaf run; compile a vmap iff keys disjoint.
-        let k = run_end(&rules, i, same_field_single_leaf);
-        if k - i >= 2 {
-            if let Some(rule) = try_vmap(&rules[i..k], &mut maps) { out.push(rule); i = k; continue; }
-        }
-
-        out.push(rules[i].clone()); i += 1; // ordered fallback — always correct
-    }
-    // Pass 3 (optional, §7.6) may run here.
-    Ruleset {
-        sets, maps,
-        chains: hashmap!{ "main".into() => Chain { name: "main".into(), policy, rules: out } },
-        entry: "main".into(),
-    }
-}
-```
-
-### 7.6. Pass 3 — non-adjacent hoisting (optional)
-
-A later same-verdict rule `R_k` MAY be hoisted up to an earlier same-verdict
-bucket at position `p` **iff** `R_k` is provably disjoint from every
-*different-verdict* rule it would be moved past:
-
-```rust
-fn can_hoist(out: &[IrRule], p: usize, rk: &IrRule) -> bool {
-    out[p..].iter().all(|r| r.verdict == rk.verdict || !may_overlap(&r.matches, &rk.matches))
-}
-```
-
-Pass 1 already captures the overwhelmingly common "large block of same-verdict
-geoip/port/domain rules" case, so Pass 3 is an optional refinement and MAY be
-disabled.
-
-### 7.7. Worked example
+Hysteria ACL lines have the shape:
 
 ```text
-Input (declaration order):                  Output Ruleset:
-DOMAIN-SUFFIX,ads.ex.com,REJECT             rule0: Domain(Suffix ads.ex.com) → Reject   # kept (diff verdict, overlaps ex.com)
-DOMAIN-SUFFIX,google.com,PROXY        ┐
-DOMAIN-SUFFIX,github.com,PROXY        ├───►  rule1: InSet @s_proxy_suffix → Forward(proxy)   (Pass 1)
-IP-CIDR,1.1.1.0/24,PROXY              ┘            @s_proxy_suffix = {google.com, github.com}
-                                                   + IP bucket {1.1.1.0/24} (Any of two InSet)
-DST-PORT,80,DIRECT                    ┐
-DST-PORT,443,PROXY                    ├───►  rule2: dport vmap @m_port                        (Pass 2, disjoint keys)
-DST-PORT,22,DIRECT                    ┘            @m_port = {80:DIRECT, 443:PROXY, 22:DIRECT}
-MATCH,direct                                 policy: Forward(direct)
+<outbound> [address] [ports] [hijack]
 ```
 
-## 8. Capabilities Unlocked vs. Remaining Extensions
+Lowering first converts each `AclRule` to one or more `wind_core::rule::Rule`
+values, then embeds those rules through Section 6.
 
-Net-new capabilities over today's `wind-acl`:
+Address lowering:
 
-- `NamedSet` turns `RULE-SET` from the always-false placeholder
-  (`RuleType::RuleSet(_) => false`) into a real matcher, with prefix-trie IP
-  sets and suffix-trie domain sets; `SUB-RULE` becomes a real chain call rather
-  than an AND approximation.
-- `VerdictMap` gives O(1) dispatch for geoip/port routing instead of a linear
-  scan.
-- `Statement::Dnat` finally executes Hysteria's `hijack`, which the current
-  builder only warns about and ignores.
-- `Limit` / `CtState` / `Mark` are entirely new axes inherited from nftables.
+| Hysteria address | Lowered rule type |
+| --- | --- |
+| omitted or `*` | `MATCH` |
+| IPv4 literal | `IP-CIDR` host route `/32` |
+| IPv6 literal | `IP-CIDR` host route `/128` |
+| CIDR | `IP-CIDR` |
+| domain | `DOMAIN` |
+| `*.example.com` | `DOMAIN-SUFFIX,example.com` |
+| `suffix:example.com` | `DOMAIN-SUFFIX,example.com` |
+| `localhost` | `127.0.0.0/8` and `::1/128` |
+| `private` | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10` |
 
-What remains an L7 extension that nftables itself cannot provide — i.e. why this
-is a hybrid and not nftables: `Domain*`, `GeoSite`, `Process*`, inbound
-identity, `Sniff`, and the sing-box environment matchers. These require their
-data to be carried in `MatchContext`. Note that `src_ip` and `inbound_user` are
-currently always `None` in the route path; populating them is a prerequisite
-for the corresponding `Match` kinds to be meaningful and is out of scope here.
+Port lowering:
 
-## 9. Security Considerations
+- an omitted port list adds no port condition;
+- `80` becomes `DST-PORT,80`;
+- `1000-2000` becomes `DST-PORT,1000-2000`;
+- `tcp/443` or `udp/53` becomes `AND(NETWORK, DST-PORT)`.
 
-- **Fail-closed on overlap.** The optimizer's only correctness lever is
-  `may_overlap` returning `false`. Because that is required to be sound and
-  defaults to `true`, an optimizer bug can at worst leave rules un-folded; it
-  cannot silently re-route or un-block traffic. Test suites SHOULD include
-  differential checks comparing optimized and unoptimized evaluation over
-  randomized contexts.
-- **Loopback/private guards.** Lowering the guards to `@builtin_private` /
-  `@builtin_loopback` membership rules (§6) MUST preserve the current
-  fail-closed behavior, including the requirement that a resolver be present
-  when those guards are active.
-- **`Dnat`/`hijack`.** Honoring redirect targets changes where traffic is
-  sent. It MUST remain opt-in and SHOULD be logged, matching the current
-  warn-and-ignore posture until explicitly enabled.
+When an address condition and a port condition are both present, lowering emits
+an `AND(address, port)` rule for each combination.
 
-## 10. References
+Outbound lowering:
 
-- [RFC 2119] Bradner, S., "Key words for use in RFCs to Indicate Requirement
-  Levels", BCP 14, RFC 2119, March 1997.
-- Mihomo (Clash.Meta) rule documentation — rule-type vocabulary mirrored by
-  `wind_core::rule`.
-- sing-box route rule documentation — source of the environment/identity
-  matchers in `MetaTest`.
-- nftables documentation — source of the engine model (sets, maps, chains,
-  verdicts, statements).
+- `allow` and `default` normalize to the outbound name `default`;
+- every other outbound string is preserved until target-to-verdict mapping.
+
+`hijack` is parsed and retained on `AclRule`, but the current `AclEngine`
+warns and does not honor it. `Statement::Dnat` is the intended IR home for
+future redirect support.
+
+## 8. Order-Preserving Optimization
+
+The ordered chain is the ground truth. Sets and verdict maps are unordered
+lookup structures, so the optimizer MAY introduce them only when doing so
+cannot change first-match-wins behavior.
+
+The current optimizer runs only on the entry chain. Other chains are passed
+through unchanged.
+
+### 8.1. Pass 1: contiguous same-verdict bucketing
+
+The optimizer finds the longest contiguous run starting at the current rule for
+which every rule has identical `(stmts, verdict)`.
+
+Such a run MAY always be replaced by one rule because every matching member
+produces the same observable routing decision, and no unrelated rule is moved
+across the run boundary.
+
+Within the replacement rule:
+
+- domain exact/suffix/keyword leaves become one `SetData::Domains` set;
+- destination and source IP leaves become separate `SetData::Ips` sets;
+- destination and source port leaves become separate `SetData::Ports` sets;
+- non-settable leaves, including `Proto`, `Predicate`, `Always`, compound
+  expressions, and existing `InSet` nodes, are kept as alternatives.
+
+The replacement match is either the single alternative or `Match::Any(alts)`.
+
+### 8.2. Pass 2: port verdict maps
+
+If Pass 1 does not consume the current position, the optimizer looks for the
+longest contiguous run of single `Port` leaves on the same side.
+
+That run MAY become a `VerdictMap` only if:
+
+- every rule has an empty statement list;
+- every key is an inclusive port range;
+- all ranges are pairwise disjoint.
+
+If any two ranges overlap, the run MUST remain ordered. This preserves cases
+such as:
+
+```text
+DST-PORT,1000-2000,proxy
+DST-PORT,1500,direct
+```
+
+Port `1500` must still route to `proxy`, because the first rule wins.
+
+### 8.3. No Other Reordering
+
+The v1 optimizer does not perform non-adjacent hoisting, IP verdict maps,
+domain verdict maps, or cross-chain optimization. These are future extensions
+and MUST preserve the same order-invariance rule if added.
+
+## 9. Implementation Scope and Extensions
+
+The v1 implementation intentionally distinguishes between IR capacity and
+engine behavior:
+
+- `RULE-SET` is still a `wind_core::rule::RuleType::RuleSet` predicate and
+  therefore currently matches false.
+- `SUB-RULE` is still evaluated through the legacy `RuleType::SubRule`
+  semantics when carried by `Predicate`.
+- GeoIP, ASN, and GeoSite rules require lookup functions in `MatchContext`.
+  `AclEngine::route` does not currently supply those functions.
+- Source IP, source port, inbound user, process fields, and UID require the
+  caller to provide them in `MatchContext`.
+- `Dnat` exists in the IR, but Hysteria `hijack` is not yet emitted or executed
+  by `AclEngine`.
+- `Drop` exists in the IR, but the public `RouteAction` currently reports it as
+  rejection.
+- sing-box route-rule parsing is not part of v1. The IR can grow typed leaves
+  for sing-box-style environment matchers later.
+
+Any future extension MUST keep the degenerate embedding equivalent to the
+legacy rule engine and MUST keep optimization semantics order-preserving.
+
+## 10. Security Considerations
+
+- **Optimizer safety.** If a transformation cannot prove that order is
+  unobservable, it MUST leave rules ordered. This fail-closed rule prevents
+  optimizations from silently changing routing or unblocking traffic.
+- **Missing context.** A rule that reads an absent `MatchContext` field does not
+  match. Deployments relying on source, process, inbound-user, GeoIP, ASN, or
+  GeoSite rules MUST ensure those fields or lookup functions are populated.
+- **Guard behavior.** Loopback/private guards run before IR evaluation. If a
+  guard is enabled, a resolver is REQUIRED at build time so domain targets can
+  be resolved before the guard decision.
+- **Redirect behavior.** Hysteria `hijack` is parsed but not honored. Enabling
+  `Dnat` in the future changes traffic destination and SHOULD be explicit and
+  observable in logs.
+- **Chain cycles.** Implementations MUST bound chain recursion. The current
+  depth limit is 64.
+- **Reject keywords.** The strings `reject`, `block`, and `deny` are reserved
+  rejection targets, matched case-insensitively.
+
+## 11. References
+
+- **[RFC2119]** Bradner, S., "Key words for use in RFCs to Indicate
+  Requirement Levels", BCP 14, RFC 2119, March 1997.
+- **[RFC8174]** Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC 2119 Key
+  Words", BCP 14, RFC 8174, May 2017.
+- `crates/wind-acl/src/model.rs`, `embed.rs`, `eval.rs`, and `optimize.rs`.
+- `crates/wind-core/src/rule.rs`.
+- MetaCubeX/Mihomo rule syntax.
+- Hysteria ACL syntax.
+- nftables concepts: sets, maps, chains, statements, and verdicts.

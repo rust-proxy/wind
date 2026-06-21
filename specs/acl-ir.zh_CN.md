@@ -1,448 +1,468 @@
-RFC: wind ACL 中间表示规范 (acl-ir)
+RFC: wind ACL 中间表示 (acl-ir)
 Category: Informational
-Date: June 2026
+Date: 2026 年 6 月
 
-# wind ACL 中间表示规范 (acl-ir)
+# wind ACL 中间表示 (acl-ir)
+
+## 本备忘录状态
+
+本文档定义 `wind-acl` 在本仓库内使用的 ACL 中间表示。它不是互联网标准，也不定义线
+路协议。规范性实现以本工作区内的 `wind-acl` 和 `wind-core` crate 为准。
 
 ## 摘要
 
-`wind-acl` 目前把两种表层方言——Clash/Mihomo 规则行与 Hysteria 风格 ACL 行
-——统一编译成一个扁平的 `Vec<wind_core::rule::Rule>`,按 first-match-wins
-求值。本文档规范一种更强的中间表示(IR)`acl-ir`,它借鉴 nftables 的**引擎
-形态**(类型化匹配表达式、命名集合、verdict map、带 jump/goto 的链,以及
-「语句后裁决」的规则结构),同时保留 nftables 本身缺失的七层匹配词汇(域名、
-geosite、进程、入站身份、嗅探协议)。
+`acl-ir` 是 `wind-acl` 使用的内部路由程序格式。它把 Hysteria 风格 ACL 规则和
+Clash/Mihomo 规则行降低为同一个 `Ruleset`，同时保留 first-match-wins 路由语义、默
+认出站兜底，以及旧有 `wind_core::rule::Rule` 的匹配行为。
 
-该 IR 的设计使得当前扁平引擎是它的**严格退化子集**:一个 base chain,其中每
-条规则携带单一匹配 + `Forward`/`Reject` 裁决,以默认出站作为链 policy,即可
-逐字复刻现有行为。任何把有序规则折叠进无序结构(集合、verdict map)的优化,
-**仅在可证明保序时**才会施加,因此该 IR 在构造上保留了 Mihomo 的「声明顺序 =
-匹配顺序」语义。
+IR 的形状类似一个小型 nftables 风格引擎：布尔匹配表达式、集合成员检查、verdict
+map、有序链、语句和终结 verdict。v1 实现有意保持兼容边界较窄：对优化有价值的叶子
+节点使用强类型 IR 节点表示，包括域名 exact/suffix/keyword、IP CIDR、源/目标端口和
+网络协议；其它 Mihomo 规则类型通过 `Match::Predicate` 携带，并委托给
+`wind_core::rule::Rule` 求值。
 
-本文档为设计文档,不改动本仓库任何代码。
+## 目录
+
+1. [引言](#1-引言)
+2. [约定与术语](#2-约定与术语)
+3. [编译流水线](#3-编译流水线)
+4. [数据模型](#4-数据模型)
+5. [求值语义](#5-求值语义)
+6. [退化嵌入](#6-退化嵌入)
+7. [表层方言降低](#7-表层方言降低)
+8. [保序优化](#8-保序优化)
+9. [实现范围与扩展](#9-实现范围与扩展)
+10. [安全考虑](#10-安全考虑)
+11. [参考资料](#11-参考资料)
 
 ## 1. 引言
 
-代理路由 ACL 回答一个问题:*给定目的地(以及我们对该连接已知的信息),哪个
-出站——若有——为它服务?* 表达力的参照系是 Mihomo (Clash.Meta),其约 30 种
-规则类型已被 `wind_core::rule` 镜像。Hysteria ACL 是该词汇的严格子集。
-sing-box 则是近似对等:它新增了连接/环境类匹配器(`clash_mode`、`wifi_ssid`、
-`network_type`、`auth_user`),这些是 Clash 模型所没有的,因此没有任何单一既
-有方言是普适超集。
+ACL 路由器回答一个问题：给定连接上下文，应该由哪个出站处理它，或者是否应该拒绝？
+wind 过去使用扁平的 `Vec<wind_core::rule::Rule>`，并按声明顺序求值。这个模型简单
+且兼容 Clash/Mihomo 语法，但难以优化，也没有给 Hysteria ACL 转换提供结构化目标。
 
-nftables 提供了比上述任何一者都更通用的**引擎**——类型化表达式匹配、带区间/
-最长前缀查找的命名集合与映射、用于 O(1) 派发的 verdict map、带
-`jump`/`goto`/`return` 的链,以及一套语句词汇(计数器、限速、打标记、
-NAT/重定向)——但它工作在 L3/L4,没有域名、geosite、进程名或 L7 身份的概念。
+`acl-ir` 提供这个结构化目标。它有三个目标：
 
-`acl-ir` 即刻意的混合体:**nftables 的引擎模型,叠加 Mihomo 与 sing-box 的
-L7 匹配词汇。** 它既作为 `wind-acl` 的内部求值形态,也作为一个公共编译目标,
-让 Hysteria、Mihomo、sing-box 三种方言都能向其降级。
+- 对已经由旧引擎支持的规则，精确保留现有路由决策；
+- 暴露足够的强类型结构，以便安全地构建集合和 verdict map；
+- 为更丰富的路由结构留下明确扩展点，而不强迫 v1 一次实现全部能力。
+
+IR 借鉴 nftables 的引擎形状，但它不是 nftables 前端。它运行在 wind 内部，读取
+`wind_core::rule::MatchContext`，并保留代理路由特有的七层概念，例如域名、进程身
+份、入站元数据、GeoIP/GeoSite 查找以及 rule-set 占位符。
 
 ## 2. 约定与术语
 
-本文档中的关键词 "MUST"、"MUST NOT"、"REQUIRED"、"SHALL"、"SHALL NOT"、
-"SHOULD"、"SHOULD NOT"、"RECOMMENDED"、"MAY"、"OPTIONAL" 按 [RFC 2119] 解释。
+本文档使用中文规范词“必须”、“绝对不能”、“要求”、“应当”、“不应当”、“应该”、
+“不应该”、“建议”、“可以”和“可选”。这些词按 BCP 14 [RFC2119] [RFC8174] 解释。
 
-- **Match(匹配)**:对连接 `MatchContext` 求值的布尔表达式。
-- **Verdict(裁决)**:终结或链控制决策(forward、reject、drop、jump、goto、
-  return,或 verdict-map 查表)。
-- **Statement(语句)**:规则命中后、裁决之前按序执行的非终结动作(counter、
-  log、limit、mark、dnat、sniff)。
-- **Rule(规则)**:`匹配 → 语句* → 裁决`。
-- **Chain(链)**:有序规则列表 + 一个默认 policy 裁决。
-- **Set / Verdict map**:命名、类型化、无序的查找结构。
-- **first-match-wins**:对连接 `c`,结果是声明序中第一条其匹配包含 `c` 的规则
-  的裁决。
-- **`[nft]` / `[L7]`**:标注每个构件是 nftables 原生概念,还是 nftables 不提供
-  的七层扩展。
+- **Match（匹配）**：针对 `MatchContext` 求值的布尔表达式。
+- **Predicate（谓词）**：作为不透明匹配器嵌入 IR 的 `wind_core::rule::Rule`。
+- **Statement（语句）**：与命中规则关联的非终结动作。
+- **Verdict（裁决）**：路由或控制流决策：forward、reject、drop、return、jump、
+  goto 或 verdict-map 查找。
+- **Rule（规则）**：一个匹配表达式、零个或多个语句、一个 verdict。
+- **Chain（链）**：有序规则列表。入口链还具有可观察的兜底 policy。
+- **Set（集合）**：供 `Match::InSet` 使用的无序查找表。
+- **Verdict map**：从键范围到 verdict 的无序查找表。
+- **退化嵌入**：与旧扁平规则引擎等价的单链 IR 形式。
+- **First-match-wins**：按声明顺序，第一个匹配为真的规则决定路由。
 
-本文档中的记法为示意性的 Rust 风格伪代码,不是规范性 API;最终 `wind-acl`
-crate 中的字段名 MAY 不同。
+本文档中的 Rust 片段是说明性的，但与 `crates/wind-acl/src/model.rs` 中的公开类型保
+持一致。
 
-## 3. 数据模型
+## 3. 编译流水线
 
-### 3.1. 集合与元素类型
+`AclEngineBuilder` 按以下顺序构建引擎：
 
-```rust
-// 命名集合的元素类型 —— 类比 nft 的 `type ipv4_addr` / `inet_service`。
-enum ElemType {
-    Ip,                    // [nft] CIDR / 最长前缀
-    Port,                  // [nft] 区间
-    Asn,                   // [nft~]
-    Domain,                // [L7] nft 无域名类型
-    GeoTag,                // [L7] geoip / geosite 数据库标签
-    Tuple(Vec<ElemType>),  // [nft] 拼接,如 `ip . port`
-}
+1. 通过 `syntax::apernet` 解析 Hysteria ACL 条目。
+2. 使用 `acl_to_rules` 把这些条目转换为 `wind_core::rule::Rule`。
+3. 通过 `syntax::metacubex` 解析 Clash/Mihomo 规则行。
+4. 把 Hysteria 派生规则放在 Clash/Mihomo 规则之前并连接起来。
+5. 使用 `Ruleset::from_rules` 构建退化 `Ruleset`。
+6. 运行保序优化器 `compile`。
+7. 路由时，根据 `TargetAddr`、协议和已配置的静态入站元数据构建 `MatchContext`，
+   然后对 `Ruleset` 求值。
 
-// 命名集合 —— RULE-SET / rule_set / domain-set 的统一落点。
-struct NamedSet { name: String, data: SetData }
+Hysteria 先于 Clash 的顺序对 `AclEngine` 是规范性的：如果两种表层规则都能匹配同一
+连接，Hysteria 派生规则获胜。
 
-enum SetData {
-    Ips(IpLpmSet),                   // [nft] 前缀树
-    Ports(Vec<RangeInclusive<u16>>), // [nft]
-    Asns(HashSet<u32>),
-    Domains(DomainSet),              // [L7] 后缀 trie + exact + keyword 桶
-    Geo(Vec<String>),               // [L7] 运行时查外部库
-    Tuple(Vec<SetData>),             // [nft] 复合键
-}
-```
+`AclEngine::route` 目前只填充该调用点可见的字段：目标域名或 IP、目标端口、网络协
+议、可选入站名称和可选入站类型。源 IP、源端口、入站用户、进程元数据以及外部
+GeoIP/ASN/GeoSite 查找函数不会自动填充，除非调用者直接使用更完整的 `MatchContext`
+求值 `Ruleset`。
 
-### 3.2. 匹配表达式
+## 4. 数据模型
+
+### 4.1. 匹配表达式
 
 ```rust
+enum Side {
+    Dst,
+    Src,
+}
+
 enum Match {
-    // 逻辑组合
-    // [nft 匿名拼接 / sing-box and|or|invert / Mihomo AND|OR|NOT]
     All(Vec<Match>),
     Any(Vec<Match>),
     Not(Box<Match>),
-    Always,                                    // MATCH / 兜底
+    Always,
 
-    // 叶子谓词
-    Ip   { side: Side, test: IpTest },         // [nft] side = Dst | Src
-    Port { side: Side, test: PortTest },       // [nft]
-    Proto(NetworkType),                        // [nft] tcp / udp
-    Asn  { side: Side, asn: u32 },             // [nft~]
-    Geo  { side: Side, code: String },         // [L7] GEOIP / SRC-GEOIP
-    Domain(DomainTest),                        // [L7]
-    GeoSite(String),                           // [L7]
-    Process(ProcessTest),                      // [L7] name/path/regex/uid
-    Identity { field: IdField, eq: String },   // [L7] IN-USER / IN-NAME / auth_user / 入站类型
-    Meta(MetaTest),
+    Ip     { side: Side, net: IpNet },
+    Port   { side: Side, range: RangeInclusive<u16> },
+    Proto  (NetworkType),
+    Domain (DomainTest),
 
-    // 集合成员:`ip daddr @cn`
-    InSet { side: Side, field: SetField, set: String }, // [nft] 含 RULE-SET
+    InSet { side: Side, set: usize },
+    Predicate(Arc<wind_core::rule::Rule>),
 }
 
-enum IpTest   { Cidr(IpNet), Suffix(IpNet), NoResolve(IpNet) } // no-resolve 落这里
-enum PortTest { Eq(u16), Range(RangeInclusive<u16>) }
 enum DomainTest {
-    Exact(String), Suffix(String), Keyword(String),
-    Wildcard(Regex), Regex(Regex),
-}
-enum MetaTest {
-    Dscp(u8),                              // [nft]
-    CtState(CtState),                      // [nft] new/established/related —— 新能力
-    InboundPort(u16),                      // [L7]
-    TimeWindow { from: u32, to: u32 },     // [nft meta time]
-    DayOfWeek(u8),                         // [nft meta day]
-    ClashMode(String),                     // [L7 sing-box]
-    NetworkType(String),                   // [L7 sing-box]
-    WifiSsid(String), WifiBssid(String),   // [L7 sing-box]
-    SniffedProtocol(String),               // [L7 sing-box protocol]
+    Exact(String),
+    Suffix(String),
+    Keyword(String),
 }
 ```
 
-### 3.3. 语句、裁决与 verdict map
+按通常布尔约定，`All([])` 为真，`Any([])` 为假，但降低逻辑应该避免构造空逻辑节
+点。`Always` 是 `MATCH` 的 IR 形式。
+
+`DomainTest::Suffix` 同时匹配该 suffix 本身及其子域。Exact 与 suffix 比较是 ASCII
+大小写不敏感的。Keyword 匹配同样是 ASCII 大小写不敏感的。
+
+`Predicate` 是兼容性逃逸口。它必须通过调用 `Rule::matches(ctx)` 求值，因此不透明
+规则精确保留 `wind_core::rule` 行为，包括 `RULE-SET` 当前恒为 false，以及 `SUB-RULE`
+当前沿用旧有包含规则语义。
+
+### 4.2. 集合
 
 ```rust
-// 非终结:规则命中后按序执行,然后流向裁决。[nft statements]
+struct NamedSet {
+    data: SetData,
+}
+
+enum SetData {
+    Domains(DomainSet),
+    Ips(Vec<IpNet>),
+    Ports(Vec<RangeInclusive<u16>>),
+}
+
+struct DomainSet {
+    exact: Vec<String>,
+    suffix: Vec<String>,
+    keyword: Vec<String>,
+}
+```
+
+实现把集合存入 `Ruleset::sets`，并通过表索引引用。名称 `NamedSet` 保留其概念角色；
+未来的序列化形式可以分配稳定名称。
+
+成员检查由集合类型决定：
+
+- `Domains` 读取 `ctx.domain`，忽略 `side`；
+- `Ips` 根据 `side` 读取 `ctx.dst_ip` 或 `ctx.src_ip`；
+- `Ports` 根据 `side` 读取 `ctx.dst_port` 或 `ctx.src_port`。
+
+### 4.3. 语句与 verdict
+
+```rust
 enum Statement {
     Counter,
     Log(String),
-    Limit { rate: u32, per: Duration, burst: u32 }, // [nft] 限速 —— 新能力
     Mark(u32),
-    Dnat(TargetAddr),  // [nft] == Hysteria hijack —— 终于被执行
-    Sniff,             // [L7] 触发协议嗅探
+    Dnat(String),
 }
 
-// 终结 / 链控制。[nft verdicts]
 enum Verdict {
-    Forward(String),     // 选定命名出站(accept + 路由)
-    Reject(RejectKind),  // reject / block / deny
-    Drop,                // 静默丢弃
-    Return,              // 回到调用链
-    Jump(String),        // 调子链,MAY 经 Return 返回 —— SUB-RULE 降级于此
-    Goto(String),        // 尾调子链,不返回
-    Map { key: MapKey, map: String }, // verdict map: `ip daddr vmap @m` —— O(1) 派发
+    Forward(String),
+    Reject(String),
+    Drop,
+    Return,
+    Jump(String),
+    Goto(String),
+    Map(usize),
+}
+```
+
+语句是非终结动作。若某个实现暴露语句副作用，它必须在应用规则 verdict 之前，按规
+则中的顺序执行这些语句。当前 `RouteAction` API 只观察路由决策，因此内置求值器忽略
+语句副作用。退化嵌入从不产生语句。
+
+`Forward` 选择一个命名出站。`Reject` 携带原因字符串并拒绝连接。IR 中存在 `Drop`，
+但 `wind_core::RouteAction` 目前没有 drop 变体；内置求值器会把 `Drop` 报告为原因是
+`"dropped"` 的拒绝。
+
+### 4.4. Verdict map、链与 ruleset
+
+```rust
+enum MapField {
+    Port,
 }
 
-struct VerdictMap {                       // [nft vmap] —— Mihomo 无对应
-    key_type: ElemType,
-    entries: Vec<(SetKey, Verdict)>,      // 区间 / 精确键
+struct VerdictMap {
+    side: Side,
+    field: MapField,
+    entries: Vec<(RangeInclusive<u16>, Verdict)>,
     default: Option<Verdict>,
 }
 
-struct IrRule { matches: Match, stmts: Vec<Statement>, verdict: Verdict }
-struct Chain  { name: String, policy: Verdict, rules: Vec<IrRule> }
+struct IrRule {
+    matches: Match,
+    stmts: Vec<Statement>,
+    verdict: Verdict,
+}
+
+struct Chain {
+    name: String,
+    policy: Verdict,
+    rules: Vec<IrRule>,
+}
 
 struct Ruleset {
-    sets:   HashMap<String, NamedSet>,
-    maps:   HashMap<String, VerdictMap>,
-    chains: HashMap<String, Chain>,
-    entry:  String,                       // 求值起始的 base chain
+    sets: Vec<NamedSet>,
+    maps: Vec<VerdictMap>,
+    chains: Vec<Chain>,
+    entry: usize,
 }
 ```
 
-## 4. 求值语义
+v1 中，verdict map 只以源端口或目标端口范围为键。优化器只会创建范围两两不相交的
+map。
 
-求值 MUST 从 `entry` 开始,自上而下扫描该链规则:
+`entry` 是 `chains` 的索引；求值总是从这里开始。
 
-1. 对每条 `IrRule`,用连接的 `MatchContext` 求值 `matches`。
-2. 命中则按序执行 `stmts`,然后应用 `verdict`。
-3. `Forward` / `Reject` / `Drop` 终止求值。
-4. `Jump(c)` 压入返回帧并跳到链 `c`;`Goto(c)` 跳到 `c` 但不压返回帧;
-   `Return` 弹回调用方(在 base chain 中则落到 policy)。
-5. `Map { key, map }` 在命名 verdict map 中查 `key` 并应用所得裁决(或 map 的
-   `default`,两者皆无则继续往下)。
-6. 链耗尽而无终结裁决时,应用其 `policy`。
+## 5. 求值语义
 
-实现 MUST 按序求值单链内的规则。该顺序保证是第 6 节的基石。
+求值从 `Ruleset::entry` 开始，并自上而下扫描入口链。
 
-## 5. 现有引擎的退化嵌入
+对每条规则：
 
-现有 `do_route`(扁平 `Vec<Rule>`、first-match-wins、默认出站兜底)恰好就是
-如下 `Ruleset`:
+1. 用给定 `MatchContext` 求值 `rule.matches`。
+2. 如果匹配为假，继续下一条规则。
+3. 如果匹配为真，处理 `rule.stmts`，然后应用 `rule.verdict`。
+
+终结 verdict 行为如下：
+
+- `Forward(outbound)` 以 `RouteAction::Forward(outbound)` 终结。
+- `Reject(reason)` 以 `RouteAction::Reject(reason)` 终结。
+- `Drop` 在当前公开 API 中以拒绝形式终结。
+
+控制流 verdict 行为如下：
+
+- `Return` 对调用方产生 fallthrough。
+- `Jump(name)` 求值命名链。若该链产生终结 verdict，则该终结 verdict 获胜。若该链
+  fall through，则从 jump 之后的下一条规则继续。
+- `Goto(name)` 求值命名链，但不建立语义上的返回点。在当前求值器中，目标链的非终结
+  结果仍以调用点 fallthrough 表示。在更严格的尾调用语义实现之前，配置应该在
+  `Goto` 目标链中使用显式终结规则。
+- `Map(index)` 在 `Ruleset::maps[index]` 中查找当前键。命中时应用条目 verdict。未命
+  中但存在 `default` 时应用默认 verdict。未命中且无 `default` 时 fall through 到下
+  一条规则。
+
+如果入口链最终 fall through，`Ruleset::route` 应用入口链 policy。非入口链 policy
+保留给未来多 base-chain 语义；v1 调用者应该在子链中使用显式终结兜底规则。
+
+实现必须防止无限链递归。当前求值器最大链深度为 64，超过后按 fallthrough 处理。
+
+## 6. 退化嵌入
+
+`Ruleset::from_rules(rules, default_outbound)` 把旧规则嵌入为单链 ruleset：
 
 ```rust
 Ruleset {
-    entry: "main",
-    sets: {}, maps: {},
-    chains: { "main": Chain {
-        name: "main",
-        policy: Forward(default_outbound),                 // 无规则命中时的兜底
-        rules: vec_rule.into_iter()
-            .map(|r| IrRule { matches: r.into_match(), stmts: vec![],
-                              verdict: r.into_verdict() }) // Forward / Reject
-            .collect(),
-    }},
+    sets: vec![],
+    maps: vec![],
+    entry: 0,
+    chains: vec![Chain {
+        name: "main".to_string(),
+        policy: Verdict::Forward(default_outbound),
+        rules: rules.into_iter().map(rule_to_ir).collect(),
+    }],
 }
 ```
 
-该嵌入是规范性的:任何 `acl-ir` 实现 MUST 对「仅使用现有引擎所支持构件」的输入
-产出与现有引擎完全一致的路由决策。`wind_core::RouteAction` 只需新增 `Drop` 与
-`Dnat` 两个变体以承载新的裁决/语句种类;既有 `Forward` / `Reject` 语义不变。
+该嵌入是规范性的：优化之前，对同一个 `MatchContext` 的路由必须与旧 first-match-wins
+引擎一致。优化之后仍必须与其一致。
 
-## 6. 表层方言的降级
+以下规则类型会变为强类型 IR 叶子：
 
-下表给出每种外部规则类型到 `acl-ir` 形态的映射。
-
-| 表层规则 | acl-ir 降级 |
+| `wind_core::rule::RuleType` | IR 匹配 |
 | --- | --- |
-| Hysteria `out addr ports [hijack]` | `IrRule { matches: All([addr, port]), stmts: [hijack → Dnat], verdict: Forward/Reject }` |
-| Hysteria `private` / `localhost` | `InSet { Dst, @builtin_private / @builtin_loopback }`(替代独立的 `GuardConfig`) |
-| `DOMAIN` / `-SUFFIX` / `-KEYWORD` / `-WILDCARD` / `-REGEX` | `Match::Domain(Exact/Suffix/Keyword/Wildcard/Regex)` |
-| `GEOSITE` | `Match::GeoSite` |
-| `IP-CIDR` / `IP-CIDR6` / `IP-SUFFIX` | `Match::Ip { Dst, Cidr/Suffix }`;`,no-resolve` → `IpTest::NoResolve` |
-| `IP-ASN` / `GEOIP` | `Match::Asn { Dst }` / `Match::Geo { Dst }` |
-| `SRC-IP-CIDR` / `SRC-GEOIP` / `SRC-IP-ASN` | 同上,`side: Src` |
-| `DST-PORT` / `SRC-PORT`(含区间) | `Match::Port { side, Eq/Range }` |
-| `NETWORK` | `Match::Proto` |
-| `IN-PORT` / `IN-TYPE` / `IN-USER` / `IN-NAME` | `Meta::InboundPort` / `Identity { field, .. }` |
-| `PROCESS-NAME(-REGEX)` / `PROCESS-PATH(-REGEX)` / `UID` | `Match::Process(..)` |
-| `DSCP` | `Meta::Dscp` |
-| `AND` / `OR` / `NOT` | `Match::All` / `Any` / `Not` |
-| `SUB-RULE` | 子 `Chain` + `Verdict::Jump` |
-| `RULE-SET` | `NamedSet` + `Match::InSet`(当前为永假占位符) |
-| `MATCH,target` | `Chain.policy`,或 `IrRule { Always, Forward }` |
-| target `reject` / `block` / `deny` | `Verdict::Reject` |
-| sing-box `and` / `or` / `invert` | `All` / `Any` / `Not` |
-| sing-box `rule_set` | `NamedSet` + `InSet` |
-| sing-box `clash_mode` / `wifi_ssid` / `network_type` / `auth_user` / `protocol` | `Meta::*` / `Identity` |
-| sing-box 动作 `route` / `reject` / `hijack-dns`、`override_*` | `Verdict::Forward` / `Reject` / `Statement::Dnat` |
-| nftables `expr → verdict` | 1:1(本就是母模型) |
+| `Domain` | `Domain(Exact)` |
+| `DomainSuffix` | `Domain(Suffix)` |
+| `DomainKeyword` | `Domain(Keyword)` |
+| `IpCidr`, `IpSuffix` | `Ip { side: Dst }` |
+| `IpCidr6` | `Ip { side: Dst }` |
+| `SrcIpCidr`, `SrcIpSuffix` | `Ip { side: Src }` |
+| `DstPort`, `DstPortRange` | `Port { side: Dst }` |
+| `SrcPort`, `SrcPortRange` | `Port { side: Src }` |
+| `Network` | `Proto` |
+| `Match` | `Always` |
 
-`RULE-SET` 与 `SUB-RULE` 是 `acl-ir` 对当前行为「升级」而非仅「重编码」的两处:
-`RULE-SET` 从 `wind_core::rule::RuleType::RuleSet` 的永假占位符变成可真正匹配的
-集合;`SUB-RULE` 从当前的 AND 近似变成真正的链调用。
+所有其它规则类型都会嵌入为 `Predicate(Arc<Rule>)`。
 
-## 7. 保序优化
+目标字符串映射如下：
 
-每条链的有序 `Vec<IrRule>` 是**地面真相**。集合与 verdict map 是无序查找结构;
-把有序规则折叠进它们是一种优化,MUST 仅在可证明保序时施加。
+- `reject`、`block` 和 `deny` 按大小写不敏感匹配，变为携带规范化原因字符串的
+  `Verdict::Reject`；
+- 所有其它目标变为 `Verdict::Forward(target)`，并保留目标字符串拼写。
 
-### 7.1. 可靠性不变式
+规范化 reject 原因不是路由语义。测试按“是否拒绝”比较决策，而不是比较原因字符串。
 
-`may_overlap(a, b)`(见 7.2)MUST 是*可靠的*:返回 `false` MUST 蕴含两个匹配
-可证明不相交。存疑时 MUST 返回 `true`。保守的 `true` 只会让优化器少折叠,绝不
-改写语义。
+## 7. 表层方言降低
 
-### 7.2. 重叠判定
+### 7.1. Clash/Mihomo
 
-```rust
-// 两条规则的匹配是否可能被同一连接满足?
-// `false` MUST 是可证明的;否则返回 `true`。
-fn may_overlap(a: &Match, b: &Match) -> bool {
-    match (leaf(a), leaf(b)) {
-        // 同 field 同 side 且单叶 → 字段专属的可判定测试。
-        (Some(la), Some(lb)) if la.field == lb.field && la.side == lb.side =>
-            values_may_overlap(la.field, &la.val, &lb.val),
-        // 不同 field 可被同时命中;复合 / regex 不可判定。
-        _ => true,
-    }
-}
+Clash/Mihomo 规则行由 `wind_core::rule::Rule::parse` 解析。多行 helper 会跳过空行和
+`#` 注释。
 
-fn values_may_overlap(field: Field, x: &Val, y: &Val) -> bool {
-    match field {
-        Ip     => ipnet_intersects(x, y),  // CIDR 交集,精确
-        Port   => range_intersects(x, y),  // 区间交集,精确
-        Proto  => x == y,                  // tcp vs udp 必不相交
-        Asn    => x == y,
-        Geo    => x == y,                  // 国家码划分整个空间
-        Domain => domain_may_overlap(x, y),
-        _      => x == y,                  // 标量身份 / meta
-    }
-}
+共享规则模型支持以下大类：
 
-fn domain_may_overlap(x: &DomainTest, y: &DomainTest) -> bool {
-    use DomainTest::*;
-    match (x, y) {
-        (Exact(a),  Exact(b))  => a.eq_ignore_ascii_case(b),
-        (Suffix(s), Suffix(t)) => is_dot_suffix(s, t) || is_dot_suffix(t, s),
-        (Exact(e),  Suffix(s)) | (Suffix(s), Exact(e)) => ends_with_label(e, s),
-        _ => true, // Keyword / Wildcard / Regex 不可低成本判定
-    }
-}
-```
+- 域名规则：`DOMAIN`、`DOMAIN-SUFFIX`、`DOMAIN-KEYWORD`、`DOMAIN-WILDCARD`、
+  `DOMAIN-REGEX`、`GEOSITE`；
+- 目标 IP 规则：`IP-CIDR`、`IP-CIDR6`、`IP-SUFFIX`、`IP-ASN`、`GEOIP`；
+- 源 IP 规则：`SRC-IP-CIDR`、`SRC-IP-SUFFIX`、`SRC-IP-ASN`、`SRC-GEOIP`；
+- 端口：`DST-PORT`、`SRC-PORT`，包括闭区间范围；
+- 入站元数据：`IN-PORT`、`IN-TYPE`、`IN-USER`、`IN-NAME`；
+- 进程与用户身份：`PROCESS-PATH`、`PROCESS-PATH-REGEX`、`PROCESS-NAME`、
+  `PROCESS-NAME-REGEX`、`UID`；
+- 协议与流量元数据：`NETWORK`、`DSCP`；
+- 复合与兜底：`AND`、`OR`、`NOT`、`SUB-RULE`、`RULE-SET`、`MATCH`。
 
-### 7.3. Pass 1 —— 连续同裁决段(永远安全)
+今天只有第 6 节列出的子集会在 IR 中强类型化。其余规则通过 `Predicate` 保持语义正
+确。
 
-**定理。** 把 `(stmts, verdict)` 完全相同的*连续*规则段合并成一条规则、放在该段
-起始位置,严格保序,且无需任何重叠分析。
+### 7.2. Hysteria 风格 ACL
 
-*证明概要。* 段内成员产出同一裁决,内部谁「赢」不可观测。连续性意味着没有外来
-规则被跨越。对被该段命中的连接,不存在更早的命中规则(那些规则相对合并规则仍
-在其前),故位于段首的合并规则产出同一裁决。对不被该段命中的连接,合并规则不
-命中,控制流与之前完全一致地继续往下。∎
-
-段内,可入集的叶子按元素类型归入命名集合;不可入集的叶子(regex/wildcard/复合)
-作为 `Any` 的备选保留:
-
-```rust
-fn bucket_same_verdict(run: &[IrRule], sets: &mut SetTable) -> IrRule {
-    let mut alts: Vec<Match> = vec![];
-    let mut by_type: HashMap<(Field, Side), Vec<Val>> = map![];
-    for r in run {
-        match elementize(&r.matches) {            // 单叶且可作集合元素?
-            Some(leaf) => by_type.entry((leaf.field, leaf.side)).or_default().push(leaf.val),
-            None       => alts.push(r.matches.clone()), // 原样保留(仍同裁决)
-        }
-    }
-    for ((field, side), vals) in by_type {
-        let name = sets.intern(field, vals);       // 去重 → NamedSet(前缀树 / 后缀树 / ...)
-        alts.push(Match::InSet { side, field: set_field(field), set: name });
-    }
-    IrRule { matches: Match::Any(alts), stmts: run[0].stmts.clone(), verdict: run[0].verdict.clone() }
-}
-```
-
-### 7.4. Pass 2 —— 互斥 verdict map
-
-同一 field、单叶、但裁决各异的连续段,MAY 编译成 `VerdictMap`,**当且仅当键
-两两不相交**(从而至多一个条目命中,顺序不可观测):
-
-```rust
-fn try_vmap(run: &[IrRule], maps: &mut MapTable) -> Option<IrRule> {
-    let (field, side) = single_field(run)?; // 全段同 field 且单叶,否则 None
-    for (i, a) in run.iter().enumerate() {
-        for b in &run[i+1..] {
-            if values_may_overlap(field, val(a), val(b)) { return None; } // 非互斥 → 放弃
-        }
-    }
-    let entries = run.iter().map(|r| (key_of(r), r.verdict.clone())).collect();
-    let name = maps.intern(field, entries);
-    Some(IrRule { matches: Match::Always, stmts: vec![],
-                  verdict: Verdict::Map { key: map_key(field, side), map: name } })
-}
-```
-
-> **IP 的 first-match vs 最长前缀。** Mihomo 的 IP 规则是先声明先赢,而非最长
-> 前缀。`values_may_overlap(Ip, ..)` 对重叠 CIDR 返回 `true`,故 `try_vmap`
-> 自动放弃、规则保持有序。这避免了把 `IP-CIDR,10.0.0.0/8,DIRECT` 后接
-> `IP-CIDR,10.1.0.0/16,PROXY` 错编译成会把 `10.1.0.5` 解析为 `PROXY`(而非
-> `DIRECT`)的 LPM 表。
-
-### 7.5. 编译器
-
-```rust
-fn compile(rules: Vec<IrRule>, policy: Verdict) -> Ruleset {
-    let (mut sets, mut maps) = (SetTable::new(), MapTable::new());
-    let mut out: Vec<IrRule> = vec![];
-    let mut i = 0;
-    while i < rules.len() {
-        // Pass 1:最长「同 (stmts, verdict)」连续段 —— 永远安全。
-        let j = run_end(&rules, i, |a, b| a.stmts == b.stmts && a.verdict == b.verdict);
-        if j - i >= 2 { out.push(bucket_same_verdict(&rules[i..j], &mut sets)); i = j; continue; }
-
-        // Pass 2:最长「同 field 单叶」连续段;键互斥才编译 vmap。
-        let k = run_end(&rules, i, same_field_single_leaf);
-        if k - i >= 2 {
-            if let Some(rule) = try_vmap(&rules[i..k], &mut maps) { out.push(rule); i = k; continue; }
-        }
-
-        out.push(rules[i].clone()); i += 1; // 有序退路 —— 永远正确
-    }
-    // Pass 3(可选,见 7.6)可在此运行。
-    Ruleset {
-        sets, maps,
-        chains: hashmap!{ "main".into() => Chain { name: "main".into(), policy, rules: out } },
-        entry: "main".into(),
-    }
-}
-```
-
-### 7.6. Pass 3 —— 非相邻上提(可选)
-
-靠后的同裁决规则 `R_k` MAY 被上提到位置 `p` 处更早的同裁决桶,**当且仅当**
-`R_k` 与它将被移过的每条*异裁决*规则都可证明不相交:
-
-```rust
-fn can_hoist(out: &[IrRule], p: usize, rk: &IrRule) -> bool {
-    out[p..].iter().all(|r| r.verdict == rk.verdict || !may_overlap(&r.matches, &rk.matches))
-}
-```
-
-Pass 1 已覆盖绝大多数「大块同裁决 geoip/端口/域名规则」的情形,故 Pass 3 是
-可选的精修,MAY 关闭。
-
-### 7.7. 端到端示例
+Hysteria ACL 行形如：
 
 ```text
-输入(声明序):                              输出 Ruleset:
-DOMAIN-SUFFIX,ads.ex.com,REJECT             rule0: Domain(Suffix ads.ex.com) → Reject   # 保留(裁决不同,与 ex.com 重叠)
-DOMAIN-SUFFIX,google.com,PROXY        ┐
-DOMAIN-SUFFIX,github.com,PROXY        ├───►  rule1: InSet @s_proxy_suffix → Forward(proxy)   (Pass 1)
-IP-CIDR,1.1.1.0/24,PROXY              ┘            @s_proxy_suffix = {google.com, github.com}
-                                                   + IP 桶 {1.1.1.0/24}(两个 InSet 的 Any)
-DST-PORT,80,DIRECT                    ┐
-DST-PORT,443,PROXY                    ├───►  rule2: dport vmap @m_port                        (Pass 2,键互斥)
-DST-PORT,22,DIRECT                    ┘            @m_port = {80:DIRECT, 443:PROXY, 22:DIRECT}
-MATCH,direct                                 policy: Forward(direct)
+<outbound> [address] [ports] [hijack]
 ```
 
-## 8. 解锁的能力 vs 仍属扩展的部分
+降低过程先把每个 `AclRule` 转换为一个或多个 `wind_core::rule::Rule`，再按第 6 节嵌
+入这些规则。
 
-相对当前 `wind-acl` 的净增能力:
+地址降低：
 
-- `NamedSet` 让 `RULE-SET` 从永假占位符(`RuleType::RuleSet(_) => false`)变成
-  真匹配,IP 走前缀树、域名走后缀树;`SUB-RULE` 从 AND 近似变成真正的链调用。
-- `VerdictMap` 为 geoip/端口路由提供 O(1) 派发,替代线性扫描。
-- `Statement::Dnat` 终于执行 Hysteria 的 `hijack`——当前构建器仅警告并忽略。
-- `Limit` / `CtState` / `Mark` 是从 nftables 继承的全新维度。
+| Hysteria 地址 | 降低后的规则类型 |
+| --- | --- |
+| 省略或 `*` | `MATCH` |
+| IPv4 字面量 | `IP-CIDR` 主机路由 `/32` |
+| IPv6 字面量 | `IP-CIDR` 主机路由 `/128` |
+| CIDR | `IP-CIDR` |
+| domain | `DOMAIN` |
+| `*.example.com` | `DOMAIN-SUFFIX,example.com` |
+| `suffix:example.com` | `DOMAIN-SUFFIX,example.com` |
+| `localhost` | `127.0.0.0/8` 和 `::1/128` |
+| `private` | `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`127.0.0.0/8`、`169.254.0.0/16`、`::1/128`、`fc00::/7`、`fe80::/10` |
 
-仍属 nftables 自身无法提供的 L7 扩展——即本方案为何是混合体而非 nftables:
-`Domain*`、`GeoSite`、`Process*`、入站身份、`Sniff`,以及 sing-box 环境匹配器。
-它们要求其数据被携带进 `MatchContext`。注意 `src_ip` 与 `inbound_user` 当前在
-路由路径中恒为 `None`;填充它们是对应 `Match` 种类有意义的前提,且不在本文档
-范围内。
+端口降低：
 
-## 9. 安全考量
+- 省略端口列表时，不增加端口条件；
+- `80` 变为 `DST-PORT,80`；
+- `1000-2000` 变为 `DST-PORT,1000-2000`；
+- `tcp/443` 或 `udp/53` 变为 `AND(NETWORK, DST-PORT)`。
 
-- **重叠时 fail-closed。** 优化器唯一的正确性杠杆是
-  `may_overlap` 返回 `false`。由于它被要求可靠且默认 `true`,优化器缺陷最坏只
-  会让规则不被折叠,绝不会静默改路由或解除拦截。测试套件 SHOULD 包含差分检查,
-  在随机化上下文上比对「优化后」与「未优化」的求值结果。
-- **环回/私网守卫。** 把守卫降级为 `@builtin_private` / `@builtin_loopback`
-  成员规则(见第 6 节)MUST 保留当前的 fail-closed 行为,包括这些守卫启用时
-  必须存在 resolver 的要求。
-- **`Dnat`/`hijack`。** 执行重定向目标会改变流量去向。它 MUST 保持显式开启,
-  且 SHOULD 记录日志,在显式启用前与当前「警告并忽略」的姿态一致。
+当地址条件和端口条件同时存在时，降低会为每个组合发出一条 `AND(address, port)` 规
+则。
 
-## 10. 参考
+出站降低：
 
-- [RFC 2119] Bradner, S., "Key words for use in RFCs to Indicate Requirement
-  Levels", BCP 14, RFC 2119, 1997 年 3 月。
-- Mihomo (Clash.Meta) 规则文档 —— `wind_core::rule` 所镜像的规则类型词汇。
-- sing-box 路由规则文档 —— `MetaTest` 中环境/身份匹配器的来源。
-- nftables 文档 —— 引擎模型(集合、映射、链、裁决、语句)的来源。
+- `allow` 和 `default` 规范化为出站名 `default`；
+- 所有其它出站字符串会保留到 target-to-verdict 映射阶段。
+
+`hijack` 会被解析并保留在 `AclRule` 上，但当前 `AclEngine` 只会发出警告，不会执行
+它。`Statement::Dnat` 是未来 redirect 支持预期使用的 IR 位置。
+
+## 8. 保序优化
+
+有序链是事实来源。集合和 verdict map 是无序查找结构，因此优化器可以仅在不会改变
+first-match-wins 行为时引入它们。
+
+当前优化器只运行在入口链上。其它链原样保留。
+
+### 8.1. Pass 1：连续同 verdict 分桶
+
+优化器从当前位置寻找最长连续片段，要求片段内每条规则的 `(stmts, verdict)` 完全相
+同。
+
+这样的片段总是可以替换为一条规则，因为片段内任何成员命中都会产生同一个可观察路
+由决策，并且没有无关规则跨过片段边界。
+
+替换规则内部：
+
+- 域名 exact/suffix/keyword 叶子进入一个 `SetData::Domains` 集合；
+- 目标 IP 与源 IP 叶子分别进入不同的 `SetData::Ips` 集合；
+- 目标端口与源端口叶子分别进入不同的 `SetData::Ports` 集合；
+- 不可入集的叶子，包括 `Proto`、`Predicate`、`Always`、复合表达式和已有 `InSet` 节
+  点，会作为备选项原样保留。
+
+替换后的 match 是单个备选项，或者 `Match::Any(alts)`。
+
+### 8.2. Pass 2：端口 verdict map
+
+如果 Pass 1 没有消费当前位置，优化器会寻找最长连续片段，要求片段内都是同一 side
+上的单个 `Port` 叶子。
+
+该片段可以变为 `VerdictMap`，但仅当：
+
+- 每条规则的语句列表为空；
+- 每个键都是闭区间端口范围；
+- 所有范围两两不相交。
+
+如果任意两个范围相交，片段必须保持有序。例如：
+
+```text
+DST-PORT,1000-2000,proxy
+DST-PORT,1500,direct
+```
+
+端口 `1500` 仍必须路由到 `proxy`，因为第一条规则获胜。
+
+### 8.3. 不做其它重排
+
+v1 优化器不做非相邻上提、IP verdict map、域名 verdict map 或跨链优化。这些属于未
+来扩展；若新增，必须遵守同样的 order-invariance 规则。
+
+## 9. 实现范围与扩展
+
+v1 实现有意区分 IR 容量与引擎行为：
+
+- `RULE-SET` 仍是 `wind_core::rule::RuleType::RuleSet` 谓词，因此当前恒为 false。
+- `SUB-RULE` 由 `Predicate` 携带时，仍按旧有 `RuleType::SubRule` 语义求值。
+- GeoIP、ASN 和 GeoSite 规则需要 `MatchContext` 中的查找函数。
+  `AclEngine::route` 当前不会提供这些函数。
+- 源 IP、源端口、入站用户、进程字段和 UID 需要调用者填入 `MatchContext`。
+- `Dnat` 存在于 IR 中，但 Hysteria `hijack` 目前不会由 `AclEngine` 发出或执行。
+- `Drop` 存在于 IR 中，但公开 `RouteAction` 目前会把它报告为拒绝。
+- sing-box 路由规则解析不属于 v1。未来可以为 sing-box 风格的环境匹配器增加强类型
+  IR 叶子。
+
+任何未来扩展必须保持退化嵌入与旧规则引擎等价，并必须保持优化语义保序。
+
+## 10. 安全考虑
+
+- **优化器安全性。** 如果某个转换无法证明顺序不可观察，它必须保留规则顺序。这个
+  fail-closed 规则可以防止优化静默改变路由或解除拦截。
+- **缺失上下文。** 读取缺失 `MatchContext` 字段的规则不会匹配。依赖源地址、进程、
+  入站用户、GeoIP、ASN 或 GeoSite 的部署必须确保相应字段或查找函数已填充。
+- **Guard 行为。** loopback/private guard 在 IR 求值之前运行。若启用 guard，构建时
+  要求提供 resolver，以便在作出 guard 决策前解析域名目标。
+- **重定向行为。** Hysteria `hijack` 会被解析但不会执行。未来启用 `Dnat` 会改变流
+  量目的地，应该显式开启并在日志中可观察。
+- **链循环。** 实现必须限制链递归。当前深度上限是 64。
+- **Reject 关键字。** 字符串 `reject`、`block` 和 `deny` 是保留拒绝目标，按大小写
+  不敏感匹配。
+
+## 11. 参考资料
+
+- **[RFC2119]** Bradner, S., "Key words for use in RFCs to Indicate
+  Requirement Levels", BCP 14, RFC 2119, March 1997.
+- **[RFC8174]** Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC 2119 Key
+  Words", BCP 14, RFC 8174, May 2017.
+- `crates/wind-acl/src/model.rs`、`embed.rs`、`eval.rs`、`optimize.rs`。
+- `crates/wind-core/src/rule.rs`。
+- MetaCubeX/Mihomo 规则语法。
+- Hysteria ACL 语法。
+- nftables 概念：set、map、chain、statement 和 verdict。
