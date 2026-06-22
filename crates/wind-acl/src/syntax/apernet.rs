@@ -16,8 +16,8 @@
 //! * **proto/port** accepts the omitted/`*`/`*/*` (both, any port), bare
 //!   `tcp`/`udp` (that protocol, any port), and `<proto>/<port>` forms where
 //!   `<proto>` is `tcp`/`udp`/`*` and `<port>` is `*`, a single port, or an
-//!   inclusive `lo-hi` range. A resulting start port of `0` is apernet's
-//!   "any port" sentinel and lowers to no port condition.
+//!   inclusive `lo-hi` range. A resulting start port of `0` is apernet's "any
+//!   port" sentinel and lowers to no port condition.
 //! * **hijack** is an IPv4/IPv6 literal (no domain, no port). It is retained on
 //!   the parsed rule but cannot be expressed in the wind IR, so it is dropped
 //!   (with a warning) during lowering — see [`crate::engine`].
@@ -25,8 +25,8 @@
 //! Everything is case-insensitive (outbound name, address, proto/port), and a
 //! `#` truncates the line at the first occurrence.
 //!
-//! Deliberate divergences from upstream (all benign — they only affect malformed
-//! or non-DNS inputs, and this parser is stricter, never looser):
+//! Deliberate divergences from upstream (all benign — they only affect
+//! malformed or non-DNS inputs, and this parser is stricter, never looser):
 //!
 //! * A `*`-bearing address is lowered to `DOMAIN-WILDCARD`, whose compiler also
 //!   treats `?` as a single-character wildcard; upstream's `deepMatchRune`
@@ -49,7 +49,8 @@ use wind_core::rule::{self as wrule, NetworkType};
 #[grammar = "syntax/apernet.pest"]
 struct AclParser;
 
-/// A single parsed apernet ACL rule: `outbound(address[, proto/port[, hijack]])`.
+/// A single parsed apernet ACL rule: `outbound(address[, proto/port[,
+/// hijack]])`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AclRule {
 	/// The outbound name (`direct`, `reject`, `default`, or a custom name).
@@ -416,7 +417,8 @@ fn address_to_rule_types(addr: &AclAddress) -> Vec<wrule::RuleType> {
 		AclAddress::GeoSite { name, attrs } => {
 			if !attrs.is_empty() {
 				tracing::warn!(
-					"apernet geosite attribute(s) {attrs:?} on {name:?} are not representable in the wind IR; matching the base category only"
+					"apernet geosite attribute(s) {attrs:?} on {name:?} are not representable in the wind IR; matching the \
+					 base category only"
 				);
 			}
 			vec![wrule::RuleType::GeoSite(name.clone())]
@@ -467,7 +469,8 @@ fn proto_port_to_conditions(pp: &Option<AclProtoPort>) -> Vec<wrule::RuleType> {
 	}
 }
 
-/// Build an `AND` rule type over two leaf rule types (sub-rules carry no target).
+/// Build an `AND` rule type over two leaf rule types (sub-rules carry no
+/// target).
 fn and2(a: wrule::RuleType, b: wrule::RuleType) -> wrule::RuleType {
 	wrule::RuleType::And(vec![
 		wrule::Rule {
@@ -1002,7 +1005,8 @@ mod tests {
 
 	#[test]
 	fn lower_addr_and_port_is_nested_and() {
-		// default(8.8.4.4, udp/53, ...) -> AND(IpCidr/32, AND(Network(udp), DstPort(53))).
+		// default(8.8.4.4, udp/53, ...) -> AND(IpCidr/32, AND(Network(udp),
+		// DstPort(53))).
 		let rules = lowered("default(8.8.4.4, udp/53, 1.1.1.1)");
 		assert_eq!(rules.len(), 1);
 		let hit = MatchContext {

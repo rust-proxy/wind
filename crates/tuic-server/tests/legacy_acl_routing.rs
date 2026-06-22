@@ -2,7 +2,8 @@
 //!
 //! These mirror tuic-server's real path: parse the space-separated legacy ACL,
 //! lower it to `wind_core::rule::Rule`s via [`acl_to_rules`], and route through
-//! a [`wind_core::AclRouter`] — the same wiring `wind_adapter::TuicRouter` uses.
+//! a [`wind_core::AclRouter`] — the same wiring `wind_adapter::TuicRouter`
+//! uses.
 
 use std::net::Ipv4Addr;
 

@@ -2,10 +2,10 @@
 //!
 //! A tuic-server–specific rule dialect. This is **not** Hysteria's ACL: real
 //! Hysteria 2 uses a function-call form (`outbound(address, proto/port,
-//! hijack)`), whereas this dialect is space-separated. Parses lines of the shape
-//! `<outbound> [address] [ports] [hijack]`, e.g. `proxy 10.6.0.0/16 tcp/443` —
-//! into [`AclRule`]s and compiles them to `wind_core::rule::Rule`s via
-//! [`acl_to_rules`].
+//! hijack)`), whereas this dialect is space-separated. Parses lines of the
+//! shape `<outbound> [address] [ports] [hijack]`, e.g. `proxy 10.6.0.0/16
+//! tcp/443` — into [`AclRule`]s and compiles them to `wind_core::rule::Rule`s
+//! via [`acl_to_rules`].
 
 #[cfg(test)]
 use std::net::{IpAddr, SocketAddr};

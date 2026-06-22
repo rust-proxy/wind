@@ -56,8 +56,8 @@ impl GuardConfig {
 /// can be handed directly to [`wind_core::Dispatcher::new`] or
 /// [`wind_core::App::set_router`].
 pub struct AclEngine {
-	/// Compiled IR. apernet-converted rules precede Clash rules in source order,
-	/// so first-match-wins gives them precedence.
+	/// Compiled IR. apernet-converted rules precede Clash rules in source
+	/// order, so first-match-wins gives them precedence.
 	ruleset: Ruleset,
 	guards: GuardConfig,
 	/// Required whenever `guards.enabled()`. Validated at build time.
@@ -167,8 +167,8 @@ impl AclEngineBuilder {
 		self
 	}
 
-	/// Parse and add real Hysteria 2 (apernet) ACL rules from a multiline string
-	/// (`reject(geoip:cn)` per line; `#` comments and blanks skipped).
+	/// Parse and add real Hysteria 2 (apernet) ACL rules from a multiline
+	/// string (`reject(geoip:cn)` per line; `#` comments and blanks skipped).
 	pub fn apernet_acl_str(self, input: &str) -> eyre::Result<Self> {
 		let rules = apernet::parse_multiline(input)?;
 		Ok(self.apernet_acl(&rules))

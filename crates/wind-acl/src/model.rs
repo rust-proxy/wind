@@ -82,7 +82,8 @@ pub enum Statement {
 	Counter,
 	Log(String),
 	Mark(u32),
-	/// Destination rewrite (legacy ACL `hijack`). Target kept as a string for v1.
+	/// Destination rewrite (legacy ACL `hijack`). Target kept as a string for
+	/// v1.
 	Dnat(String),
 }
 
