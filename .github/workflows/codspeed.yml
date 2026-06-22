@@ -13,25 +13,61 @@ permissions:
   contents: read
   id-token: write # for OpenID Connect authentication with CodSpeed
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   codspeed:
-    name: Run benchmarks
+    name: Run benchmarks (${{ matrix.instrument }})
     runs-on: ubuntu-latest
+    strategy:
+      # Report both instruments even if one runner has an issue.
+      fail-fast: false
+      matrix:
+        # cpu: instruction counts via Valgrind simulation.
+        # memory: heap-allocation metrics via the memory instrument.
+        instrument: [cpu, memory]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup rust toolchain, cache and cargo-codspeed binary
-        uses: moonrepo/setup-rust@v0
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          channel: stable
-          cache-target: release
-          bins: cargo-codspeed
+          toolchain: stable
+
+      - name: Setup Rust cache
+        uses: Itsusinn/rust-cache@master
+
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
 
       - name: Build the benchmark target(s)
-        run: cargo codspeed build -p wind-test
+        run: cargo codspeed build --workspace
 
-      - name: Run the benchmarks
+      # Pre-fetch wind-geodata's benchmark fixtures with curl so the bench's own
+      # TLS download doesn't run under CodSpeed's Valgrind instrumentation (rustls
+      # crypto can misbehave under Valgrind). The bench skips downloading when the
+      # files already exist.
+      - name: Fetch wind-geodata benchmark fixtures
+        run: |
+          mkdir -p crates/wind-geodata/testdata
+          base="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest"
+          curl -fsSL -o crates/wind-geodata/testdata/geoip.dat "$base/geoip.dat"
+          curl -fsSL -o crates/wind-geodata/testdata/geosite.dat "$base/geosite.dat"
+
+      - name: Run the benchmarks (CPU)
+        if: matrix.instrument == 'cpu'
         uses: CodSpeedHQ/action@v4
         with:
           mode: simulation
-          run: cargo codspeed run -p wind-test
+          run: cargo codspeed run --workspace
+
+      - name: Run the benchmarks (memory)
+        if: matrix.instrument == 'memory'
+        uses: CodSpeedHQ/action@v4
+        with:
+          runner: memory
+          run: cargo codspeed run --workspace

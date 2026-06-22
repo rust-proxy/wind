@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use geosite_rs::{GeoIpList, GeoSiteList, decode_geoip, decode_geosite};
 
 use crate::snapshot::*;
@@ -26,7 +28,7 @@ fn build_geosite(list: &GeoSiteList) -> GeoSiteIndex {
 		for domain in &site.domain {
 			let value = domain.value.to_ascii_lowercase();
 			match domain.r#type {
-				0 => keyword.push(value), // Plain → keyword match
+				0 => keyword.push(value), // Plain → keyword (substring) match
 				1 => {}                   // Regex → skip (not in flat arrays)
 				2 => suffix.push(value),  // Domain → suffix match
 				3 => exact.push(value),   // Full → exact match
@@ -53,7 +55,8 @@ fn build_geosite(list: &GeoSiteList) -> GeoSiteIndex {
 		keyword_domains.extend(keyword);
 
 		categories.push(CategoryInfo {
-			name: site.country_code.clone(),
+			// Stored uppercase so lookups can be case-insensitive (geosite.dat tags are uppercase).
+			name: site.country_code.to_ascii_uppercase(),
 			exact_start,
 			exact_len,
 			suffix_start,
@@ -75,55 +78,118 @@ fn build_geosite(list: &GeoSiteList) -> GeoSiteIndex {
 }
 
 fn build_geoip(list: &GeoIpList) -> GeoIpIndex {
-	let mut v4_entries: Vec<CidrV4> = Vec::new();
-	let mut v6_entries: Vec<CidrV6> = Vec::new();
+	// Accumulate ranges per country (uppercased). A BTreeMap keeps names sorted and
+	// merges duplicate country entries deterministically.
+	let mut v4_by_country: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+	let mut v6_by_country: BTreeMap<String, Vec<(u128, u128)>> = BTreeMap::new();
 
 	for geoip in &list.entry {
+		let name = geoip.country_code.to_ascii_uppercase();
+		// Ensure the country shows up even if it only has one address family.
+		v4_by_country.entry(name.clone()).or_default();
+		v6_by_country.entry(name.clone()).or_default();
+
 		for cidr in &geoip.cidr {
 			match cidr.ip.len() {
 				4 => {
-					let addr = u32::from_be_bytes([cidr.ip[0], cidr.ip[1], cidr.ip[2], cidr.ip[3]]);
-					v4_entries.push(CidrV4 {
-						addr,
-						prefix: cidr.prefix as u8,
-						country: geoip.country_code.clone(),
-					});
+					let addr = u32::from_be_bytes(cidr.ip[..4].try_into().unwrap());
+					let prefix = cidr.prefix.min(32) as u8;
+					v4_by_country.get_mut(&name).unwrap().push(v4_range(addr, prefix));
 				}
 				16 => {
-					let addr = u128::from_be_bytes([
-						cidr.ip[0],
-						cidr.ip[1],
-						cidr.ip[2],
-						cidr.ip[3],
-						cidr.ip[4],
-						cidr.ip[5],
-						cidr.ip[6],
-						cidr.ip[7],
-						cidr.ip[8],
-						cidr.ip[9],
-						cidr.ip[10],
-						cidr.ip[11],
-						cidr.ip[12],
-						cidr.ip[13],
-						cidr.ip[14],
-						cidr.ip[15],
-					]);
-					v6_entries.push(CidrV6 {
-						addr,
-						prefix: cidr.prefix as u8,
-						country: geoip.country_code.clone(),
-					});
+					let addr = u128::from_be_bytes(cidr.ip[..16].try_into().unwrap());
+					let prefix = cidr.prefix.min(128) as u8;
+					v6_by_country.get_mut(&name).unwrap().push(v6_range(addr, prefix));
 				}
 				_ => {}
 			}
 		}
 	}
 
-	v4_entries.sort_by(|a, b| a.addr.cmp(&b.addr).then_with(|| b.prefix.cmp(&a.prefix)));
-	v4_entries.dedup_by(|a, b| a.addr == b.addr && a.prefix == b.prefix);
+	let mut countries: Vec<CountryInfo> = Vec::with_capacity(v4_by_country.len());
+	let mut v4_ranges: Vec<RangeV4> = Vec::new();
+	let mut v6_ranges: Vec<RangeV6> = Vec::new();
 
-	v6_entries.sort_by(|a, b| a.addr.cmp(&b.addr).then_with(|| b.prefix.cmp(&a.prefix)));
-	v6_entries.dedup_by(|a, b| a.addr == b.addr && a.prefix == b.prefix);
+	// BTreeMap iteration is sorted by key, so `countries` ends up sorted by name.
+	for (name, v4) in v4_by_country {
+		let v6 = v6_by_country.remove(&name).unwrap_or_default();
+		let v4 = merge_ranges_v4(v4);
+		let v6 = merge_ranges_v6(v6);
 
-	GeoIpIndex { v4_entries, v6_entries }
+		let v4_start = v4_ranges.len() as u32;
+		let v4_len = v4.len() as u32;
+		let v6_start = v6_ranges.len() as u32;
+		let v6_len = v6.len() as u32;
+
+		v4_ranges.extend(v4.into_iter().map(|(start, end)| RangeV4 { start, end }));
+		v6_ranges.extend(v6.into_iter().map(|(start, end)| RangeV6 { start, end }));
+
+		countries.push(CountryInfo {
+			name,
+			v4_start,
+			v4_len,
+			v6_start,
+			v6_len,
+		});
+	}
+
+	GeoIpIndex {
+		countries,
+		v4_ranges,
+		v6_ranges,
+	}
+}
+
+/// Inclusive `[start, end]` range covered by an IPv4 CIDR.
+fn v4_range(addr: u32, prefix: u8) -> (u32, u32) {
+	if prefix == 0 {
+		return (0, u32::MAX);
+	}
+	let mask = u32::MAX << (32 - prefix as u32);
+	let start = addr & mask;
+	(start, start | !mask)
+}
+
+/// Inclusive `[start, end]` range covered by an IPv6 CIDR.
+fn v6_range(addr: u128, prefix: u8) -> (u128, u128) {
+	if prefix == 0 {
+		return (0, u128::MAX);
+	}
+	let mask = u128::MAX << (128 - prefix as u32);
+	let start = addr & mask;
+	(start, start | !mask)
+}
+
+/// Sort and merge overlapping/adjacent ranges so the result is disjoint.
+fn merge_ranges_v4(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+	ranges.sort_unstable();
+	let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+	for (start, end) in ranges {
+		match merged.last_mut() {
+			Some(last) if start <= last.1.saturating_add(1) => {
+				if end > last.1 {
+					last.1 = end;
+				}
+			}
+			_ => merged.push((start, end)),
+		}
+	}
+	merged
+}
+
+/// Sort and merge overlapping/adjacent ranges so the result is disjoint.
+fn merge_ranges_v6(mut ranges: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
+	ranges.sort_unstable();
+	let mut merged: Vec<(u128, u128)> = Vec::with_capacity(ranges.len());
+	for (start, end) in ranges {
+		match merged.last_mut() {
+			Some(last) if start <= last.1.saturating_add(1) => {
+				if end > last.1 {
+					last.1 = end;
+				}
+			}
+			_ => merged.push((start, end)),
+		}
+	}
+	merged
 }

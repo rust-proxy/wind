@@ -6100,16 +6100,13 @@ dependencies = [
 name = "wind-geodata"
 version = "0.1.1"
 dependencies = [
- "criterion",
- "eyre",
+ "codspeed-criterion-compat",
  "geosite-rs",
  "memmap2",
  "rkyv",
  "tempfile",
  "thiserror 2.0.18",
- "tracing",
  "ureq",
- "wind-core",
 ]
 
 [[package]]

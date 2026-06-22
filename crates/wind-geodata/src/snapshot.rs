@@ -8,6 +8,7 @@ pub struct GeoDataSnapshot {
 
 #[derive(Archive, Serialize, Deserialize)]
 pub struct GeoSiteIndex {
+	/// Sorted by `name` (uppercase) for binary search.
 	pub categories: Vec<CategoryInfo>,
 	pub exact_domains: Vec<String>,
 	pub suffix_domains: Vec<String>,
@@ -16,6 +17,7 @@ pub struct GeoSiteIndex {
 
 #[derive(Archive, Serialize, Deserialize)]
 pub struct CategoryInfo {
+	/// Category tag, stored uppercase (matching geosite.dat convention).
 	pub name: String,
 	pub exact_start: u32,
 	pub exact_len: u32,
@@ -27,20 +29,34 @@ pub struct CategoryInfo {
 
 #[derive(Archive, Serialize, Deserialize)]
 pub struct GeoIpIndex {
-	pub v4_entries: Vec<CidrV4>,
-	pub v6_entries: Vec<CidrV6>,
+	/// Sorted by `name` (uppercase) for binary search.
+	pub countries: Vec<CountryInfo>,
+	/// Per-country ranges, grouped contiguously, sorted by `start` within each
+	/// group and merged so they are disjoint and non-overlapping.
+	pub v4_ranges: Vec<RangeV4>,
+	pub v6_ranges: Vec<RangeV6>,
 }
 
 #[derive(Archive, Serialize, Deserialize)]
-pub struct CidrV4 {
-	pub addr: u32,
-	pub prefix: u8,
-	pub country: String,
+pub struct CountryInfo {
+	/// Country/category code, stored uppercase (matching geoip.dat convention).
+	pub name: String,
+	pub v4_start: u32,
+	pub v4_len: u32,
+	pub v6_start: u32,
+	pub v6_len: u32,
 }
 
+/// Inclusive `[start, end]` IPv4 range.
 #[derive(Archive, Serialize, Deserialize)]
-pub struct CidrV6 {
-	pub addr: u128,
-	pub prefix: u8,
-	pub country: String,
+pub struct RangeV4 {
+	pub start: u32,
+	pub end: u32,
+}
+
+/// Inclusive `[start, end]` IPv6 range.
+#[derive(Archive, Serialize, Deserialize)]
+pub struct RangeV6 {
+	pub start: u128,
+	pub end: u128,
 }
