@@ -32,7 +32,12 @@ fn ensure_testdata() {
 }
 
 fn download(url: &str, dest: &Path) {
-	let resp = ureq::get(url).call().expect("download failed");
+	// Honor HTTP_PROXY / HTTPS_PROXY / ALL_PROXY (and NO_PROXY) from the environment.
+	let agent: ureq::Agent = ureq::Agent::config_builder()
+		.proxy(ureq::Proxy::try_from_env())
+		.build()
+		.into();
+	let resp = agent.get(url).call().expect("download failed");
 	let mut body = Vec::new();
 	resp.into_body().as_reader().read_to_end(&mut body).expect("read failed");
 	std::fs::write(dest, &body).expect("write failed");
