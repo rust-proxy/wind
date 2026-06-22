@@ -88,6 +88,10 @@ fn bench_geosite_exact(c: &mut Criterion) {
 	let geo = load_geo();
 	let lookup = geo.geosite_lookup();
 
+	// Guard against silently benchmarking a miss when the data doesn't contain the expected entry.
+	assert!(lookup("cn", "www.baidu.com"), "expected geosite exact hit");
+	assert!(!lookup("cn", "this-domain-does-not-exist.xyz"), "expected geosite exact miss");
+
 	c.bench_function("geosite/exact/hit", |b| {
 		b.iter(|| lookup(black_box("cn"), black_box("www.baidu.com")))
 	});
@@ -101,6 +105,8 @@ fn bench_geosite_suffix(c: &mut Criterion) {
 	let geo = load_geo();
 	let lookup = geo.geosite_lookup();
 
+	assert!(lookup("google", "mail.google.com"), "expected geosite suffix hit");
+
 	c.bench_function("geosite/suffix/hit", |b| {
 		b.iter(|| lookup(black_box("google"), black_box("mail.google.com")))
 	});
@@ -111,8 +117,12 @@ fn bench_geosite_keyword(c: &mut Criterion) {
 	let geo = load_geo();
 	let lookup = geo.geosite_lookup();
 
+	// "onedrive" is a Plain/keyword entry in the ONEDRIVE category; the domain matches
+	// only as a substring (no exact/suffix entry), so this exercises the keyword path.
+	assert!(lookup("onedrive", "myonedrivelogin.invalid"), "expected geosite keyword hit");
+
 	c.bench_function("geosite/keyword/hit", |b| {
-		b.iter(|| lookup(black_box("category-ads-all"), black_box("ads.example.com")))
+		b.iter(|| lookup(black_box("onedrive"), black_box("myonedrivelogin.invalid")))
 	});
 }
 
@@ -123,6 +133,9 @@ fn bench_geoip_v4(c: &mut Criterion) {
 	let _ip_cn: IpAddr = "223.5.5.5".parse().unwrap();
 	let ip_us: IpAddr = "8.8.8.8".parse().unwrap();
 
+	assert!(lookup("US", ip_us), "expected geoip v4 hit");
+	assert!(!lookup("XX", ip_us), "expected geoip v4 miss");
+
 	c.bench_function("geoip/v4/hit", |b| b.iter(|| lookup(black_box("US"), black_box(ip_us))));
 	c.bench_function("geoip/v4/miss", |b| b.iter(|| lookup(black_box("XX"), black_box(ip_us))));
 }
@@ -132,6 +145,8 @@ fn bench_geoip_v6(c: &mut Criterion) {
 	let geo = load_geo();
 	let lookup = geo.geoip_lookup();
 	let ip: IpAddr = "2001:4860:4860::8888".parse().unwrap();
+
+	assert!(lookup("US", ip), "expected geoip v6 hit");
 
 	c.bench_function("geoip/v6/hit", |b| b.iter(|| lookup(black_box("US"), black_box(ip))));
 }
