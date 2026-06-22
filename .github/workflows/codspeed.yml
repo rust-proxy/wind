@@ -19,8 +19,15 @@ concurrency:
 
 jobs:
   codspeed:
-    name: Run benchmarks
+    name: Run benchmarks (${{ matrix.instrument }})
     runs-on: ubuntu-latest
+    strategy:
+      # Report both instruments even if one runner has an issue.
+      fail-fast: false
+      matrix:
+        # cpu: instruction counts via Valgrind simulation.
+        # memory: heap-allocation metrics via the memory instrument.
+        instrument: [cpu, memory]
     steps:
       - uses: actions/checkout@v4
 
@@ -51,8 +58,16 @@ jobs:
           curl -fsSL -o crates/wind-geodata/testdata/geoip.dat "$base/geoip.dat"
           curl -fsSL -o crates/wind-geodata/testdata/geosite.dat "$base/geosite.dat"
 
-      - name: Run the benchmarks
+      - name: Run the benchmarks (CPU)
+        if: matrix.instrument == 'cpu'
         uses: CodSpeedHQ/action@v4
         with:
           mode: simulation
+          run: cargo codspeed run --workspace
+
+      - name: Run the benchmarks (memory)
+        if: matrix.instrument == 'memory'
+        uses: CodSpeedHQ/action@v4
+        with:
+          runner: memory
           run: cargo codspeed run --workspace
