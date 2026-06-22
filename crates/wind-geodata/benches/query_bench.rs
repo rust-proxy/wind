@@ -32,7 +32,8 @@ fn ensure_testdata() {
 }
 
 fn download(url: &str, dest: &Path) {
-	// Honor HTTP_PROXY / HTTPS_PROXY / ALL_PROXY (and NO_PROXY) from the environment.
+	// Honor HTTP_PROXY / HTTPS_PROXY / ALL_PROXY (and NO_PROXY) from the
+	// environment.
 	let agent: ureq::Agent = ureq::Agent::config_builder()
 		.proxy(ureq::Proxy::try_from_env())
 		.build()
@@ -88,7 +89,8 @@ fn bench_geosite_exact(c: &mut Criterion) {
 	let geo = load_geo();
 	let lookup = geo.geosite_lookup();
 
-	// Guard against silently benchmarking a miss when the data doesn't contain the expected entry.
+	// Guard against silently benchmarking a miss when the data doesn't contain the
+	// expected entry.
 	assert!(lookup("cn", "www.baidu.com"), "expected geosite exact hit");
 	assert!(!lookup("cn", "this-domain-does-not-exist.xyz"), "expected geosite exact miss");
 
@@ -117,8 +119,9 @@ fn bench_geosite_keyword(c: &mut Criterion) {
 	let geo = load_geo();
 	let lookup = geo.geosite_lookup();
 
-	// "onedrive" is a Plain/keyword entry in the ONEDRIVE category; the domain matches
-	// only as a substring (no exact/suffix entry), so this exercises the keyword path.
+	// "onedrive" is a Plain/keyword entry in the ONEDRIVE category; the domain
+	// matches only as a substring (no exact/suffix entry), so this exercises the
+	// keyword path.
 	assert!(lookup("onedrive", "myonedrivelogin.invalid"), "expected geosite keyword hit");
 
 	c.bench_function("geosite/keyword/hit", |b| {

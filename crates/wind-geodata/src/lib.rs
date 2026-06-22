@@ -15,8 +15,9 @@ pub use error::GeoDataError;
 const MAGIC: [u8; 8] = *b"WINDGEO\0";
 /// Snapshot schema version. Bump on any change to `snapshot.rs` layout.
 const FORMAT_VERSION: u32 = 1;
-/// Header is 8 (magic) + 4 (version) + 4 (reserved) = 16 bytes. The 16-byte size
-/// keeps the rkyv payload aligned to 16 relative to the (page-aligned) mmap base.
+/// Header is 8 (magic) + 4 (version) + 4 (reserved) = 16 bytes. The 16-byte
+/// size keeps the rkyv payload aligned to 16 relative to the (page-aligned)
+/// mmap base.
 const HEADER_LEN: usize = 16;
 
 pub struct GeoData {
@@ -49,8 +50,9 @@ impl GeoData {
 		Ok(Self { mmap })
 	}
 
-	/// Validate the header and fully type-check the rkyv archive. Run once at open
-	/// time so `snapshot()` can use the cheap unchecked accessor afterwards.
+	/// Validate the header and fully type-check the rkyv archive. Run once at
+	/// open time so `snapshot()` can use the cheap unchecked accessor
+	/// afterwards.
 	fn validate(bytes: &[u8]) -> Result<(), GeoDataError> {
 		if bytes.len() < HEADER_LEN {
 			return Err(GeoDataError::Truncated);

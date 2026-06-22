@@ -80,8 +80,9 @@ fn suffix_match(v: &ArchivedVec<Archived<String>>, start: usize, len: usize, dom
 	if binary_search_str_suffix(v, start, len, domain) {
 		return true;
 	}
-	// Each label boundary yields a parent candidate ("mail.google.com" → "google.com" → "com").
-	// '.' is ASCII, so `i + 1` is always a valid UTF-8 boundary.
+	// Each label boundary yields a parent candidate ("mail.google.com" →
+	// "google.com" → "com"). '.' is ASCII, so `i + 1` is always a valid UTF-8
+	// boundary.
 	for (i, &b) in domain.as_bytes().iter().enumerate() {
 		if b == b'.' && binary_search_str_suffix(v, start, len, &domain[i + 1..]) {
 			return true;
@@ -155,8 +156,8 @@ fn binary_search_country(cs: &ArchivedVec<ArchivedCountryInfo>, name: &str) -> O
 	None
 }
 
-/// `ranges[start..start + len]` is disjoint and sorted by `start`, so at most one
-/// range can contain `addr`: the last one whose `start <= addr`.
+/// `ranges[start..start + len]` is disjoint and sorted by `start`, so at most
+/// one range can contain `addr`: the last one whose `start <= addr`.
 fn range_contains_v4(ranges: &ArchivedVec<ArchivedRangeV4>, start: usize, len: usize, addr: u32) -> bool {
 	if len == 0 {
 		return false;
