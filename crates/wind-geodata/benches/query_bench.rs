@@ -18,14 +18,14 @@ fn ensure_testdata() {
 	if !geoip.exists() {
 		eprintln!("downloading geoip.dat …");
 		download(
-			"https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/202406202209/geoip.dat",
+			"https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat",
 			&geoip,
 		);
 	}
 	if !geosite.exists() {
 		eprintln!("downloading geosite.dat …");
 		download(
-			"https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/202406202209/geosite.dat",
+			"https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat",
 			&geosite,
 		);
 	}

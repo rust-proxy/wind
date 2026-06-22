@@ -7,15 +7,11 @@ description = "GeoSite/GeoIP data loader with rkyv zero-copy mmap support"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-wind-core = { path = "../wind-core" }
-
 geosite-rs = "0.1.6"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 memmap2 = "0.9"
 
-eyre = "0.6"
 thiserror = "2"
-tracing = "0.1"
 
 [dev-dependencies]
 criterion = "0.4"

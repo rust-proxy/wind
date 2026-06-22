@@ -1,30 +1,34 @@
+use std::cmp::Ordering;
+
 use rkyv::{Archived, vec::ArchivedVec};
 
 use crate::snapshot::*;
 
 impl ArchivedGeoSiteIndex {
 	pub fn contains(&self, category: &str, domain: &str) -> bool {
-		let idx = binary_search_cat(&self.categories, category);
-		let Some(idx) = idx else {
+		let Some(idx) = binary_search_cat(&self.categories, category) else {
 			return false;
 		};
 		let cat = &self.categories[idx];
 
+		// Domains are stored lowercase; normalise the query once and reuse it.
+		let domain = domain.to_ascii_lowercase();
+
 		let exact_start = cat.exact_start.to_native() as usize;
 		let exact_len = cat.exact_len.to_native() as usize;
-		if binary_search_str(&self.exact_domains, exact_start, exact_len, domain).is_some() {
+		if binary_search_str(&self.exact_domains, exact_start, exact_len, &domain).is_some() {
 			return true;
 		}
 
 		let suffix_start = cat.suffix_start.to_native() as usize;
 		let suffix_len = cat.suffix_len.to_native() as usize;
-		if suffix_match(&self.suffix_domains, suffix_start, suffix_len, domain) {
+		if suffix_match(&self.suffix_domains, suffix_start, suffix_len, &domain) {
 			return true;
 		}
 
 		let keyword_start = cat.keyword_start.to_native() as usize;
 		let keyword_len = cat.keyword_len.to_native() as usize;
-		if keyword_match(&self.keyword_domains, keyword_start, keyword_len, domain) {
+		if keyword_match(&self.keyword_domains, keyword_start, keyword_len, &domain) {
 			return true;
 		}
 
@@ -32,19 +36,17 @@ impl ArchivedGeoSiteIndex {
 	}
 }
 
+/// Case-insensitive binary search over the uppercase-stored category names.
 fn binary_search_cat(cats: &ArchivedVec<ArchivedCategoryInfo>, name: &str) -> Option<usize> {
-	let len = cats.len();
-	if len == 0 {
-		return None;
-	}
+	let upper = name.to_ascii_uppercase();
 	let mut lo = 0usize;
-	let mut hi = len;
+	let mut hi = cats.len();
 	while lo < hi {
 		let mid = lo + (hi - lo) / 2;
-		match cats[mid].name.as_str().cmp(name) {
-			std::cmp::Ordering::Less => lo = mid + 1,
-			std::cmp::Ordering::Greater => hi = mid,
-			std::cmp::Ordering::Equal => return Some(mid),
+		match cats[mid].name.as_str().cmp(upper.as_str()) {
+			Ordering::Less => lo = mid + 1,
+			Ordering::Greater => hi = mid,
+			Ordering::Equal => return Some(mid),
 		}
 	}
 	None
@@ -59,44 +61,31 @@ fn binary_search_str(v: &ArchivedVec<Archived<String>>, start: usize, len: usize
 	while lo < hi {
 		let mid = lo + (hi - lo) / 2;
 		match v[mid].as_str().cmp(needle) {
-			std::cmp::Ordering::Less => lo = mid + 1,
-			std::cmp::Ordering::Greater => hi = mid,
-			std::cmp::Ordering::Equal => return Some(mid),
+			Ordering::Less => lo = mid + 1,
+			Ordering::Greater => hi = mid,
+			Ordering::Equal => return Some(mid),
 		}
 	}
 	None
 }
 
+/// Matches `domain` against a v2ray "Domain" (suffix) list: the domain itself,
+/// or any parent reached by stripping leading labels. `domain` must already be
+/// lowercase.
 fn suffix_match(v: &ArchivedVec<Archived<String>>, start: usize, len: usize, domain: &str) -> bool {
 	if len == 0 {
 		return false;
 	}
-	let lower = domain.to_ascii_lowercase();
-	let bytes = lower.as_bytes();
-	let mut pos = 0usize;
-	loop {
-		let candidate = if pos == 0 {
-			&bytes[pos..]
-		} else if bytes[pos] == b'.' {
-			&bytes[pos + 1..]
-		} else {
-			pos += 1;
-			continue;
-		};
-
-		let cand_str = match std::str::from_utf8(candidate) {
-			Ok(s) => s,
-			Err(_) => break,
-		};
-
-		if binary_search_str_suffix(v, start, len, cand_str) {
+	// The full domain is a candidate ("google.com" matches the entry "google.com").
+	if binary_search_str_suffix(v, start, len, domain) {
+		return true;
+	}
+	// Each label boundary yields a parent candidate ("mail.google.com" → "google.com" → "com").
+	// '.' is ASCII, so `i + 1` is always a valid UTF-8 boundary.
+	for (i, &b) in domain.as_bytes().iter().enumerate() {
+		if b == b'.' && binary_search_str_suffix(v, start, len, &domain[i + 1..]) {
 			return true;
 		}
-
-		if pos + 1 >= bytes.len() {
-			break;
-		}
-		pos += 1;
 	}
 	false
 }
@@ -110,110 +99,103 @@ fn binary_search_str_suffix(v: &ArchivedVec<Archived<String>>, start: usize, len
 	while lo < hi {
 		let mid = lo + (hi - lo) / 2;
 		match v[mid].as_str().cmp(needle) {
-			std::cmp::Ordering::Less => lo = mid + 1,
-			std::cmp::Ordering::Greater => hi = mid,
-			std::cmp::Ordering::Equal => return true,
+			Ordering::Less => lo = mid + 1,
+			Ordering::Greater => hi = mid,
+			Ordering::Equal => return true,
 		}
 	}
 	false
 }
 
+/// Matches `domain` (already lowercase) against a v2ray "Plain" keyword list.
 fn keyword_match(v: &ArchivedVec<Archived<String>>, start: usize, len: usize, domain: &str) -> bool {
 	if len == 0 {
 		return false;
 	}
-	let lower = domain.to_ascii_lowercase();
 	let end = start + len;
-	(start..end).any(|i| lower.contains(v[i].as_str()))
+	(start..end).any(|i| domain.contains(v[i].as_str()))
 }
 
 impl ArchivedGeoIpIndex {
 	pub fn contains(&self, country: &str, ip: std::net::IpAddr) -> bool {
+		let Some(idx) = binary_search_country(&self.countries, country) else {
+			return false;
+		};
+		let c = &self.countries[idx];
 		match ip {
 			std::net::IpAddr::V4(v4) => {
 				let addr = u32::from(v4);
-				let pos = partition_point_v4(&self.v4_entries, addr);
-				scan_backward_v4(&self.v4_entries, pos, addr, country)
+				let start = c.v4_start.to_native() as usize;
+				let len = c.v4_len.to_native() as usize;
+				range_contains_v4(&self.v4_ranges, start, len, addr)
 			}
 			std::net::IpAddr::V6(v6) => {
 				let addr = u128::from(v6);
-				let pos = partition_point_v6(&self.v6_entries, addr);
-				scan_backward_v6(&self.v6_entries, pos, addr, country)
+				let start = c.v6_start.to_native() as usize;
+				let len = c.v6_len.to_native() as usize;
+				range_contains_v6(&self.v6_ranges, start, len, addr)
 			}
 		}
 	}
 }
 
-fn partition_point_v4(entries: &ArchivedVec<ArchivedCidrV4>, target: u32) -> usize {
-	let len = entries.len();
-	let mut lo: usize = 0;
-	let mut hi: usize = len;
+/// Case-insensitive binary search over the uppercase-stored country names.
+fn binary_search_country(cs: &ArchivedVec<ArchivedCountryInfo>, name: &str) -> Option<usize> {
+	let upper = name.to_ascii_uppercase();
+	let mut lo = 0usize;
+	let mut hi = cs.len();
 	while lo < hi {
 		let mid = lo + (hi - lo) / 2;
-		if entries[mid].addr.to_native() <= target {
+		match cs[mid].name.as_str().cmp(upper.as_str()) {
+			Ordering::Less => lo = mid + 1,
+			Ordering::Greater => hi = mid,
+			Ordering::Equal => return Some(mid),
+		}
+	}
+	None
+}
+
+/// `ranges[start..start + len]` is disjoint and sorted by `start`, so at most one
+/// range can contain `addr`: the last one whose `start <= addr`.
+fn range_contains_v4(ranges: &ArchivedVec<ArchivedRangeV4>, start: usize, len: usize, addr: u32) -> bool {
+	if len == 0 {
+		return false;
+	}
+	let mut lo = start;
+	let mut hi = start + len;
+	while lo < hi {
+		let mid = lo + (hi - lo) / 2;
+		if ranges[mid].start.to_native() <= addr {
 			lo = mid + 1;
 		} else {
 			hi = mid;
 		}
 	}
-	lo
+	if lo > start {
+		// `ranges[lo - 1].start <= addr` by construction; check the upper bound.
+		addr <= ranges[lo - 1].end.to_native()
+	} else {
+		false
+	}
 }
 
-fn partition_point_v6(entries: &ArchivedVec<ArchivedCidrV6>, target: u128) -> usize {
-	let len = entries.len();
-	let mut lo: usize = 0;
-	let mut hi: usize = len;
+fn range_contains_v6(ranges: &ArchivedVec<ArchivedRangeV6>, start: usize, len: usize, addr: u128) -> bool {
+	if len == 0 {
+		return false;
+	}
+	let mut lo = start;
+	let mut hi = start + len;
 	while lo < hi {
 		let mid = lo + (hi - lo) / 2;
-		if entries[mid].addr.to_native() <= target {
+		if ranges[mid].start.to_native() <= addr {
 			lo = mid + 1;
 		} else {
 			hi = mid;
 		}
 	}
-	lo
-}
-
-fn scan_backward_v4(entries: &ArchivedVec<ArchivedCidrV4>, pos: usize, addr: u32, country: &str) -> bool {
-	let mut i = pos;
-	let mut checked = 0u32;
-	while i > 0 && checked < 5 {
-		i -= 1;
-		let entry = &entries[i];
-		if cidr_contains_v4(addr, entry.addr.to_native(), entry.prefix) {
-			return entry.country.as_str().eq_ignore_ascii_case(country);
-		}
-		checked += 1;
+	if lo > start {
+		addr <= ranges[lo - 1].end.to_native()
+	} else {
+		false
 	}
-	false
-}
-
-fn scan_backward_v6(entries: &ArchivedVec<ArchivedCidrV6>, pos: usize, addr: u128, country: &str) -> bool {
-	let mut i = pos;
-	let mut checked = 0u32;
-	while i > 0 && checked < 5 {
-		i -= 1;
-		let entry = &entries[i];
-		if cidr_contains_v6(addr, entry.addr.to_native(), entry.prefix) {
-			return entry.country.as_str().eq_ignore_ascii_case(country);
-		}
-		checked += 1;
-	}
-	false
-}
-
-fn cidr_contains_v4(addr: u32, cidr_addr: u32, prefix: u8) -> bool {
-	if prefix == 0 {
-		return true;
-	}
-	let shift = 32u32.saturating_sub(prefix as u32);
-	(addr ^ cidr_addr).wrapping_shr(shift) == 0
-}
-
-fn cidr_contains_v6(addr: u128, cidr_addr: u128, prefix: u8) -> bool {
-	if prefix == 0 {
-		return true;
-	}
-	let shift = 128u32.saturating_sub(prefix as u32);
-	(addr ^ cidr_addr).wrapping_shr(shift) == 0
 }
