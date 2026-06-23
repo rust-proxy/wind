@@ -107,9 +107,9 @@ pub trait QuicConnection: Clone + Send + Sync + 'static {
 	/// download), `recv` is bytes received from the peer (client→server =
 	/// upload). These are *wire* bytes (including QUIC framing / ACKs /
 	/// retransmits), not relayed payload — used for lightweight per-connection
-	/// traffic accounting. Async to accommodate the quiche backend, where the
-	/// read is routed through the connection's driver task; the quinn backend
-	/// resolves immediately.
+	/// traffic accounting. Async for trait uniformity; both backends resolve
+	/// immediately — quiche reads counters its driver caches in shared atomics,
+	/// quinn reads the connection handle directly.
 	fn byte_stats(&self) -> impl Future<Output = Option<(u64, u64)>> + Send {
 		async { None }
 	}
