@@ -25,9 +25,7 @@ jobs:
       # Report both instruments even if one runner has an issue.
       fail-fast: false
       matrix:
-        # cpu: instruction counts via Valgrind simulation.
-        # memory: heap-allocation metrics via the memory instrument.
-        instrument: [cpu, memory]
+        instrument: [simulation, walltime, memory]
     steps:
       - uses: actions/checkout@v4
 
@@ -44,9 +42,6 @@ jobs:
         with:
           tool: cargo-codspeed
 
-      - name: Build the benchmark target(s)
-        run: cargo codspeed build --workspace
-
       # Pre-fetch wind-geodata's benchmark fixtures with curl so the bench's own
       # TLS download doesn't run under CodSpeed's Valgrind instrumentation (rustls
       # crypto can misbehave under Valgrind). The bench skips downloading when the
@@ -58,16 +53,11 @@ jobs:
           curl -fsSL -o crates/wind-geodata/testdata/geoip.dat "$base/geoip.dat"
           curl -fsSL -o crates/wind-geodata/testdata/geosite.dat "$base/geosite.dat"
 
-      - name: Run the benchmarks (CPU)
-        if: matrix.instrument == 'cpu'
-        uses: CodSpeedHQ/action@v4
-        with:
-          mode: simulation
-          run: cargo codspeed run --workspace
+      - name: Build benchmarks — ${{ matrix.instrument }} mode
+        run: cargo codspeed build --workspace -m ${{ matrix.instrument }}
 
-      - name: Run the benchmarks (memory)
-        if: matrix.instrument == 'memory'
+      - name: Run the benchmarks (${{ matrix.instrument }})
         uses: CodSpeedHQ/action@v4
         with:
-          runner: memory
+          mode: ${{ matrix.instrument }}
           run: cargo codspeed run --workspace

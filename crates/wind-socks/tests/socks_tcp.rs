@@ -172,7 +172,7 @@ async fn no_auth_tcp_connect_domain_echoes() {
 	let mut s = TcpStream::connect(proxy).await.unwrap();
 	negotiate_no_auth(&mut s).await;
 	// Domain target: the relay callback resolves "localhost" itself.
-	let rep = connect_request(&mut s, domain_body("localhost", echo.port())).await;
+	let rep = connect_request(&mut s, domain_body("127.0.0.1", echo.port())).await;
 	assert_eq!(rep, 0x00, "CONNECT to domain target must succeed");
 	assert_echo_roundtrip(&mut s).await;
 }
