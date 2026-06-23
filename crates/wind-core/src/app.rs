@@ -262,8 +262,22 @@ async fn flush_once(sink: &dyn TrafficSink, stats: &StatsCollector) {
 	if batch.is_empty() {
 		return;
 	}
+
+	let user_count = batch.len();
+	let total_upload: u64 = batch.iter().map(|t| t.upload).sum();
+	let total_download: u64 = batch.iter().map(|t| t.download).sum();
+	let total_requests: u64 = batch.iter().map(|t| t.request_count).sum();
+
 	if let Err(e) = sink.submit(batch.clone()).await {
-		warn!("traffic sink submit failed, retaining {} record(s): {e:?}", batch.len());
+		warn!(
+			"traffic sink submit failed for {} user(s) ({}B↑, {}B↓, {} reqs): {e:?}",
+			user_count, total_upload, total_download, total_requests
+		);
 		stats.restore(&batch);
+	} else {
+		info!(
+			"traffic reported: {} user(s), {}B↑, {}B↓, {} reqs",
+			user_count, total_upload, total_download, total_requests
+		);
 	}
 }
