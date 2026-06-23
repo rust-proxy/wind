@@ -12,6 +12,7 @@
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use bytesize::ByteSize;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -262,8 +263,28 @@ async fn flush_once(sink: &dyn TrafficSink, stats: &StatsCollector) {
 	if batch.is_empty() {
 		return;
 	}
+
+	let user_count = batch.len();
+	let total_upload: u64 = batch.iter().map(|t| t.upload).sum();
+	let total_download: u64 = batch.iter().map(|t| t.download).sum();
+	let total_requests: u64 = batch.iter().map(|t| t.request_count).sum();
+
 	if let Err(e) = sink.submit(batch.clone()).await {
-		warn!("traffic sink submit failed, retaining {} record(s): {e:?}", batch.len());
+		warn!(
+			"traffic sink submit failed for {} user(s) ({}↑, {}↓, {} reqs): {e:?}",
+			user_count,
+			ByteSize::b(total_upload).display().si(),
+			ByteSize::b(total_download).display().si(),
+			total_requests
+		);
 		stats.restore(&batch);
+	} else {
+		info!(
+			"traffic reported: {} user(s), {}↑, {}↓, {} reqs",
+			user_count,
+			ByteSize::b(total_upload).display().si(),
+			ByteSize::b(total_download).display().si(),
+			total_requests
+		);
 	}
 }
