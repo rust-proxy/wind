@@ -34,6 +34,7 @@ pin-project-lite = "0.2"
 tracing = "0.1"
 rand = "0.9"
 async-trait = "0.1"
+bytesize = "2"
 
 [dev-dependencies]
 quinn-udp = "0.5"
