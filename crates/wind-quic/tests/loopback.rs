@@ -154,3 +154,99 @@ async fn quiche_loopback() {
 
 	run_case(server_conn, client_conn).await;
 }
+
+/// Regression: per-user traffic accounting samples `byte_stats()` one final
+/// time when the connection closes. That read must still return the final
+/// `(sent, recv)` *after* the connection has closed and its driver worker has
+/// exited. On the quiche backend the read previously round-tripped through the
+/// (now-gone) driver and returned `None`, silently dropping the connection's
+/// last traffic window (and *all* traffic for connections shorter than the
+/// sampler interval). The counts are now cached in shared state and finalized
+/// in `on_conn_close`, so a post-close read works on both backends.
+async fn byte_stats_survives_close<C: QuicConnection>(server: C, client: C) {
+	const PAYLOAD: &[u8] = &[0xABu8; 16 * 1024];
+
+	let server_task = tokio::spawn(async move {
+		let (mut s_send, mut s_recv) = server.accept_bi().await.expect("accept_bi");
+		let mut buf = vec![0u8; PAYLOAD.len()];
+		s_recv.read_exact(&mut buf).await.expect("server read payload");
+		s_send.write_all(&buf).await.expect("server echo payload");
+		s_send.finish().expect("server finish");
+
+		// Sample exactly as the traffic sampler does: only after the peer closes.
+		tokio::time::timeout(Duration::from_secs(2), server.closed())
+			.await
+			.expect("server.closed() should resolve");
+		server.byte_stats().await
+	});
+
+	let (mut c_send, mut c_recv) = client.open_bi().await.expect("open_bi");
+	c_send.write_all(PAYLOAD).await.expect("client write payload");
+	c_send.finish().expect("client finish");
+	let mut echo = vec![0u8; PAYLOAD.len()];
+	c_recv.read_exact(&mut echo).await.expect("client read echo");
+	assert_eq!(echo, PAYLOAD, "echo round-trip");
+
+	client.close(0, b"done");
+	tokio::time::timeout(Duration::from_secs(2), client.closed())
+		.await
+		.expect("client.closed() should resolve");
+
+	let stats = server_task.await.expect("server task");
+	let (sent, recv) = stats.expect("byte_stats must still return Some(..) after the connection closed");
+	// The pre-fix quiche bug surfaced as `None` here; the substantive check is
+	// that the final window is accounted, so both directions must be non-zero and
+	// cover at least the payload the server received and echoed back.
+	assert!(
+		recv as usize >= PAYLOAD.len(),
+		"recv wire bytes should cover the received payload: recv={recv} payload={}",
+		PAYLOAD.len()
+	);
+	assert!(
+		sent as usize >= PAYLOAD.len(),
+		"sent wire bytes should cover the echoed payload: sent={sent} payload={}",
+		PAYLOAD.len()
+	);
+}
+
+#[cfg(feature = "quinn")]
+#[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
+async fn quinn_byte_stats_survives_close() {
+	use wind_quic::quinn;
+
+	let (_dir, cert, key) = write_self_signed();
+	let (server_tls, client_tls, transport) = configs(&cert, &key);
+
+	let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+	let acceptor = quinn::bind_server(addr, &server_tls, &transport).expect("bind_server");
+	let local = acceptor.local_addr().expect("local_addr");
+
+	let server_fut = async move { acceptor.accept().await.expect("incoming").expect("server conn") };
+	let client_fut = quinn::connect(local, &client_tls, &transport);
+	let (server_conn, client_conn) = tokio::join!(server_fut, client_fut);
+	let client_conn = client_conn.expect("client connect");
+
+	byte_stats_survives_close(server_conn, client_conn).await;
+}
+
+#[cfg(feature = "quiche")]
+#[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
+async fn quiche_byte_stats_survives_close() {
+	use wind_quic::quiche;
+
+	let (_dir, cert, key) = write_self_signed();
+	let (server_tls, client_tls, transport) = configs(&cert, &key);
+
+	let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+	let mut acceptor = quiche::bind_server(addr, &server_tls, &transport, None)
+		.await
+		.expect("bind_server");
+	let local = acceptor.local_addr();
+
+	let server_fut = async move { acceptor.accept().await.expect("server conn") };
+	let client_fut = quiche::connect(local, &client_tls, &transport);
+	let (server_conn, client_conn) = tokio::join!(server_fut, client_fut);
+	let client_conn = client_conn.expect("client connect");
+
+	byte_stats_survives_close(server_conn, client_conn).await;
+}

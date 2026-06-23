@@ -165,8 +165,12 @@ impl QuicConnection for QuicheConnection {
 	}
 
 	async fn byte_stats(&self) -> Option<(u64, u64)> {
-		let (tx, rx) = oneshot::channel();
-		self.0.cmd_tx.send(DriverCommand::ByteStats(tx)).ok()?;
-		rx.await.ok().flatten()
+		// Read the counters the driver caches in `shared`; no round-trip, so this
+		// still works during the close path after the driver's worker loop exits.
+		let shared = &self.0.shared;
+		Some((
+			shared.sent_bytes.load(Ordering::Relaxed),
+			shared.recv_bytes.load(Ordering::Relaxed),
+		))
 	}
 }

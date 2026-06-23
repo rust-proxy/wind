@@ -32,7 +32,7 @@ use std::{
 	pin::Pin,
 	sync::{
 		Arc,
-		atomic::{AtomicBool, AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
 };
@@ -86,8 +86,6 @@ pub(crate) enum DriverCommand {
 		context: Vec<u8>,
 		reply: oneshot::Sender<Option<Vec<u8>>>,
 	},
-	/// Read cumulative `(sent, recv)` wire byte counters.
-	ByteStats(oneshot::Sender<Option<(u64, u64)>>),
 	/// Shut down one direction of a stream with an error code.
 	StreamShutdown { sid: u64, write: bool, code: u64 },
 	/// Close the connection.
@@ -102,6 +100,14 @@ pub(crate) struct Shared {
 	pub closed: AtomicBool,
 	/// Notified when `closed` transitions to true.
 	pub closed_notify: Notify,
+	/// Cumulative wire bytes the local endpoint has sent (server→client =
+	/// download). Refreshed each worker pass and finalized in `on_conn_close`,
+	/// so handles can read it without a driver round-trip and the final count
+	/// survives connection close.
+	pub sent_bytes: AtomicU64,
+	/// Cumulative wire bytes received from the peer (client→server = upload).
+	/// See [`sent_bytes`](Self::sent_bytes).
+	pub recv_bytes: AtomicU64,
 }
 
 /// Per-stream bridge state held by the driver.
@@ -194,7 +200,6 @@ pub(crate) struct BridgeDriver {
 	out_datagrams: VecDeque<Bytes>,
 	pending_opens: VecDeque<PendingOpen>,
 	pending_exports: VecDeque<ExportReq>,
-	pending_byte_stats: VecDeque<oneshot::Sender<Option<(u64, u64)>>>,
 	pending_shutdowns: VecDeque<(u64, bool, u64)>,
 	pending_close: Option<(u32, Vec<u8>)>,
 
@@ -215,6 +220,8 @@ impl BridgeDriver {
 			max_dgram: AtomicUsize::new(0),
 			closed: AtomicBool::new(false),
 			closed_notify: Notify::new(),
+			sent_bytes: AtomicU64::new(0),
+			recv_bytes: AtomicU64::new(0),
 		});
 		let handle = Handle::new(
 			cmd_tx.clone(),
@@ -242,7 +249,6 @@ impl BridgeDriver {
 			out_datagrams: VecDeque::new(),
 			pending_opens: VecDeque::new(),
 			pending_exports: VecDeque::new(),
-			pending_byte_stats: VecDeque::new(),
 			pending_shutdowns: VecDeque::new(),
 			pending_close: None,
 			shared,
@@ -452,7 +458,6 @@ impl BridgeDriver {
 				context,
 				reply,
 			} => self.pending_exports.push_back((out_len, label, context, reply)),
-			DriverCommand::ByteStats(reply) => self.pending_byte_stats.push_back(reply),
 			DriverCommand::StreamShutdown { sid, write, code } => self.pending_shutdowns.push_back((sid, write, code)),
 			DriverCommand::Close { code, reason } => self.pending_close = Some((code, reason)),
 		}
@@ -595,10 +600,11 @@ impl ApplicationOverQuic for BridgeDriver {
 			let _ = reply.send(res);
 		}
 
-		while let Some(reply) = self.pending_byte_stats.pop_front() {
-			let stats = qconn.stats();
-			let _ = reply.send(Some((stats.sent_bytes, stats.recv_bytes)));
-		}
+		// Cache cumulative wire byte counters into `shared` so handles read them
+		// without a driver round-trip — and so the final counts survive close.
+		let stats = qconn.stats();
+		self.shared.sent_bytes.store(stats.sent_bytes, Ordering::Relaxed);
+		self.shared.recv_bytes.store(stats.recv_bytes, Ordering::Relaxed);
 
 		while let Some(op) = self.pending_opens.pop_front() {
 			match op {
@@ -642,7 +648,13 @@ impl ApplicationOverQuic for BridgeDriver {
 		Ok(())
 	}
 
-	fn on_conn_close<M: Metrics>(&mut self, _qconn: &mut QuicheConnection, _metrics: &M, _result: &QuicResult<()>) {
+	fn on_conn_close<M: Metrics>(&mut self, qconn: &mut QuicheConnection, _metrics: &M, _result: &QuicResult<()>) {
+		// Capture the final byte counts *before* waking `closed()` waiters: the
+		// traffic sampler's close-path read runs after this worker loop has
+		// exited, so this cached snapshot is its only source for the last window.
+		let stats = qconn.stats();
+		self.shared.sent_bytes.store(stats.sent_bytes, Ordering::Relaxed);
+		self.shared.recv_bytes.store(stats.recv_bytes, Ordering::Relaxed);
 		self.shared.closed.store(true, Ordering::SeqCst);
 		self.shared.closed_notify.notify_waiters();
 	}
