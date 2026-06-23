@@ -11,6 +11,22 @@
 
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
+fn format_bytes(n: u64) -> String {
+	const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB"];
+	let mut size = n as f64;
+	let mut unit_idx = 0;
+	while size >= 1024.0 && unit_idx + 1 < UNITS.len() {
+		size /= 1024.0;
+		unit_idx += 1;
+	}
+	if unit_idx == 0 {
+		return format!("{n}B");
+	}
+	let s = format!("{:.2}", size);
+	let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+	format!("{}{}", trimmed, UNITS[unit_idx])
+}
+
 use async_trait::async_trait;
 use tracing::{error, info, warn};
 
@@ -270,14 +286,20 @@ async fn flush_once(sink: &dyn TrafficSink, stats: &StatsCollector) {
 
 	if let Err(e) = sink.submit(batch.clone()).await {
 		warn!(
-			"traffic sink submit failed for {} user(s) ({}B↑, {}B↓, {} reqs): {e:?}",
-			user_count, total_upload, total_download, total_requests
+			"traffic sink submit failed for {} user(s) ({}↑, {}↓, {} reqs): {e:?}",
+			user_count,
+			format_bytes(total_upload),
+			format_bytes(total_download),
+			total_requests
 		);
 		stats.restore(&batch);
 	} else {
 		info!(
-			"traffic reported: {} user(s), {}B↑, {}B↓, {} reqs",
-			user_count, total_upload, total_download, total_requests
+			"traffic reported: {} user(s), {}↑, {}↓, {} reqs",
+			user_count,
+			format_bytes(total_upload),
+			format_bytes(total_download),
+			total_requests
 		);
 	}
 }
