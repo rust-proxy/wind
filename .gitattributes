@@ -1,3 +1,2 @@
-[*]
-end_of_line = lf
-insert_final_newline = true
+# Auto detect text files and ensure LF line endings
+* text=auto eol=lf
