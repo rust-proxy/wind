@@ -240,7 +240,12 @@ impl AbstractInbound for TuicInbound {
 					let cb = cb.clone();
 					let conn_cancel = self.cancel.child_token();
 					let remote = incoming.remote_address();
-					let span = tracing::info_span!("conn", peer = %remote);
+					let span = tracing::info_span!(
+						"conn",
+						peer = %remote,
+						id = tracing::field::Empty,
+						user = tracing::field::Empty,
+					);
 
 					// Spawn into the shared TaskTracker so the context owner can
 					// drain connection handlers on shutdown (e.g. wind's
@@ -297,7 +302,7 @@ async fn handle_connection<C: InboundCallback>(
 	let conn = if zero_rtt {
 		match connecting.into_0rtt() {
 			Ok((conn, _)) => {
-				info!("Accepted 0-RTT connection from {}", remote_addr);
+				info!("accepted 0-RTT connection");
 				conn
 			}
 			Err(connecting) => {
@@ -305,7 +310,7 @@ async fn handle_connection<C: InboundCallback>(
 					.await
 					.map_err(|_| eyre::eyre!("QUIC handshake timed out after {:?}", handshake_timeout))?
 					.wrap_err("Failed to establish QUIC connection")?;
-				info!("Accepted 1-RTT connection from {}", remote_addr);
+				info!("accepted 1-RTT connection");
 				conn
 			}
 		}
@@ -314,7 +319,7 @@ async fn handle_connection<C: InboundCallback>(
 			.await
 			.map_err(|_| eyre::eyre!("QUIC handshake timed out after {:?}", handshake_timeout))?
 			.wrap_err("Failed to establish QUIC connection")?;
-		info!("Accepted connection from {}", remote_addr);
+		info!("accepted connection");
 		conn
 	};
 

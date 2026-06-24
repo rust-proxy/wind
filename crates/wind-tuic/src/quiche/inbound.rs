@@ -104,7 +104,12 @@ impl AbstractInbound for TuicheInbound {
 				}
 			};
 			let remote = conn.peer_addr().unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
-			let span = tracing::info_span!("conn", peer = %remote);
+			let span = tracing::info_span!(
+				"conn",
+				peer = %remote,
+				id = tracing::field::Empty,
+				user = tracing::field::Empty,
+			);
 			let users = users.clone();
 			let cb = cb.clone();
 			let cancel = root_cancel.child_token();
