@@ -47,6 +47,30 @@ pub enum CongestionControl {
 	NewReno,
 }
 
+impl CongestionControl {
+	/// Return the effective algorithm name, as quinn will use it.
+	pub fn effective_name(&self) -> &'static str {
+		match self {
+			Self::Bbr => "bbr",
+			Self::Bbr3 => "bbr3",
+			Self::Cubic => "cubic",
+			Self::NewReno => "new_reno",
+		}
+	}
+
+	/// Parse a config string and return the effective algorithm name,
+	/// applying the same fallback (`Bbr`) that the inbound uses.
+	pub fn effective_from_str(s: &str) -> &'static str {
+		s.parse().unwrap_or(Self::Bbr).effective_name()
+	}
+}
+
+impl Display for CongestionControl {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+		f.write_str(self.effective_name())
+	}
+}
+
 impl FromStr for CongestionControl {
 	type Err = &'static str;
 
