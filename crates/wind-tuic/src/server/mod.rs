@@ -128,6 +128,11 @@ struct AuthState {
 
 struct InboundCtx<C: QuicConnection> {
 	conn: C,
+	/// The per-connection `conn` span (created by the backend, entered for the
+	/// whole `serve_connection`). Held so `handle_auth` can record the
+	/// authenticated `user` onto it, so every later per-connection log line —
+	/// stream, datagram, relay — carries the user, not just the auth line.
+	conn_span: tracing::Span,
 	auth: ArcSwapOption<AuthState>,
 	auth_notify: Arc<Notify>,
 	users: Arc<HashMap<Uuid, String>>,
@@ -305,11 +310,19 @@ pub async fn serve_connection<C, CB>(
 		conn_id: wind_core::hooks::next_conn_id(),
 	};
 
+	// The backend entered the per-connection `conn` span for the whole lifetime
+	// of this future. Record the stable connection id onto it now (the user is
+	// recorded later, on auth) so every line logged under this connection — each
+	// stream, datagram, and relay — carries `id`/`user` without re-stating them.
+	// Mirrors upstream tuic's `info_span!("conn", id, addr, user = Empty)`.
+	let conn_span = tracing::Span::current();
+	conn_span.record("id", conn_info.conn_id);
+
 	// Connection-level veto (pre-auth — no UserId yet).
 	if let Some(ch) = &hooks.connection
 		&& let ConnectDecision::Reject(reason) = ch.on_connect(&conn_info).await
 	{
-		info!("Connection from {} rejected by hook: {}", remote_addr, reason);
+		info!("connection rejected by hook: {reason}");
 		conn.close(0, b"rejected");
 		return;
 	}
@@ -331,6 +344,7 @@ pub async fn serve_connection<C, CB>(
 
 	let connection = Arc::new(InboundCtx {
 		conn,
+		conn_span,
 		auth: ArcSwapOption::empty(),
 		auth_notify: Arc::new(Notify::new()),
 		users,
@@ -361,7 +375,7 @@ pub async fn serve_connection<C, CB>(
 				tokio::select! {
 					_ = tokio::time::sleep(auth_timeout) => {
 						if conn_auth.auth.load().is_none() && !active.load(Ordering::Relaxed) {
-							warn!("Connection from {} authentication timeout", remote_addr);
+							warn!("authentication timeout");
 							conn_auth.conn.close(0, b"auth timeout");
 						}
 					}
@@ -412,10 +426,7 @@ pub async fn serve_connection<C, CB>(
 								return;
 							}
 							if conn.auth.load().is_some() {
-								tokio::spawn(
-									spawn_logged("Datagram", handle_datagram(conn, datagram, cb))
-										.instrument(tracing::debug_span!("datagram")),
-								);
+								tokio::spawn(spawn_logged("Datagram", handle_datagram(conn, datagram, cb)).in_current_span());
 							} else if let Err(e) = handle_datagram(conn, datagram, cb).await {
 								error!("Datagram error: {e:?}");
 							}
@@ -463,7 +474,7 @@ pub async fn serve_connection<C, CB>(
 										route_non_tuic(&conn, h3.as_ref(), &active, H3Stream::Uni(recv));
 									}
 								}
-								.instrument(tracing::debug_span!("uni_stream")),
+								.in_current_span(),
 							);
 						}
 					},
@@ -506,7 +517,7 @@ pub async fn serve_connection<C, CB>(
 										route_non_tuic(&conn, h3.as_ref(), &active, H3Stream::Bi(send, recv));
 									}
 								}
-								.instrument(tracing::debug_span!("bi_stream")),
+								.in_current_span(),
 							);
 						}
 					},
@@ -521,10 +532,10 @@ pub async fn serve_connection<C, CB>(
 	tokio::select! {
 		_ = cancel.cancelled() => {
 			connection.conn.close(0, b"server shutdown");
-			info!("Connection from {} closed by server shutdown", remote_addr);
+			info!("connection closed by server shutdown");
 		}
 		_ = connection.conn.closed() => {
-			info!("Connection from {} closed", remote_addr);
+			info!("connection closed");
 		}
 	}
 	acceptor_cancel.cancel();
@@ -676,7 +687,7 @@ async fn handle_uni_stream<C: QuicConnection, CB: InboundCallback>(
 					}
 				}
 				CmdType::Heartbeat => {
-					tracing::trace!("Received heartbeat from {:?}", ctx.user());
+					tracing::trace!("heartbeat received");
 				}
 				other => {
 					warn!("Unexpected command on uni stream: {:?}", other);
@@ -863,6 +874,12 @@ async fn handle_auth<C: QuicConnection>(connection: &InboundCtx<C>, uuid: Uuid, 
 	connection.auth.store(Some(Arc::new(AuthState { user: user.clone() })));
 	connection.auth_notify.notify_waiters();
 
+	// Promote the authenticated user onto the connection span so every later
+	// line under this connection (streams, datagrams, relays) is attributed to
+	// it — not just this one log. Mirrors upstream tuic's
+	// `Span::current().record("user", ..)` on auth.
+	connection.conn_span.record("user", tracing::field::display(&user));
+
 	// Register this now-authenticated connection so the host can enforce a
 	// per-user limit (`count_for`) and actively kick it (`kick_user`). Done after
 	// the `on_authenticated` veto so the limit check above only counts *other*
@@ -871,7 +888,7 @@ async fn handle_auth<C: QuicConnection>(connection: &InboundCtx<C>, uuid: Uuid, 
 		active.register(connection.conn_info.conn_id, user.clone(), connection.conn_cancel.clone());
 	}
 
-	info!(uuid = %uuid, user = %user, "authenticated");
+	info!(uuid = %uuid, "authenticated");
 
 	Ok(())
 }
