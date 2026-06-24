@@ -24,7 +24,7 @@ use tokio_quiche::{
 	ConnectionParams,
 	metrics::DefaultMetrics,
 	quic::connect_with_config,
-	settings::{CertificateKind, Hooks, QuicSettings, TlsCertificatePaths},
+	settings::{BbrParamsField, CertificateKind, Hooks, QuicSettings, TlsCertificatePaths},
 	socket::Socket,
 };
 use tracing::warn;
@@ -46,6 +46,47 @@ fn cc_name(cc: crate::config::QuicCongestionControl) -> &'static str {
 	}
 }
 
+/// Convert the backend-neutral [`Bbr2gcConfig`](crate::config::Bbr2gcConfig)
+/// onto quiche's native experimental `BbrParams`.
+fn quiche_bbr_params(c: &crate::config::Bbr2gcConfig) -> tokio_quiche::quiche::BbrParams {
+	use tokio_quiche::quiche::BbrBwLoReductionStrategy as QuicheStrategy;
+
+	use crate::config::BbrBwLoReductionStrategy as Strategy;
+	tokio_quiche::quiche::BbrParams {
+		startup_cwnd_gain: c.startup_cwnd_gain,
+		startup_pacing_gain: c.startup_pacing_gain,
+		full_bw_threshold: c.full_bw_threshold,
+		startup_full_bw_rounds: c.startup_full_bw_rounds,
+		startup_full_loss_count: c.startup_full_loss_count,
+		drain_cwnd_gain: c.drain_cwnd_gain,
+		drain_pacing_gain: c.drain_pacing_gain,
+		enable_reno_coexistence: c.enable_reno_coexistence,
+		enable_overestimate_avoidance: c.enable_overestimate_avoidance,
+		choose_a0_point_fix: c.choose_a0_point_fix,
+		probe_bw_probe_up_pacing_gain: c.probe_bw_probe_up_pacing_gain,
+		probe_bw_probe_down_pacing_gain: c.probe_bw_probe_down_pacing_gain,
+		probe_bw_cwnd_gain: c.probe_bw_cwnd_gain,
+		probe_bw_up_cwnd_gain: c.probe_bw_up_cwnd_gain,
+		probe_rtt_pacing_gain: c.probe_rtt_pacing_gain,
+		probe_rtt_cwnd_gain: c.probe_rtt_cwnd_gain,
+		max_probe_up_queue_rounds: c.max_probe_up_queue_rounds,
+		loss_threshold: c.loss_threshold,
+		use_bytes_delivered_for_inflight_hi: c.use_bytes_delivered_for_inflight_hi,
+		decrease_startup_pacing_at_end_of_round: c.decrease_startup_pacing_at_end_of_round,
+		bw_lo_reduction_strategy: c.bw_lo_reduction_strategy.map(|s| match s {
+			Strategy::Default => QuicheStrategy::Default,
+			Strategy::MinRtt => QuicheStrategy::MinRttReduction,
+			Strategy::Inflight => QuicheStrategy::InflightReduction,
+			Strategy::Cwnd => QuicheStrategy::CwndReduction,
+		}),
+		ignore_app_limited_for_no_bandwidth_growth: c.ignore_app_limited_for_no_bandwidth_growth,
+		initial_pacing_rate_bytes_per_second: c.initial_pacing_rate_bytes_per_second,
+		scale_pacing_rate_by_mss: c.scale_pacing_rate_by_mss,
+		disable_probe_down_early_exit: c.disable_probe_down_early_exit,
+		time_sent_set_to_now: c.time_sent_set_to_now,
+	}
+}
+
 /// Translate the backend-neutral [`TransportConfig`] into a [`QuicSettings`].
 fn quic_settings(t: &TransportConfig) -> QuicSettings {
 	let mut s = QuicSettings::default();
@@ -62,6 +103,27 @@ fn quic_settings(t: &TransportConfig) -> QuicSettings {
 	s.enable_dgram = t.enable_datagram;
 	s.enable_early_data = t.enable_0rtt;
 	s.alpn = t.alpn.clone();
+
+	// Per-algorithm congestion-control tuning. `None` leaves quiche's default.
+	let cc = &t.cc;
+	if let Some(packets) = cc.initial_cwnd_packets {
+		s.initial_congestion_window_packets = packets;
+	}
+	if let Some(pacing) = cc.pacing {
+		s.enable_pacing = pacing;
+	}
+	if let Some(rate) = cc.max_pacing_rate {
+		s.max_pacing_rate = Some(rate);
+	}
+	if let Some(hystart) = cc.hystart {
+		s.enable_hystart = hystart;
+	}
+	if let Some(fix) = cc.cubic_idle_restart_fix {
+		s.enable_cubic_idle_restart_fix = fix;
+	}
+	if let Some(bbr) = &cc.bbr {
+		s.custom_bbr_params = BbrParamsField(Some(quiche_bbr_params(bbr)));
+	}
 	s
 }
 

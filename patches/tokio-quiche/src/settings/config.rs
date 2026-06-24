@@ -178,6 +178,17 @@ fn make_quiche_config(
     config.discover_pmtu(quic_settings.discover_path_mtu);
     config.set_pmtud_max_probes(quic_settings.pmtud_max_probes);
     config.enable_hystart(quic_settings.enable_hystart);
+    config.set_enable_cubic_idle_restart_fix(
+        quic_settings.enable_cubic_idle_restart_fix,
+    );
+
+    // Custom BBR (gcongestion) tuning. `set_custom_bbr_params` is gated behind
+    // quiche's `internal` feature (our `quiche_internal`); when that feature is
+    // off the params are simply ignored so the crate still builds.
+    #[cfg(feature = "quiche_internal")]
+    if let Some(bbr_params) = quic_settings.custom_bbr_params.0 {
+        config.set_custom_bbr_params(bbr_params);
+    }
 
     config.enable_pacing(quic_settings.enable_pacing);
     if let Some(max_pacing_rate) = quic_settings.max_pacing_rate {

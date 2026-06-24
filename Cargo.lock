@@ -6150,6 +6150,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "rustls-platform-verifier",
+ "serde",
  "tempfile",
  "test-log",
  "thiserror 2.0.18",

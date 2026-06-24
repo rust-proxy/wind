@@ -70,6 +70,10 @@ pub struct TuicInboundOpts {
 	/// of slow-start faster instead of trickling the first few round trips.
 	pub initial_window: u64,
 
+	/// NewReno loss-reduction factor (β). Only applies to the `newreno`
+	/// controller; `None` keeps quinn's default. Other controllers ignore it.
+	pub newreno_loss_reduction_factor: Option<f32>,
+
 	/// HTTP/3 masquerade. When `Some`, connections that aren't TUIC (their
 	/// first stream byte isn't `0x05`) are served as a reverse-proxy HTTP/3
 	/// web server instead of being dropped.
@@ -106,6 +110,7 @@ impl Default for TuicInboundOpts {
 			gso: true,
 			congestion_control: CongestionControl::Bbr,
 			initial_window: 1024 * 1024,
+			newreno_loss_reduction_factor: None,
 			masquerade: None,
 			hooks: InboundHooks::default(),
 			active: None,
@@ -200,6 +205,9 @@ impl TuicInbound {
 			CongestionControl::NewReno => {
 				let mut cfg = quinn::congestion::NewRenoConfig::default();
 				cfg.initial_window(iw);
+				if let Some(factor) = self.opts.newreno_loss_reduction_factor {
+					cfg.loss_reduction_factor(factor);
+				}
 				Arc::new(cfg)
 			}
 		}

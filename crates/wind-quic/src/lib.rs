@@ -36,7 +36,9 @@ pub mod error;
 pub mod prefixed;
 pub mod traits;
 
-pub use config::{CertSource, ClientTlsConfig, ServerTlsConfig, TransportConfig};
+pub use config::{
+	Bbr2gcConfig, BbrBwLoReductionStrategy, CertSource, ClientTlsConfig, CongestionTuning, ServerTlsConfig, TransportConfig,
+};
 pub use error::{QuicError, Result};
 pub use prefixed::PrefixedRecv;
 pub use traits::{QuicConnection, QuicRecvStream, QuicSendStream};
