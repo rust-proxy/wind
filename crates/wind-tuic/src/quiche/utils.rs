@@ -1,7 +1,10 @@
 //! Configuration types for the quiche backend (mirrors the former
 //! `wind-tuiche` surface).
 
-use std::time::Duration;
+use std::{
+	fmt::{Display, Formatter, Result as FmtResult},
+	time::Duration,
+};
 
 use wind_quic::QuicCongestionControl;
 
@@ -12,6 +15,35 @@ pub enum CongestionControl {
 	Cubic,
 	Bbr,
 	Reno,
+}
+
+impl CongestionControl {
+	/// Return the effective algorithm name that quiche actually uses.
+	/// \`Bbr\` resolves to `Bbr2Gcongestion` internally.
+	pub fn effective_name(&self) -> &'static str {
+		match self {
+			Self::Cubic => "cubic",
+			Self::Bbr => "bbr2_gcongestion",
+			Self::Reno => "reno",
+		}
+	}
+
+	/// Parse a config string into the effective quiche algorithm name,
+	/// matching the same mapping as the inbound's \`quiche_cc()\`.
+	pub fn effective_from_str(s: &str) -> &'static str {
+		match s.to_ascii_lowercase().as_str() {
+			"bbr" | "bbr3" => Self::Bbr,
+			"reno" | "newreno" | "new_reno" => Self::Reno,
+			_ => Self::Cubic,
+		}
+		.effective_name()
+	}
+}
+
+impl Display for CongestionControl {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+		f.write_str(self.effective_name())
+	}
 }
 
 impl From<CongestionControl> for QuicCongestionControl {
