@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use socket2::{Domain, Socket, Type};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tracing::Instrument;
 use wind_core::{
@@ -98,7 +99,10 @@ pub async fn connect_direct_tcp(addr: SocketAddr, opts: &DirectOutboundOpts) -> 
 async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>, udp_stream: UdpStream) -> eyre::Result<()> {
 	let UdpStream { tx, mut rx } = udp_stream;
 
-	let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+	let relay_socket = Arc::new(bind_relay_socket()?);
+	// When the relay socket is dual-stack IPv6, IPv4 targets must be sent to
+	// their IPv4-mapped form; capture the family once rather than per packet.
+	let socket_is_v6 = relay_socket.local_addr()?.is_ipv6();
 
 	// Both directions are inlined as plain futures rather than `tokio::spawn`ed
 	// — `select!` then implicitly aborts whichever half-loop is still pending
@@ -118,7 +122,8 @@ async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>
 					continue;
 				}
 			};
-			if let Err(err) = socket_send.send_to(&pkt.payload, target_sa).await {
+			let send_target = map_target_for_socket(target_sa, socket_is_v6);
+			if let Err(err) = socket_send.send_to(&pkt.payload, send_target).await {
 				tracing::warn!(target = %target_sa, error = %err, "UDP send failed");
 			}
 		}
@@ -131,6 +136,11 @@ async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>
 			match socket_recv.recv_from(&mut buf).await {
 				Ok((len, src_addr)) => {
 					use bytes::Bytes;
+					// A dual-stack relay socket reports an IPv4 responder as an
+					// IPv4-mapped IPv6 address (`::ffff:a.b.c.d`). Unmap it so the
+					// reply the client receives is attributed to the same address
+					// family as the target it originally sent to.
+					let src_addr = unmap_source(src_addr);
 					let payload = Bytes::copy_from_slice(&buf[..len]);
 					let pkt = UdpPacket {
 						source: Some(TargetAddr::from(src_addr)),
@@ -155,4 +165,97 @@ async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>
 	}
 
 	Ok(())
+}
+
+/// Bind the local UDP socket used to relay one association's outbound packets.
+///
+/// A single association can target a mix of IPv4 and IPv6 hosts, so the socket
+/// must be able to reach both families. We bind an IPv6 socket with
+/// `IPV6_V6ONLY=false` (dual-stack): IPv6 targets are reached directly and IPv4
+/// targets via their IPv4-mapped form (`::ffff:a.b.c.d`). A host without IPv6
+/// support falls back to an IPv4-only socket, which still reaches IPv4 targets.
+///
+/// This mirrors `wind-socks`'s `udp_bind_random_port`. Previously this socket
+/// was hard-bound to `0.0.0.0:0` (IPv4 only), so every IPv6 target failed
+/// `send_to` with `EAFNOSUPPORT` ("Address family not supported by protocol").
+fn bind_relay_socket() -> std::io::Result<UdpSocket> {
+	const V6_UNSPEC: SocketAddr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+	const V4_UNSPEC: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
+
+	let socket = Socket::new(Domain::IPV6, Type::DGRAM, None)
+		.and_then(|s| s.set_only_v6(false).map(|_| s))
+		.and_then(|s| s.bind(&V6_UNSPEC.into()).map(|_| s))
+		.or_else(|_| Socket::new(Domain::IPV4, Type::DGRAM, None).and_then(|s| s.bind(&V4_UNSPEC.into()).map(|_| s)))?;
+	socket.set_nonblocking(true)?;
+	UdpSocket::from_std(socket.into())
+}
+
+/// Rewrite an outbound target into the form sendable on the relay socket.
+///
+/// On a dual-stack IPv6 socket, an IPv4 destination must be expressed as
+/// IPv4-mapped IPv6; passing a bare `SocketAddr::V4` to `send_to` would itself
+/// fail with `EAFNOSUPPORT`. IPv6 targets, and all targets on an IPv4-only
+/// socket, are sent unchanged.
+fn map_target_for_socket(target: SocketAddr, socket_is_v6: bool) -> SocketAddr {
+	match target {
+		SocketAddr::V4(v4) if socket_is_v6 => SocketAddr::V6(SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0)),
+		_ => target,
+	}
+}
+
+/// Undo IPv4-mapped IPv6 (`::ffff:a.b.c.d`) so reply packets are attributed to
+/// the responder's true address family. Real IPv6 and IPv4 sources pass
+/// through unchanged.
+fn unmap_source(addr: SocketAddr) -> SocketAddr {
+	match addr {
+		SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+			Some(v4) => SocketAddr::V4(SocketAddrV4::new(v4, v6.port())),
+			None => addr,
+		},
+		_ => addr,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn v4_target_is_mapped_only_on_dual_stack_socket() {
+		let v4: SocketAddr = "192.0.2.1:53".parse().unwrap();
+		// Dual-stack v6 socket: must become IPv4-mapped v6, else EAFNOSUPPORT.
+		let mapped = map_target_for_socket(v4, true);
+		assert_eq!(mapped, "[::ffff:192.0.2.1]:53".parse().unwrap());
+		assert!(mapped.is_ipv6());
+		// IPv4-only socket: sent unchanged.
+		assert_eq!(map_target_for_socket(v4, false), v4);
+	}
+
+	#[test]
+	fn v6_target_is_never_rewritten() {
+		// The exact target family from the bug report.
+		let v6: SocketAddr = "[2404:3fc0:2:101::671c:3697]:27019".parse().unwrap();
+		assert_eq!(map_target_for_socket(v6, true), v6);
+		assert_eq!(map_target_for_socket(v6, false), v6);
+	}
+
+	#[test]
+	fn unmap_restores_v4_from_mapped_v6() {
+		let mapped: SocketAddr = "[::ffff:192.0.2.1]:53".parse().unwrap();
+		assert_eq!(unmap_source(mapped), "192.0.2.1:53".parse().unwrap());
+	}
+
+	#[test]
+	fn unmap_leaves_real_v6_and_v4_untouched() {
+		let v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+		assert_eq!(unmap_source(v6), v6);
+		let v4: SocketAddr = "10.0.0.1:80".parse().unwrap();
+		assert_eq!(unmap_source(v4), v4);
+	}
+
+	#[test]
+	fn map_then_unmap_roundtrips_v4() {
+		let v4: SocketAddr = "203.0.113.7:9000".parse().unwrap();
+		assert_eq!(unmap_source(map_target_for_socket(v4, true)), v4);
+	}
 }
