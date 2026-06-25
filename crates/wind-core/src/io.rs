@@ -54,7 +54,9 @@ impl RelayMeters {
 	/// Monotonic "bytes moved in either direction" counter; a stalled relay is
 	/// one whose `activity()` does not change across a timeout window.
 	fn activity(&self) -> u64 {
-		self.a2b.load(Ordering::Relaxed).wrapping_add(self.b2a.load(Ordering::Relaxed))
+		self.a2b
+			.load(Ordering::Relaxed)
+			.wrapping_add(self.b2a.load(Ordering::Relaxed))
 	}
 }
 
@@ -296,8 +298,8 @@ mod tests {
 	use super::*;
 
 	/// A clean full-duplex exchange where both peers close completes promptly
-	/// and reports the bytes relayed in each direction. The reaper must not fire
-	/// on this path.
+	/// and reports the bytes relayed in each direction. The reaper must not
+	/// fire on this path.
 	#[tokio::test]
 	async fn clean_full_close_completes() {
 		let (mut a, mut a_peer) = tokio::io::duplex(1024);
@@ -349,8 +351,8 @@ mod tests {
 		assert!(err.is_none(), "reaping a half-open relay is not an error: {err:?}");
 	}
 
-	/// A fully-open but idle tunnel (neither side has closed) must NOT be reaped:
-	/// the half-close timer only arms once the outbound peer is gone.
+	/// A fully-open but idle tunnel (neither side has closed) must NOT be
+	/// reaped: the half-close timer only arms once the outbound peer is gone.
 	#[tokio::test]
 	async fn fully_open_idle_relay_is_not_reaped() {
 		let (mut a, _a_peer) = tokio::io::duplex(1024);
