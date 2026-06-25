@@ -56,7 +56,10 @@ fn spawn_relay() -> RelayHarness {
 
 	let (to_relay, relay_rx) = mpsc::channel::<UdpPacket>(16);
 	let (relay_tx, from_relay) = mpsc::channel::<UdpPacket>(16);
-	let stream = UdpStream { tx: relay_tx, rx: relay_rx };
+	let stream = UdpStream {
+		tx: relay_tx,
+		rx: relay_rx,
+	};
 
 	let task = tokio::spawn(async move {
 		let _ = outbound.handle_udp(stream).await;
@@ -116,7 +119,12 @@ async fn ipv6_target_roundtrips() {
 
 	assert_eq!(reply.payload, Bytes::from_static(b"hello-v6"), "payload echoed back");
 	// The responder is the IPv6 echo server; its address must surface as IPv6.
-	assert_eq!(reply.target, TargetAddr::from(echo), "reply attributed to the IPv6 responder, got {:?}", reply.target);
+	assert_eq!(
+		reply.target,
+		TargetAddr::from(echo),
+		"reply attributed to the IPv6 responder, got {:?}",
+		reply.target
+	);
 	assert!(matches!(reply.target, TargetAddr::IPv6(..)));
 }
 
@@ -132,7 +140,12 @@ async fn ipv4_target_roundtrips_with_unmapped_source() {
 	// IPv4-mapped form, but the reply source must be unmapped back to plain
 	// IPv4 — otherwise the client sees `::ffff:127.0.0.1` and cannot match the
 	// reply to the IPv4 target it sent to.
-	assert_eq!(reply.target, TargetAddr::from(echo), "reply source unmapped to IPv4, got {:?}", reply.target);
+	assert_eq!(
+		reply.target,
+		TargetAddr::from(echo),
+		"reply source unmapped to IPv4, got {:?}",
+		reply.target
+	);
 	assert!(matches!(reply.target, TargetAddr::IPv4(..)));
 }
 
