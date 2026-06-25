@@ -6059,6 +6059,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "eyre",
+ "socket2 0.6.4",
  "tokio",
  "tracing",
  "wind-core",
