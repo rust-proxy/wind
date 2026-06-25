@@ -318,6 +318,9 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 		send_window: quiche.send_window,
 		receive_window: quiche.receive_window,
 		congestion_control,
+		// This (legacy) adapter does not expose per-algorithm CC tuning; keep
+		// quiche's defaults.
+		cc: Default::default(),
 		udp_relay_mode: wind_tuic::quiche::UdpRelayMode::Datagram,
 		enable_0rtt: quiche.zero_rtt,
 	};

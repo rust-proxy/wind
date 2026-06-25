@@ -8,6 +8,12 @@
 
 pub mod proto;
 
+// Backend-neutral congestion-control config types (defined in `wind-quic`),
+// re-exported so config front-ends (e.g. the TUIC server) can build a
+// [`CongestionTuning`] and per-algorithm tuning without depending on
+// `wind-quic` directly. Available regardless of which backend feature is on.
+pub use wind_quic::{Bbr2gcConfig, BbrBwLoReductionStrategy, CongestionTuning};
+
 #[cfg(feature = "server")]
 pub mod active;
 #[cfg(feature = "server")]

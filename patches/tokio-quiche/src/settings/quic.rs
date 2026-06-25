@@ -31,6 +31,35 @@ use std::time::Duration;
 
 pub use qlog::writer::QlogCompression;
 
+/// Programmatically-set holder for quiche's experimental [`quiche::BbrParams`].
+///
+/// [`QuicSettings`] is built by the `#[settings]` macro, which requires every
+/// field type to implement [`foundations::settings::Settings`] (and therefore
+/// `Serialize`/`Deserialize`). `quiche::BbrParams` implements neither, so it
+/// cannot be embedded directly. This newtype wraps it and supplies trivial,
+/// never-exercised serde impls (the [`QuicSettings::custom_bbr_params`] field is
+/// `#[serde(skip)]`) plus an empty `Settings` impl, so the BBR params can ride
+/// inside `QuicSettings` while still being set purely in code.
+#[derive(Clone, Debug, Default)]
+pub struct BbrParamsField(pub Option<quiche::BbrParams>);
+
+impl serde::Serialize for BbrParamsField {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Set programmatically; never serialized (the field is `serde(skip)`).
+        serializer.serialize_none()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BbrParamsField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Ignore any input; BBR params are injected programmatically.
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(Self(None))
+    }
+}
+
+impl foundations::settings::Settings for BbrParamsField {}
+
 /// QUIC configuration parameters.
 #[serde_as]
 #[settings]
@@ -202,6 +231,22 @@ pub struct QuicSettings {
     /// Defaults to `true`.
     #[serde(default = "QuicSettings::default_enable_hystart")]
     pub enable_hystart: bool,
+
+    /// Whether to enable the CUBIC idle-restart fix (only with `cubic` CC).
+    ///
+    /// Mirrors `quiche::Config::set_enable_cubic_idle_restart_fix`. Defaults to
+    /// `true` (quiche's own default).
+    #[serde(default = "QuicSettings::default_enable_cubic_idle_restart_fix")]
+    pub enable_cubic_idle_restart_fix: bool,
+
+    /// Custom BBR (`bbr2_gcongestion`) parameters applied via
+    /// `quiche::Config::set_custom_bbr_params`. Only takes effect when
+    /// `cc_algorithm` resolves to a BBR variant *and* the crate is built with
+    /// the `quiche_internal` feature. Set programmatically (never from config
+    /// files), hence `#[serde(skip)]`; defaults to `None` (quiche's built-in
+    /// BBR defaults). See [`BbrParamsField`].
+    #[serde(skip)]
+    pub custom_bbr_params: BbrParamsField,
 
     /// Optionally enables pacing for outgoing packets.
     ///
@@ -420,6 +465,11 @@ impl QuicSettings {
 
     #[inline]
     fn default_enable_hystart() -> bool {
+        true
+    }
+
+    #[inline]
+    fn default_enable_cubic_idle_restart_fix() -> bool {
         true
     }
 

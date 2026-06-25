@@ -6,7 +6,7 @@ use std::{
 	time::Duration,
 };
 
-use wind_quic::QuicCongestionControl;
+use wind_quic::{CongestionTuning, QuicCongestionControl};
 
 /// Congestion control algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -79,6 +79,9 @@ pub struct ConnectionOpts {
 	pub receive_window: u64,
 	/// Congestion control algorithm.
 	pub congestion_control: CongestionControl,
+	/// Per-algorithm congestion-control tuning (initial window, pacing,
+	/// HyStart++, CUBIC idle-restart-fix, custom BBR params).
+	pub cc: CongestionTuning,
 	/// UDP relay mode.
 	pub udp_relay_mode: UdpRelayMode,
 	/// Enable 0-RTT.
@@ -94,6 +97,7 @@ impl Default for ConnectionOpts {
 			send_window: 8 * 1024 * 1024,    // 8 MB
 			receive_window: 8 * 1024 * 1024, // 8 MB
 			congestion_control: CongestionControl::default(),
+			cc: CongestionTuning::default(),
 			udp_relay_mode: UdpRelayMode::default(),
 			enable_0rtt: true,
 		}
@@ -114,6 +118,7 @@ impl ConnectionOpts {
 			enable_datagram: matches!(self.udp_relay_mode, UdpRelayMode::Datagram),
 			enable_0rtt: self.enable_0rtt,
 			alpn: vec![b"h3".to_vec()],
+			cc: self.cc.clone(),
 			..Default::default()
 		}
 	}
