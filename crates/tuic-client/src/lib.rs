@@ -28,8 +28,9 @@ pub async fn run(cfg: Config) -> eyre::Result<()> {
 /// Cancelling `cancel` stops the SOCKS5 accept loop and the TCP/UDP
 /// forwarders, closes the TUIC connection (so the server sees the client go
 /// away immediately instead of waiting out its idle timeout), and waits for
-/// tracked background tasks to drain. Pair with `tokio::select!` on `ctrl_c()`
-/// so signal-triggered shutdown is graceful instead of relying on runtime drop.
+/// tracked background tasks to drain. Pair with `tokio::select!` on
+/// [`wind_core::shutdown_signal`] so signal-triggered shutdown (Ctrl-C /
+/// SIGTERM) is graceful instead of relying on runtime drop.
 pub async fn run_with_cancel(cfg: Config, cancel: CancellationToken) -> eyre::Result<()> {
 	// The context token is the caller's token, so the outbound's heartbeat poll
 	// task (which closes the QUIC connection on cancellation) and every UDP

@@ -73,12 +73,8 @@ async fn main() -> eyre::Result<()> {
 				}
 			}
 		}
-		res = tokio::signal::ctrl_c() => {
-			if let Err(err) = res {
-				tracing::error!("Failed to listen for Ctrl-C: {err}");
-				return Err(eyre::eyre!("Failed to listen for Ctrl-C: {err}"));
-			}
-			tracing::info!("Received Ctrl-C, shutting down.");
+		_ = wind_core::shutdown_signal() => {
+			tracing::info!("Received shutdown signal, shutting down.");
 			cancel.cancel();
 
 			// Give in-flight sessions up to 10 seconds to drain before dropping
@@ -87,7 +83,7 @@ async fn main() -> eyre::Result<()> {
 				Ok(Ok(Ok(()))) => {}
 				Ok(Ok(Err(err))) => tracing::warn!("Client drained with error: {err}"),
 				Ok(Err(join_err)) => tracing::warn!("Client task drain join error: {join_err}"),
-				Err(_) => tracing::warn!("Client did not drain within 10s of Ctrl-C; aborting outstanding tasks"),
+				Err(_) => tracing::warn!("Client did not drain within 10s of shutdown signal; aborting outstanding tasks"),
 			}
 		}
 	}

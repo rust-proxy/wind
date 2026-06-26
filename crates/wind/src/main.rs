@@ -118,8 +118,8 @@ async fn main() -> eyre::Result<()> {
 		start_inbound(ib, &dispatcher, &ctx).await?;
 	}
 
-	tokio::signal::ctrl_c().await?;
-	info!(target: "wind_main", "Ctrl-C received, shutting down");
+	wind_core::shutdown_signal().await;
+	info!(target: "wind_main", "shutdown signal received, shutting down");
 	ctx.token.cancel();
 	ctx.tasks.close();
 	tokio::time::timeout(Duration::from_secs(10), ctx.tasks.wait()).await?;

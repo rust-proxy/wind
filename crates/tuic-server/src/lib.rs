@@ -33,8 +33,8 @@ pub async fn run(cfg: Config) -> eyre::Result<()> {
 ///
 /// Cancelling `cancel` causes the listen loop to exit and every spawned
 /// connection/UDP-session handler to wind down via its child token. Pair with
-/// `tokio::select!` on `ctrl_c()` so signal-triggered shutdown is graceful
-/// instead of relying on runtime drop.
+/// `tokio::select!` on [`wind_core::shutdown_signal`] so signal-triggered
+/// shutdown (Ctrl-C / SIGTERM) is graceful instead of relying on runtime drop.
 pub async fn run_with_cancel(cfg: Config, cancel: CancellationToken) -> eyre::Result<()> {
 	let ctx = Arc::new(AppContext { cancel, cfg });
 

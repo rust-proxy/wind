@@ -8,6 +8,7 @@ pub mod io;
 mod outbound;
 pub mod resolve;
 pub mod rule;
+pub mod signal;
 pub mod types;
 
 pub use active::ActiveConnections;
@@ -21,6 +22,7 @@ pub use inbound::*;
 pub use interface::*;
 pub use outbound::*;
 pub use resolve::{Resolver, SystemResolver};
+pub use signal::shutdown_signal;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub mod quic;

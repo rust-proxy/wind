@@ -231,14 +231,11 @@ impl App {
 			});
 		}
 
-		// Run until Ctrl-C or an externally-triggered cancellation.
+		// Run until a shutdown signal (Ctrl-C / SIGTERM) or an
+		// externally-triggered cancellation.
 		tokio::select! {
-			r = tokio::signal::ctrl_c() => {
-				if let Err(e) = r {
-					warn!("failed to listen for Ctrl-C: {e}");
-				} else {
-					info!("Ctrl-C received, shutting down");
-				}
+			_ = crate::shutdown_signal() => {
+				info!("shutdown signal received, stopping");
 			}
 			_ = self.ctx.token.cancelled() => {
 				info!("shutdown signalled, stopping");
