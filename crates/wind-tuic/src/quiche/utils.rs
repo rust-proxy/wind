@@ -75,8 +75,21 @@ pub struct ConnectionOpts {
 	pub max_concurrent_uni_streams: u64,
 	/// Send window size.
 	pub send_window: u64,
-	/// Receive window size.
+	/// Receive window size. Legacy single knob; the per-direction overrides
+	/// below take precedence when set.
 	pub receive_window: u64,
+	/// Per-stream initial receive window (bytes). `None` falls back to
+	/// [`receive_window`](Self::receive_window).
+	pub init_stream_receive_window: Option<u64>,
+	/// Per-stream maximum receive window — flow-control auto-tuning ceiling
+	/// (bytes). `None` leaves quiche's default.
+	pub max_stream_receive_window: Option<u64>,
+	/// Connection initial receive window (bytes). `None` falls back to
+	/// [`receive_window`](Self::receive_window).
+	pub init_conn_receive_window: Option<u64>,
+	/// Connection maximum receive window — flow-control auto-tuning ceiling
+	/// (bytes). `None` leaves quiche's default.
+	pub max_conn_receive_window: Option<u64>,
 	/// Congestion control algorithm.
 	pub congestion_control: CongestionControl,
 	/// Per-algorithm congestion-control tuning (initial window, pacing,
@@ -96,6 +109,10 @@ impl Default for ConnectionOpts {
 			max_concurrent_uni_streams: 100,
 			send_window: 8 * 1024 * 1024,    // 8 MB
 			receive_window: 8 * 1024 * 1024, // 8 MB
+			init_stream_receive_window: None,
+			max_stream_receive_window: None,
+			init_conn_receive_window: None,
+			max_conn_receive_window: None,
 			congestion_control: CongestionControl::default(),
 			cc: CongestionTuning::default(),
 			udp_relay_mode: UdpRelayMode::default(),
@@ -112,6 +129,10 @@ impl ConnectionOpts {
 			max_concurrent_uni_streams: self.max_concurrent_uni_streams,
 			send_window: self.send_window,
 			receive_window: self.receive_window,
+			init_stream_receive_window: self.init_stream_receive_window,
+			max_stream_receive_window: self.max_stream_receive_window,
+			init_conn_receive_window: self.init_conn_receive_window,
+			max_conn_receive_window: self.max_conn_receive_window,
 			max_idle_timeout: Some(self.max_idle_timeout),
 			congestion: self.congestion_control.into(),
 			// TUIC's native UDP relay uses QUIC DATAGRAM frames (RFC 9221).

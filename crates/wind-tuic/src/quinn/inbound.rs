@@ -52,7 +52,19 @@ pub struct TuicInboundOpts {
 
 	pub send_window: u64,
 
+	/// Legacy single receive window; `max_stream_receive_window` /
+	/// `max_conn_receive_window` take precedence when set.
 	pub receive_window: u32,
+
+	/// Per-stream receive window (bytes) → quinn's fixed
+	/// `stream_receive_window`. `None` falls back to `receive_window`. (quinn
+	/// has no separate "initial" flow-control window, so init overrides do not
+	/// apply here.)
+	pub max_stream_receive_window: Option<u64>,
+
+	/// Connection receive window (bytes) → quinn's fixed connection
+	/// `receive_window`. `None` leaves quinn's default.
+	pub max_conn_receive_window: Option<u64>,
 
 	pub zero_rtt: bool,
 
@@ -104,6 +116,8 @@ impl Default for TuicInboundOpts {
 			max_concurrent_uni_streams: 32,
 			send_window: 8 * 1024 * 1024,
 			receive_window: 8 * 1024 * 1024,
+			max_stream_receive_window: None,
+			max_conn_receive_window: None,
 			zero_rtt: false,
 			initial_mtu: 1200,
 			min_mtu: 1200,
@@ -165,12 +179,18 @@ impl TuicInbound {
 				.map_err(|e| eyre::eyre!("Failed to create QUIC server config: {}", e))?,
 		));
 
+		// Per-stream receive window: prefer the override, else the legacy single
+		// window. quinn's windows are fixed (no init/max auto-tuning), so the
+		// `max_*` values map straight onto them.
+		let stream_window = self.opts.max_stream_receive_window.unwrap_or(self.opts.receive_window as u64);
+		let stream_window = VarInt::from_u64(stream_window).map_err(|_| eyre::eyre!("stream receive window out of range"))?;
+
 		let mut transport = TransportConfig::default();
 		transport
 			.max_concurrent_bidi_streams(VarInt::from(self.opts.max_concurrent_bi_streams))
 			.max_concurrent_uni_streams(VarInt::from(self.opts.max_concurrent_uni_streams))
 			.send_window(self.opts.send_window)
-			.stream_receive_window(VarInt::from(self.opts.receive_window))
+			.stream_receive_window(stream_window)
 			.max_idle_timeout(Some(
 				IdleTimeout::try_from(self.opts.max_idle_time).map_err(|_| eyre::eyre!("Invalid max idle time"))?,
 			))
@@ -178,6 +198,13 @@ impl TuicInbound {
 			.min_mtu(self.opts.min_mtu)
 			.enable_segmentation_offload(self.opts.gso)
 			.congestion_controller_factory(self.congestion_controller_factory());
+
+		// Connection-level receive window (quinn leaves its default unless set).
+		if let Some(conn_window) = self.opts.max_conn_receive_window {
+			let conn_window =
+				VarInt::from_u64(conn_window).map_err(|_| eyre::eyre!("connection receive window out of range"))?;
+			transport.receive_window(conn_window);
+		}
 
 		config.transport_config(Arc::new(transport));
 

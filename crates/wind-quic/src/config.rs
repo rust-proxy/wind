@@ -130,8 +130,26 @@ pub struct TransportConfig {
 	pub max_concurrent_uni_streams: u64,
 	/// Connection-level send window, in bytes.
 	pub send_window: u64,
-	/// Connection / per-stream receive window, in bytes.
+	/// Connection / per-stream receive window, in bytes. Legacy single knob;
+	/// the per-direction overrides below take precedence when set.
 	pub receive_window: u64,
+	/// Per-stream initial receive window (quiche `initial_max_stream_data_*`).
+	/// `None` falls back to [`receive_window`](Self::receive_window). The quinn
+	/// backend has no separate "initial" window and ignores this.
+	pub init_stream_receive_window: Option<u64>,
+	/// Per-stream maximum receive window — quiche's flow-control auto-tuning
+	/// ceiling (`max_stream_window`); quinn's fixed `stream_receive_window`.
+	/// `None` leaves the backend default (quiche) / falls back to
+	/// [`receive_window`](Self::receive_window) (quinn).
+	pub max_stream_receive_window: Option<u64>,
+	/// Connection initial receive window (quiche `initial_max_data`). `None`
+	/// falls back to [`receive_window`](Self::receive_window). The quinn
+	/// backend has no separate "initial" window and ignores this.
+	pub init_conn_receive_window: Option<u64>,
+	/// Connection maximum receive window — quiche's flow-control auto-tuning
+	/// ceiling (`max_connection_window`); quinn's fixed connection
+	/// `receive_window`. `None` leaves the backend default.
+	pub max_conn_receive_window: Option<u64>,
 	/// Idle timeout. `None` disables it.
 	pub max_idle_timeout: Option<Duration>,
 	/// Initial MTU guess.
@@ -164,6 +182,10 @@ impl Default for TransportConfig {
 			max_concurrent_uni_streams: 100,
 			send_window: 8 * 1024 * 1024,
 			receive_window: 8 * 1024 * 1024,
+			init_stream_receive_window: None,
+			max_stream_receive_window: None,
+			init_conn_receive_window: None,
+			max_conn_receive_window: None,
 			max_idle_timeout: Some(Duration::from_secs(30)),
 			initial_mtu: 1200,
 			min_mtu: 1200,

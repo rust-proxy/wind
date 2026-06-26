@@ -321,6 +321,12 @@ async fn create_quiche_inbound(ctx: &Arc<TuicAppContext>) -> eyre::Result<Tuiche
 		max_concurrent_uni_streams: quiche.max_concurrent_uni_streams,
 		send_window: quiche.send_window,
 		receive_window: quiche.receive_window,
+		// This (legacy) adapter uses the single `receive_window`; the
+		// per-direction overrides stay unset.
+		init_stream_receive_window: None,
+		max_stream_receive_window: None,
+		init_conn_receive_window: None,
+		max_conn_receive_window: None,
 		congestion_control,
 		// This (legacy) adapter does not expose per-algorithm CC tuning; keep
 		// quiche's defaults.
