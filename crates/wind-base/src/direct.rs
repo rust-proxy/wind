@@ -14,7 +14,7 @@ use tracing::Instrument;
 use wind_core::{
 	OutboundAction,
 	resolve::Resolver,
-	tcp::AbstractTcpStream,
+	tcp::{AbstractTcpStream, TcpKeepalive},
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
 };
@@ -32,6 +32,9 @@ pub struct DirectOutboundOpts {
 	/// socket doesn't linger in CLOSE_WAIT for the lifetime of the parent
 	/// connection.  Set to `Duration::ZERO` to disable.
 	pub stream_timeout: Duration,
+	/// TCP keepalive configuration for the outbound socket.  When `None`,
+	/// `SO_KEEPALIVE` is not set (OS default, typically off).
+	pub tcp_keepalive: Option<TcpKeepalive>,
 }
 
 /// Direct outbound handler – connects to the target without any proxy.
@@ -105,7 +108,36 @@ pub async fn connect_direct_tcp(addr: SocketAddr, opts: &DirectOutboundOpts) -> 
 	if let Err(e) = stream.set_nodelay(true) {
 		tracing::debug!(error = %e, "failed to set TCP_NODELAY on direct outbound");
 	}
+
+	// Enable TCP keepalive so the OS detects dead peers (e.g. network
+	// partition, host crash) even when the relay is idle.  Without this an
+	// idle connection appears healthy to `copy_bidirectional` forever.
+	if let Some(ref ka) = opts.tcp_keepalive {
+		if let Err(e) = apply_tcp_keepalive(&stream, ka) {
+			tracing::debug!(error = %e, "failed to set TCP keepalive on direct outbound");
+		}
+	}
+
 	Ok(stream)
+}
+
+fn apply_tcp_keepalive(s: &tokio::net::TcpStream, ka: &TcpKeepalive) -> std::io::Result<()> {
+	#[cfg(unix)]
+	{
+		use std::os::unix::io::AsRawFd;
+		let r = unsafe { socket2::SockRef::from_raw_fd(s.as_raw_fd()) };
+		r.set_keepalive(true)?;
+	}
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	{
+		use std::os::unix::io::AsRawFd;
+		let sock = unsafe { socket2::SockRef::from_raw_fd(s.as_raw_fd()) };
+		sock.set_tcp_keepalive_idle(ka.idle)?;
+		sock.set_tcp_keepalive_interval(ka.interval)?;
+		sock.set_tcp_keepalive_retries(ka.retries)?;
+	}
+	let _ = (s, ka);
+	Ok(())
 }
 
 async fn relay_udp_direct(_opts: DirectOutboundOpts, resolver: Arc<dyn Resolver>, udp_stream: UdpStream) -> eyre::Result<()> {

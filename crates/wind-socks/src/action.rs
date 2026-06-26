@@ -4,7 +4,12 @@ use async_trait::async_trait;
 use fast_socks5::client::{Config as Socks5Config, Socks5Stream};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tracing::Instrument;
-use wind_core::{OutboundAction, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
+use wind_core::{
+	OutboundAction,
+	tcp::{AbstractTcpStream, TcpKeepalive},
+	types::TargetAddr,
+	udp::UdpStream,
+};
 
 /// Options for a SOCKS5 outbound action handler.
 #[derive(Clone, Debug)]
@@ -20,6 +25,9 @@ pub struct Socks5ActionOpts {
 	/// the relay is reaped after this much inactivity.  Set to
 	/// `Duration::ZERO` to disable.
 	pub stream_timeout: Duration,
+	/// TCP keepalive configuration for the outbound socket.  When `None`,
+	/// `SO_KEEPALIVE` is not set.
+	pub tcp_keepalive: Option<TcpKeepalive>,
 }
 
 /// SOCKS5 outbound handler implementing the object-safe `OutboundAction` trait.
@@ -91,5 +99,31 @@ async fn connect_socks5_tcp(
 		tracing::debug!(error = %e, "failed to set TCP_NODELAY on socks5 outbound");
 	}
 
+	// Enable TCP keepalive with the same rationale as the direct path.
+	if let Some(ref ka) = opts.tcp_keepalive {
+		if let Err(e) = apply_socks_keepalive(stream.get_socket_ref(), ka) {
+			tracing::debug!(error = %e, "failed to set TCP keepalive on socks5 outbound");
+		}
+	}
+
 	Ok(stream)
+}
+
+fn apply_socks_keepalive(s: &tokio::net::TcpStream, ka: &TcpKeepalive) -> std::io::Result<()> {
+	#[cfg(unix)]
+	{
+		use std::os::unix::io::AsRawFd;
+		let r = unsafe { socket2::SockRef::from_raw_fd(s.as_raw_fd()) };
+		r.set_keepalive(true)?;
+	}
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	{
+		use std::os::unix::io::AsRawFd;
+		let sock = unsafe { socket2::SockRef::from_raw_fd(s.as_raw_fd()) };
+		sock.set_tcp_keepalive_idle(ka.idle)?;
+		sock.set_tcp_keepalive_interval(ka.interval)?;
+		sock.set_tcp_keepalive_retries(ka.retries)?;
+	}
+	let _ = (s, ka);
+	Ok(())
 }

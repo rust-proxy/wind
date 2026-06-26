@@ -51,6 +51,7 @@ fn spawn_relay() -> RelayHarness {
 			bind_ipv6: None,
 			bind_device: None,
 			stream_timeout: Duration::ZERO,
+			tcp_keepalive: None,
 		},
 		resolver,
 	);
