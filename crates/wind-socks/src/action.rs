@@ -112,17 +112,25 @@ async fn connect_socks5_tcp(
 fn apply_socks_keepalive(s: &tokio::net::TcpStream, ka: &TcpKeepalive) -> std::io::Result<()> {
 	#[cfg(unix)]
 	{
-		use std::os::unix::io::AsRawFd;
-		let r = unsafe { socket2::SockRef::from_raw_fd(s.as_raw_fd()) };
-		r.set_keepalive(true)?;
+		use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+		let sock = unsafe { socket2::Socket::from_raw_fd(s.as_raw_fd()) };
+		if let Err(e) = sock.set_keepalive(true) {
+			let _ = sock.into_raw_fd();
+			return Err(e);
+		}
+		let _ = sock.into_raw_fd();
 	}
 	#[cfg(any(target_os = "linux", target_os = "android"))]
 	{
-		use std::os::unix::io::AsRawFd;
-		let sock = unsafe { socket2::SockRef::from_raw_fd(s.as_raw_fd()) };
-		sock.set_tcp_keepalive_idle(ka.idle)?;
-		sock.set_tcp_keepalive_interval(ka.interval)?;
-		sock.set_tcp_keepalive_retries(ka.retries)?;
+		use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+		let sock = unsafe { socket2::Socket::from_raw_fd(s.as_raw_fd()) };
+		let socket2_ka = socket2::TcpKeepalive::new()
+			.with_time(ka.idle)
+			.with_interval(ka.interval)
+			.with_retries(ka.retries);
+		let res = sock.set_tcp_keepalive(&socket2_ka);
+		let _ = sock.into_raw_fd();
+		res?
 	}
 	let _ = (s, ka);
 	Ok(())
