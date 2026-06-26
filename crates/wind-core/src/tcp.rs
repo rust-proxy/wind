@@ -32,8 +32,8 @@ pub struct TcpKeepalive {
 impl Default for TcpKeepalive {
 	fn default() -> Self {
 		Self {
-			idle: Duration::from_secs(60),
-			interval: Duration::from_secs(10),
+			idle: Duration::from_secs(300),
+			interval: Duration::from_secs(75),
 			retries: 3,
 		}
 	}

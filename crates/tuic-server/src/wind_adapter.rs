@@ -85,7 +85,7 @@ fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc
 			password: rule.password.clone(),
 			allow_udp: rule.allow_udp,
 			stream_timeout: Duration::ZERO,
-			tcp_keepalive: None,
+			tcp_keepalive: Some(wind_core::tcp::TcpKeepalive::default()),
 		})),
 		_ => Arc::new(DirectOutbound::new(
 			DirectOutboundOpts {
@@ -93,7 +93,7 @@ fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc
 				bind_ipv6: rule.bind_ipv6,
 				bind_device: rule.bind_device.clone(),
 				stream_timeout: Duration::ZERO,
-				tcp_keepalive: None,
+				tcp_keepalive: Some(wind_core::tcp::TcpKeepalive::default()),
 			},
 			resolver,
 		)),
