@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 pub use wind_core::quic::QuicCongestionControl;
 
@@ -85,8 +86,9 @@ pub struct Bbr2gcConfig {
 	/// Count app-limited rounds with no bandwidth growth toward the
 	/// exit-startup rounds threshold.
 	pub ignore_app_limited_for_no_bandwidth_growth: Option<bool>,
-	/// Initial pacing rate (bytes/sec) before an RTT estimate is available.
-	pub initial_pacing_rate_bytes_per_second: Option<u64>,
+	/// Initial pacing rate before an RTT estimate is available. Accepts a
+	/// human-readable size like `"1.25 MB"` (interpreted as bytes/sec).
+	pub initial_pacing_rate_bytes_per_second: Option<ByteSize>,
 	/// Scale the pacing rate when the MSS changes during PMTUD.
 	pub scale_pacing_rate_by_mss: Option<bool>,
 	/// Disable the `has_stayed_long_enough_in_probe_down` early exit.

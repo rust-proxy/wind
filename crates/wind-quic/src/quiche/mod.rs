@@ -80,7 +80,7 @@ fn quiche_bbr_params(c: &crate::config::Bbr2gcConfig) -> tokio_quiche::quiche::B
 			Strategy::Cwnd => QuicheStrategy::CwndReduction,
 		}),
 		ignore_app_limited_for_no_bandwidth_growth: c.ignore_app_limited_for_no_bandwidth_growth,
-		initial_pacing_rate_bytes_per_second: c.initial_pacing_rate_bytes_per_second,
+		initial_pacing_rate_bytes_per_second: c.initial_pacing_rate_bytes_per_second.map(|b| b.0),
 		scale_pacing_rate_by_mss: c.scale_pacing_rate_by_mss,
 		disable_probe_down_early_exit: c.disable_probe_down_early_exit,
 		time_sent_set_to_now: c.time_sent_set_to_now,
