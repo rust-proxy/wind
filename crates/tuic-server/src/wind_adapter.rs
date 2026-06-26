@@ -23,7 +23,7 @@
 //!    `"default"` handler; any other name looks up a named outbound.
 //! 4. **Outbound dispatch** via the `Dispatcher` / `OutboundAction` trait.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 // `WrapErr` is only used by the quiche cert helpers (the `quiche` feature).
 #[cfg(feature = "quiche")]
@@ -84,12 +84,14 @@ fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc
 			username: rule.username.clone(),
 			password: rule.password.clone(),
 			allow_udp: rule.allow_udp,
+			stream_timeout: Duration::ZERO,
 		})),
 		_ => Arc::new(DirectOutbound::new(
 			DirectOutboundOpts {
 				bind_ipv4: rule.bind_ipv4,
 				bind_ipv6: rule.bind_ipv6,
 				bind_device: rule.bind_device.clone(),
+				stream_timeout: Duration::ZERO,
 			},
 			resolver,
 		)),

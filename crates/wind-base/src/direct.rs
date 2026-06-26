@@ -1,11 +1,15 @@
 use std::{
 	net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 	sync::Arc,
+	time::Duration,
 };
 
 use async_trait::async_trait;
 use socket2::{Domain, Socket, Type};
-use tokio::net::{TcpSocket, TcpStream, UdpSocket};
+use tokio::{
+	io::AsyncWriteExt,
+	net::{TcpSocket, TcpStream, UdpSocket},
+};
 use tracing::Instrument;
 use wind_core::{
 	OutboundAction,
@@ -23,6 +27,11 @@ pub struct DirectOutboundOpts {
 	pub bind_ipv4: Option<Ipv4Addr>,
 	pub bind_ipv6: Option<Ipv6Addr>,
 	pub bind_device: Option<String>,
+	/// Half-close idle timeout for the TCP relay.  Once one side sends FIN,
+	/// the relay is reaped after this much inactivity so the still-open
+	/// socket doesn't linger in CLOSE_WAIT for the lifetime of the parent
+	/// connection.  Set to `Duration::ZERO` to disable.
+	pub stream_timeout: Duration,
 }
 
 /// Direct outbound handler – connects to the target without any proxy.
@@ -44,7 +53,10 @@ impl OutboundAction for DirectOutbound {
 		async move {
 			let target_sa = resolve_target(&target, self.resolver.as_ref()).await?;
 			let mut target_stream = connect_direct_tcp(target_sa, &self.opts).await?;
-			if let (_, _, Some(e)) = wind_core::io::copy_io(&mut stream, &mut target_stream).await {
+			let (_, _, err) =
+				wind_core::io::copy_bidirectional(&mut stream, &mut target_stream, self.opts.stream_timeout).await;
+			_ = target_stream.shutdown().await;
+			if let Some(e) = err {
 				tracing::debug!(error = %e, "direct copy_bidirectional ended");
 			}
 			Ok(())

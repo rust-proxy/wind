@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use fast_socks5::client::{Config as Socks5Config, Socks5Stream};
-use tokio::net::TcpStream;
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tracing::Instrument;
 use wind_core::{OutboundAction, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
 
@@ -14,6 +16,10 @@ pub struct Socks5ActionOpts {
 	pub password: Option<String>,
 	/// Whether to allow UDP traffic (sent directly, not over SOCKS5).
 	pub allow_udp: Option<bool>,
+	/// Half-close idle timeout for the TCP relay.  Once one side sends FIN,
+	/// the relay is reaped after this much inactivity.  Set to
+	/// `Duration::ZERO` to disable.
+	pub stream_timeout: Duration,
 }
 
 /// SOCKS5 outbound handler implementing the object-safe `OutboundAction` trait.
@@ -33,7 +39,9 @@ impl OutboundAction for Socks5Action {
 		let span = tracing::debug_span!("socks5_tcp", target = %target, addr = %self.opts.addr);
 		async move {
 			let mut socks_stream = connect_socks5_tcp(&self.opts.addr, &target, &self.opts).await?;
-			if let (_, _, Some(e)) = wind_core::io::copy_io(&mut stream, &mut socks_stream).await {
+			let (_, _, err) = wind_core::io::copy_bidirectional(&mut stream, &mut socks_stream, self.opts.stream_timeout).await;
+			_ = socks_stream.shutdown().await;
+			if let Some(e) = err {
 				tracing::debug!(error = %e, "socks5 copy_bidirectional ended");
 			}
 			Ok(())
