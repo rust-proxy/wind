@@ -83,12 +83,19 @@ impl From<&[u8]> for UserId {
 }
 
 impl fmt::Display for UserId {
-	/// Render as UTF-8 when the bytes are valid (string- or UUID-string-derived
-	/// ids print verbatim), otherwise as lowercase hex.
+	/// Render as text when the bytes are valid UTF-8 *and* free of control
+	/// characters (string-derived ids like usernames or `static:<uuid>` print
+	/// verbatim), otherwise as lowercase hex.
+	///
+	/// The control-character guard matters: binary identities such as the
+	/// panel-id encoding (`b'P'` + big-endian `i64`) or raw 16-byte UUIDs are
+	/// frequently *valid* UTF-8 — small ids are mostly NUL bytes — so a plain
+	/// `from_utf8` check would emit raw control bytes and garble the log panel.
+	/// Falling back to hex keeps those ids readable and copy-pasteable.
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match std::str::from_utf8(&self.0) {
-			Ok(s) => f.write_str(s),
-			Err(_) => {
+			Ok(s) if !s.chars().any(char::is_control) => f.write_str(s),
+			_ => {
 				for b in self.0.iter() {
 					write!(f, "{b:02x}")?;
 				}
@@ -353,5 +360,28 @@ mod tests {
 		let auth = StaticUserPass::new("alice", "pw");
 		assert_eq!(auth.authenticate("alice", "pw").await, Some(UserId::from("alice")));
 		assert!(auth.authenticate("alice", "bad").await.is_none());
+	}
+
+	#[test]
+	fn display_renders_printable_ids_verbatim() {
+		assert_eq!(UserId::from("alice").to_string(), "alice");
+		assert_eq!(UserId::from("static:abc-123").to_string(), "static:abc-123");
+		// Non-ASCII but printable text stays verbatim.
+		assert_eq!(UserId::from("用户").to_string(), "用户");
+	}
+
+	#[test]
+	fn display_hexes_binary_ids_without_emitting_control_bytes() {
+		// The panel-id encoding (`b'P'` + big-endian i64) is valid UTF-8 for
+		// small ids (mostly NUL bytes) — it must NOT print as raw control bytes.
+		let mut panel = vec![b'P'];
+		panel.extend_from_slice(&42i64.to_be_bytes());
+		let shown = UserId::from(panel).to_string();
+		assert_eq!(shown, "50000000000000002a");
+		assert!(!shown.chars().any(char::is_control), "log output must be control-char free");
+
+		// Raw UUID bytes likewise fall back to hex rather than garbling.
+		let uuid = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+		assert_eq!(UserId::from(uuid).to_string(), "0123456789abcdef0123456789abcdef");
 	}
 }
