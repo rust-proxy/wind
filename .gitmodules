@@ -2,3 +2,7 @@
 	path = forks/rustls-acme
 	url = https://github.com/rust-proxy/rustls-acme
 	branch = main-fork
+[submodule "patches/quiche"]
+	path = patches/quiche
+	url = https://github.com/rust-proxy/quiche.git
+	branch = patch-wind
