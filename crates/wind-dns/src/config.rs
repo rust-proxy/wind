@@ -15,9 +15,14 @@ use wind_core::StackPrefer;
 #[serde(rename_all = "kebab-case")]
 #[educe(Default)]
 pub enum DnsMode {
+	// `System` is the default: it preserves the legacy behaviour documented on
+	// `DnsConfig` ("Defaults to the OS resolver"). The default previously sat on
+	// `CloudflareTls`, which silently rerouted every outbound lookup through
+	// Cloudflare DoT for users who omitted the `[dns]` section -- a behaviour and
+	// privacy change that also breaks environments where port 853 is blocked.
+	#[educe(Default)]
 	System,
 	Cloudflare,
-	#[educe(Default)]
 	CloudflareTls,
 	CloudflareHttps,
 	Google,
@@ -91,6 +96,14 @@ mod tests {
 		let cfg: DnsConfig = toml::from_str("").unwrap();
 		assert_eq!(cfg.mode, DnsMode::default());
 		assert_eq!(cfg.stack_prefer, StackPrefer::V4first);
+	}
+
+	#[test]
+	fn default_mode_is_system_matching_docs() {
+		// The documented default is the OS resolver (backward compatibility);
+		// it must not silently route lookups through Cloudflare DoT.
+		assert_eq!(DnsMode::default(), DnsMode::System);
+		assert_eq!(DnsConfig::default().mode, DnsMode::System);
 	}
 
 	#[test]
