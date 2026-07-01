@@ -37,8 +37,8 @@ figment-json5 = "0.1.1"
 educe = { version = "0.6", default-features = false, features = ["Default"] }
 humantime-serde = "1"
 socket2 = { version = "0.6", default-features = false }
-socks5-proto = { version = "0.3", default-features = false }
-socks5-server = { version = "0.8", default-features = false }
+socks5-proto = { version = "0.4", default-features = false }
+socks5-server = { version = "0.10", default-features = false }
 
 uuid = { version = "1", default-features = false, features = ["serde", "std"] }
 
@@ -69,7 +69,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["t
 chrono = "0.4"
 tracing = "0.1"
 
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
