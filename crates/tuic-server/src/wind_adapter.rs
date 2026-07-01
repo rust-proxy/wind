@@ -87,7 +87,7 @@ fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc
 			stream_timeout: Duration::ZERO,
 			tcp_keepalive: Some(wind_core::tcp::TcpKeepalive::default()),
 		})),
-		_ => Arc::new(DirectOutbound::new(
+		"direct" => Arc::new(DirectOutbound::new(
 			DirectOutboundOpts {
 				bind_ipv4: rule.bind_ipv4,
 				bind_ipv6: rule.bind_ipv6,
@@ -97,6 +97,27 @@ fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc
 			},
 			resolver,
 		)),
+		// An unknown outbound type (typically a typo such as "Socks5" or
+		// "sock5") must NOT silently become a direct outbound: that would send
+		// traffic out via the server's own IP instead of the intended tunnel.
+		// Warn loudly and fall back to direct so the misconfiguration is
+		// visible in logs rather than being a silent security downgrade.
+		other => {
+			tracing::warn!(
+				outbound_type = %other,
+				"unknown outbound type; falling back to DIRECT. Expected \"direct\" or \"socks5\""
+			);
+			Arc::new(DirectOutbound::new(
+				DirectOutboundOpts {
+					bind_ipv4: rule.bind_ipv4,
+					bind_ipv6: rule.bind_ipv6,
+					bind_device: rule.bind_device.clone(),
+					stream_timeout: Duration::ZERO,
+					tcp_keepalive: Some(wind_core::tcp::TcpKeepalive::default()),
+				},
+				resolver,
+			))
+		}
 	}
 }
 
