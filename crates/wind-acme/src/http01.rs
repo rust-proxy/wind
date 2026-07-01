@@ -183,7 +183,7 @@ pub async fn ensure_acme_cert(
 	}
 
 	tokio::fs::write(cert_path, cert_chain_pem).await?;
-	tokio::fs::write(key_path, private_key_pem).await?;
+	crate::write_key_file(key_path, private_key_pem.as_bytes()).await?;
 
 	info!("cert issued and saved");
 
