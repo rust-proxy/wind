@@ -24,10 +24,20 @@ address = {
     | any_addr 
 }
 
-// Special keywords
-localhost_kw = { "localhost" }
-private_kw = { "private" }
-suffix_localhost = { "suffix:localhost" }
+// Special keywords.
+//
+// These must be atomic (`@{}`) and carry a trailing boundary assertion, like
+// `ipv6` does. Without the boundary, a bare literal like `"private"` matches
+// the prefix of a longer token: `proxy privatetracker.org` would parse as
+// `addr = private, hijack = "tracker.org"`, silently routing the whole RFC1918
+// range to `proxy` while ignoring the intended domain. The boundary forces the
+// keyword to be a complete token (followed by whitespace or end-of-input);
+// `privatetracker.org` then falls through to the `domain` rule as intended.
+// (A non-atomic rule would let pest consume the following whitespace before the
+// lookahead runs, defeating it -- hence `@{}`.)
+localhost_kw = @{ "localhost" ~ &(WHITESPACE | EOI) }
+private_kw = @{ "private" ~ &(WHITESPACE | EOI) }
+suffix_localhost = @{ "suffix:localhost" ~ &(WHITESPACE | EOI) }
 any_addr = { "*" }
 
 // IP addresses

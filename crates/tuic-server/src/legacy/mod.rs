@@ -935,6 +935,26 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn keyword_prefix_of_domain_is_not_swallowed() {
+		// `private`/`localhost` must be complete tokens, not prefixes. Before the
+		// boundary assertion, `proxy privatetracker.org` parsed as
+		// addr=Private + hijack="tracker.org", silently rerouting all of RFC1918.
+		let result = parse_acl_rule("proxy privatetracker.org").unwrap();
+		assert_eq!(result.outbound, "proxy");
+		assert_eq!(result.addr, AclAddress::Domain("privatetracker.org".into()));
+		assert_eq!(result.hijack, None);
+
+		let result = parse_acl_rule("allow localhost5.com").unwrap();
+		assert_eq!(result.addr, AclAddress::Domain("localhost5.com".into()));
+		assert_eq!(result.ports, None);
+		assert_eq!(result.hijack, None);
+
+		// The bare keywords still parse as keywords.
+		assert_eq!(parse_acl_rule("allow private").unwrap().addr, AclAddress::Private);
+		assert_eq!(parse_acl_rule("allow localhost").unwrap().addr, AclAddress::Localhost);
+	}
+
+	#[tokio::test]
 	async fn any_match() {
 		let rule = AclRule {
 			addr: AclAddress::Any,
