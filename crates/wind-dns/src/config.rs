@@ -35,7 +35,12 @@ pub enum DnsMode {
 /// non-`System` mode is selected, outbound FQDN lookups are routed through a
 /// Hickory DNS resolver built from these settings.
 #[derive(Debug, Clone, Deserialize, Serialize, Educe)]
-#[serde(deny_unknown_fields)]
+// `#[serde(default)]` on the container is required in addition to `educe`:
+// educe only affects `Default::default()`, not serde. Without it, writing e.g.
+// `[dns]\nmode = "google"` (omitting `stack_prefer`) fails with
+// "missing field `stack_prefer`". The container default fills any omitted field
+// from `Default::default()` while `deny_unknown_fields` still rejects typos.
+#[serde(default, deny_unknown_fields)]
 #[educe(Default)]
 pub struct DnsConfig {
 	/// Resolver mode. See [`DnsMode`].
@@ -65,4 +70,31 @@ pub struct DnsConfig {
 	/// IP stack preference. Default: v4first (A first, then AAAA).
 	#[educe(Default(expression = StackPrefer::V4first))]
 	pub stack_prefer: StackPrefer,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn partial_table_fills_missing_fields_from_default() {
+		// Omitting `stack_prefer` (and everything but `mode`) must not fail with
+		// "missing field"; the container `#[serde(default)]` fills the rest.
+		let cfg: DnsConfig = toml::from_str("mode = \"google\"").unwrap();
+		assert_eq!(cfg.mode, DnsMode::Google);
+		assert_eq!(cfg.stack_prefer, StackPrefer::V4first);
+		assert!(cfg.servers.is_empty());
+	}
+
+	#[test]
+	fn empty_table_is_all_defaults() {
+		let cfg: DnsConfig = toml::from_str("").unwrap();
+		assert_eq!(cfg.mode, DnsMode::default());
+		assert_eq!(cfg.stack_prefer, StackPrefer::V4first);
+	}
+
+	#[test]
+	fn unknown_field_is_still_rejected() {
+		assert!(toml::from_str::<DnsConfig>("mode = \"system\"\nbogus = 1").is_err());
+	}
 }

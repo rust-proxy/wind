@@ -22,3 +22,6 @@ serde = { version = "1", features = ["derive"] }
 educe = "0.6"
 eyre = "0.6"
 humantime-serde = "1"
+
+[dev-dependencies]
+toml = "1.0"
