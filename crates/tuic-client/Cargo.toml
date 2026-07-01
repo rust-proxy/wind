@@ -37,8 +37,7 @@ figment-json5 = "0.1.1"
 educe = { version = "0.6", default-features = false, features = ["Default"] }
 humantime-serde = "1"
 socket2 = { version = "0.6", default-features = false }
-socks5-proto = { version = "0.4", default-features = false }
-socks5-server = { version = "0.10", default-features = false }
+fast-socks5 = { version = "1" }
 
 uuid = { version = "1", default-features = false, features = ["serde", "std"] }
 

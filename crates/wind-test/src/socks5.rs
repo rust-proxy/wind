@@ -8,7 +8,7 @@ use tokio::{
 	net::{TcpStream, UdpSocket},
 };
 
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn setup_crypto() {
 	#[cfg(feature = "aws-lc-rs")]
 	{
@@ -437,7 +437,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
 	let cert_der = cert.cert.der().to_vec();
-	let key_der = cert.key_pair.serialize_der();
+	let key_der = cert.signing_key.serialize_der();
 
 	let tuic_opts = wind_tuic::quinn::inbound::TuicInboundOpts {
 		listen_addr: format!("127.0.0.1:{}", config.tuic_port).parse()?,

@@ -1,27 +1,29 @@
 use std::{
-	collections::HashMap,
 	io::Error as IoError,
-	net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket},
-	sync::Arc,
+	net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
 };
 
 use bytes::Bytes;
-use once_cell::sync::OnceCell;
+use fast_socks5::{new_udp_header, parse_udp_request, util::target_addr::TargetAddr as SocksTargetAddr};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use socks5_proto::Address;
-use socks5_server::AssociatedUdpSocket;
-use tokio::{net::UdpSocket, sync::RwLock as AsyncRwLock};
+use tokio::net::UdpSocket;
 use tracing::{debug, warn};
+use wind_core::{types::TargetAddr, udp::UdpPacket};
 
 use crate::error::Error;
 
-pub static UDP_SESSIONS: OnceCell<AsyncRwLock<HashMap<u16, UdpSession>>> = OnceCell::new();
-
-#[derive(Clone)]
+/// A SOCKS5 UDP-associate relay socket.
+///
+/// The socket is `connect()`-latched to the first client that sends a datagram
+/// whose source IP matches the controlling TCP connection's peer (RFC 1928 §6),
+/// after which the kernel drops datagrams from any other source. SOCKS5 UDP
+/// framing (RFC 1928 §7) is handled with `fast_socks5`'s `parse_udp_request` /
+/// `new_udp_header` helpers.
 pub struct UdpSession {
-	socket: Arc<AssociatedUdpSocket>,
+	socket: UdpSocket,
 	assoc_id: u16,
 	ctrl_addr: SocketAddr,
+	max_pkt_size: usize,
 }
 
 impl UdpSession {
@@ -58,93 +60,28 @@ impl UdpSession {
 			.map_err(|err| Error::Socket("failed to create socks5 server UDP associate socket", err))?;
 
 		Ok(Self {
-			socket: Arc::new(AssociatedUdpSocket::from((socket, max_pkt_size))),
+			socket,
 			assoc_id,
 			ctrl_addr,
+			max_pkt_size,
 		})
 	}
 
-	pub async fn send(&self, pkt: Bytes, mut src_addr: Address) -> Result<(), Error> {
-		if let Address::SocketAddress(SocketAddr::V6(v6)) = src_addr {
-			if let Some(v4) = v6.ip().to_ipv4_mapped() {
-				src_addr = Address::SocketAddress(SocketAddr::new(IpAddr::V4(v4), v6.port()));
-			}
-		}
+	/// Receive one SOCKS5 UDP datagram and return its payload and target.
+	///
+	/// On the first packet the source IP is checked against the control
+	/// connection's peer IP; a mismatch yields [`Error::WrongPacketSource`] and
+	/// the socket is left unlatched so a legitimate client can still connect.
+	pub async fn recv(&self) -> Result<(Bytes, SocksTargetAddr), Error> {
+		let mut buf = vec![0u8; self.max_pkt_size];
+		let (len, src_addr) = self.socket.recv_from(&mut buf).await?;
 
-		let src_addr_display = src_addr.to_string();
-		// `peer_addr` fails if the socket has not yet been connected (no client
-		// packet has arrived) or if the socket has been disconnected. Fall back
-		// to a placeholder rather than panicking inside a log line.
-		let dst_addr_display = self
-			.socket
-			.peer_addr()
-			.map(|a| a.to_string())
-			.unwrap_or_else(|_| "<unconnected>".to_string());
-
-		debug!(
-			"[socks5] [{ctrl_addr}] [associate] [{assoc_id:#06x}] send packet from {src_addr_display} to {dst_addr}",
-			ctrl_addr = self.ctrl_addr,
-			assoc_id = self.assoc_id,
-			dst_addr = dst_addr_display,
-		);
-
-		if let Err(err) = self.socket.send(pkt, 0, src_addr).await {
-			warn!(
-				"[socks5] [{ctrl_addr}] [associate] [{assoc_id:#06x}] send packet from {src_addr_display} to {dst_addr} \
-				 error: {err}",
-				ctrl_addr = self.ctrl_addr,
-				assoc_id = self.assoc_id,
-				dst_addr = dst_addr_display,
-			);
-
-			return Err(Error::Io(err));
-		}
-
-		Ok(())
-	}
-
-	pub async fn recv(&self) -> Result<(Bytes, Address), Error> {
-		let (pkt, frag, mut dst_addr, src_addr) = self.socket.recv_from().await?;
-
-		if let Address::SocketAddress(SocketAddr::V6(v6)) = dst_addr {
-			if let Some(v4) = v6.ip().to_ipv4_mapped() {
-				dst_addr = Address::SocketAddress(SocketAddr::new(IpAddr::V4(v4), v6.port()));
-			}
-		}
-
-		if let Ok(connected_addr) = self.socket.peer_addr() {
-			let connected_addr = match connected_addr {
-				SocketAddr::V4(addr) => {
-					if let SocketAddr::V6(_) = src_addr {
-						SocketAddr::new(addr.ip().to_ipv6_mapped().into(), addr.port())
-					} else {
-						connected_addr
-					}
-				}
-				SocketAddr::V6(addr) => {
-					if let SocketAddr::V4(_) = src_addr {
-						if let Some(ip) = addr.ip().to_ipv4_mapped() {
-							SocketAddr::new(IpAddr::V4(ip), addr.port())
-						} else {
-							connected_addr
-						}
-					} else {
-						connected_addr
-					}
-				}
-			};
-			if src_addr != connected_addr {
-				Err(IoError::other(format!("invalid source address: {src_addr}")))?;
-			}
-		} else {
-			// First-packet race: previously the UDP associate socket was
-			// `connect()`-bound to whoever sent the first datagram, with no
-			// authentication. Any off-path attacker that could send a UDP
-			// packet to the relay's bound port before the legitimate client
-			// did would permanently own the association. We now require the
-			// source IP to match the TCP control connection's peer IP before
-			// latching it in.
-			if src_addr.ip() != self.ctrl_addr.ip() {
+		// First-packet race hardening: before latching the association onto a
+		// peer, require its source IP to match the TCP control connection's peer
+		// IP. Without this an off-path attacker racing the legitimate client
+		// could permanently own the association.
+		if self.socket.peer_addr().is_err() {
+			if unmap_v4_mapped(src_addr.ip()) != unmap_v4_mapped(self.ctrl_addr.ip()) {
 				warn!(
 					"[socks5] [{ctrl_addr}] [associate] [{assoc_id:#06x}] dropping initial UDP packet from unexpected source \
 					 {src_addr} (expected client IP {ctrl_ip})",
@@ -157,21 +94,79 @@ impl UdpSession {
 			self.socket.connect(src_addr).await?;
 		}
 
+		let (frag, target_addr, payload) = parse_udp_request(&buf[..len])
+			.await
+			.map_err(|err| Error::Socks5(err.to_string()))?;
+
 		if frag != 0 {
-			Err(IoError::other("fragmented packet is not supported"))?;
+			return Err(Error::Socks5("fragmented packet is not supported".to_string()));
 		}
 
 		debug!(
-			"[socks5] [{ctrl_addr}] [associate] [{assoc_id:#06x}] receive packet from {src_addr} to {dst_addr}",
+			"[socks5] [{ctrl_addr}] [associate] [{assoc_id:#06x}] receive packet from {src_addr} to {target_addr}",
 			ctrl_addr = self.ctrl_addr,
 			assoc_id = self.assoc_id
 		);
 
-		Ok((pkt, dst_addr))
+		Ok((Bytes::copy_from_slice(payload), target_addr))
+	}
+
+	/// Send a payload back to the latched client, prefixed with a SOCKS5 UDP
+	/// header whose address identifies the remote origin. No-op until a client
+	/// has latched in (nothing to reply to yet).
+	pub async fn send(&self, payload: &[u8], src_addr: SocketAddr) -> Result<(), Error> {
+		if self.socket.peer_addr().is_err() {
+			debug!(
+				"[socks5] [{ctrl_addr}] [associate] [{assoc_id:#06x}] dropping reply, no client latched yet",
+				ctrl_addr = self.ctrl_addr,
+				assoc_id = self.assoc_id,
+			);
+			return Ok(());
+		}
+
+		let mut packet = new_udp_header(src_addr).map_err(|err| Error::Socks5(err.to_string()))?;
+		packet.extend_from_slice(payload);
+
+		self.socket.send(&packet).await?;
+		Ok(())
 	}
 
 	pub fn local_addr(&self) -> Result<SocketAddr, IoError> {
 		self.socket.local_addr()
+	}
+}
+
+/// Convert a `fast_socks5` target address into wind's [`TargetAddr`].
+pub fn convert_target_addr(addr: &SocksTargetAddr) -> TargetAddr {
+	match addr {
+		SocksTargetAddr::Ip(SocketAddr::V4(addr)) => TargetAddr::IPv4(*addr.ip(), addr.port()),
+		SocksTargetAddr::Ip(SocketAddr::V6(addr)) => TargetAddr::IPv6(*addr.ip(), addr.port()),
+		SocksTargetAddr::Domain(domain, port) => TargetAddr::Domain(domain.clone(), *port),
+	}
+}
+
+/// Best-effort origin address for a reply's SOCKS5 UDP header (RFC 1928 §7:
+/// ATYP/DST identify the remote host). Prefers the packet's recorded source,
+/// falling back to its target. Domains have no RFC codepoint here, so they are
+/// reported as `0.0.0.0:port`.
+pub fn reply_origin_socket(pkt: &UdpPacket) -> SocketAddr {
+	let origin = pkt.source.as_ref().unwrap_or(&pkt.target);
+	match origin {
+		TargetAddr::IPv4(ip, port) => SocketAddr::new((*ip).into(), *port),
+		TargetAddr::IPv6(ip, port) => SocketAddr::new((*ip).into(), *port),
+		TargetAddr::Domain(_, port) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), *port),
+	}
+}
+
+/// Unwrap an IPv4-mapped IPv6 address (`::ffff:V4`) back to IPv4 so dual-stack
+/// relay sockets compare source IPs on equal footing with IPv4 expectations.
+fn unmap_v4_mapped(ip: IpAddr) -> IpAddr {
+	match ip {
+		IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+			Some(v4) => IpAddr::V4(v4),
+			None => IpAddr::V6(v6),
+		},
+		v4 => v4,
 	}
 }
 
@@ -253,7 +248,7 @@ mod tests {
 			.expect("matching-IP packet must be accepted");
 
 		match addr {
-			Address::SocketAddress(SocketAddr::V4(v4)) => {
+			SocksTargetAddr::Ip(SocketAddr::V4(v4)) => {
 				assert_eq!(*v4.ip(), Ipv4Addr::new(1, 1, 1, 1));
 				assert_eq!(v4.port(), 53);
 			}

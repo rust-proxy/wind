@@ -4730,29 +4730,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "socks5-proto"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d91431c4672e25e372ef46bc554be8f315068c03608f99267a71ad32a12e8c4"
-dependencies = [
- "bytes",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "socks5-server"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5223c26981806584cc38c74fddf58808dbdcf4724890471ced69e7a2e8d86345"
-dependencies = [
- "async-trait",
- "bytes",
- "socks5-proto",
- "tokio",
-]
-
-[[package]]
 name = "spinning_top"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5515,6 +5492,7 @@ dependencies = [
  "crossbeam-utils",
  "educe",
  "eyre",
+ "fast-socks5",
  "figment",
  "figment-json5",
  "humantime",
@@ -5529,8 +5507,6 @@ dependencies = [
  "serde",
  "serde_yaml 0.9.34+deprecated",
  "socket2 0.6.4",
- "socks5-proto",
- "socks5-server",
  "tempfile",
  "thiserror 2.0.18",
  "tikv-jemallocator",

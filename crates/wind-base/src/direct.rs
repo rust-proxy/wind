@@ -112,10 +112,10 @@ pub async fn connect_direct_tcp(addr: SocketAddr, opts: &DirectOutboundOpts) -> 
 	// Enable TCP keepalive so the OS detects dead peers (e.g. network
 	// partition, host crash) even when the relay is idle.  Without this an
 	// idle connection appears healthy to `copy_bidirectional` forever.
-	if let Some(ref ka) = opts.tcp_keepalive {
-		if let Err(e) = apply_tcp_keepalive(&stream, ka) {
-			tracing::debug!(error = %e, "failed to set TCP keepalive on direct outbound");
-		}
+	if let Some(ref ka) = opts.tcp_keepalive
+		&& let Err(e) = apply_tcp_keepalive(&stream, ka)
+	{
+		tracing::debug!(error = %e, "failed to set TCP keepalive on direct outbound");
 	}
 
 	Ok(stream)

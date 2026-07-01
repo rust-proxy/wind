@@ -7,13 +7,13 @@ mod tests {
 	};
 
 	use quinn_udp::{RecvMeta, Transmit, UdpSocketState};
-	use rand::RngCore;
+	use rand::RngExt;
 	use socket2::Socket;
 
 	/// Generate a vector of random bytes with the specified length
 	fn generate_random_data(len: usize) -> Vec<u8> {
 		let mut data = vec![0u8; len];
-		rand::rng().fill_bytes(&mut data);
+		rand::rng().fill(&mut data[..]);
 		data
 	}
 

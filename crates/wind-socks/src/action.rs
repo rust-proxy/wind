@@ -100,10 +100,10 @@ async fn connect_socks5_tcp(
 	}
 
 	// Enable TCP keepalive with the same rationale as the direct path.
-	if let Some(ref ka) = opts.tcp_keepalive {
-		if let Err(e) = apply_socks_keepalive(stream.get_socket_ref(), ka) {
-			tracing::debug!(error = %e, "failed to set TCP keepalive on socks5 outbound");
-		}
+	if let Some(ref ka) = opts.tcp_keepalive
+		&& let Err(e) = apply_socks_keepalive(stream.get_socket_ref(), ka)
+	{
+		tracing::debug!(error = %e, "failed to set TCP keepalive on socks5 outbound");
 	}
 
 	Ok(stream)
