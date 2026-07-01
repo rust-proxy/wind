@@ -24,6 +24,23 @@ pub mod selfsigned;
 #[cfg(feature = "resolver")]
 pub use resolver::{CertPem, start_acme, start_acme_with_cert};
 
+/// Write a TLS private key to disk with owner-only permissions.
+///
+/// On Unix the file is restricted to mode `0600` so other local users cannot
+/// read the key (a plain `fs::write` leaves it at the process umask, typically
+/// `0644`). On other platforms this is a normal write.
+#[cfg(feature = "http01")]
+pub(crate) async fn write_key_file(path: &std::path::Path, contents: &[u8]) -> eyre::Result<()> {
+	tokio::fs::write(path, contents).await?;
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+
+		tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+	}
+	Ok(())
+}
+
 /// Check if a domain name is valid for ACME certificate issuance.
 pub fn is_valid_domain(hostname: &str) -> bool {
 	if hostname.is_empty() || hostname.len() > 253 {

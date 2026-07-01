@@ -24,7 +24,7 @@ pub async fn ensure_self_signed_cert_files(hostname: &str, cert_path: &Path, key
 		fs::create_dir_all(parent).await?;
 	}
 	fs::write(cert_path, cert_pem.as_bytes()).await?;
-	fs::write(key_path, key_pem.as_bytes()).await?;
+	crate::write_key_file(key_path, key_pem.as_bytes()).await?;
 	Ok(())
 }
 
