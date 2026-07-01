@@ -666,10 +666,17 @@ fn address_to_rule_types(addr: &AclAddress) -> Vec<wrule::RuleType> {
 			}
 		}
 		AclAddress::Cidr(cidr_str) => {
-			if let Ok(net) = cidr_str.parse::<ipnet::IpNet>() {
-				vec![wrule::RuleType::IpCidr(net)]
-			} else {
-				vec![]
+			// The grammar accepts prefixes like `/999` (acl.pest only bounds the
+			// digit count), so a malformed CIDR such as `10.0.0.0/99` can reach
+			// here. Warn on failure -- like the `Ip` arm above -- instead of
+			// dropping the rule silently, which would fail-open (e.g. a `reject`
+			// rule vanishing and its traffic being allowed).
+			match cidr_str.parse::<ipnet::IpNet>() {
+				Ok(net) => vec![wrule::RuleType::IpCidr(net)],
+				Err(e) => {
+					tracing::warn!("ACL entry {cidr_str:?} could not be parsed as a CIDR ({e}); rule dropped");
+					vec![]
+				}
 			}
 		}
 		AclAddress::Domain(domain) => {
