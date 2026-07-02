@@ -1,7 +1,8 @@
 //! GeoIP routing through the same `AclEngine` wiring `wind_adapter::TuicRouter`
-//! uses: a `GEOIP,CN,reject` Metacubex rule fed via `AclEngine::builder().rules()`
-//! plus a geodata database. Guards against the geodata staying unwired (which
-//! would make geo rules a silent no-op / fail-open).
+//! uses: a `GEOIP,CN,reject` Metacubex rule fed via
+//! `AclEngine::builder().rules()` plus a geodata database. Guards against the
+//! geodata staying unwired (which would make geo rules a silent no-op /
+//! fail-open).
 
 use std::{net::Ipv4Addr, sync::Arc};
 
@@ -62,7 +63,8 @@ async fn geoip_rule_routes_through_the_server_engine() {
 #[tokio::test]
 async fn geoip_rule_is_noop_without_geodata() {
 	// The exact same rule, but no database wired: it compiles yet cannot match,
-	// so the CN IP falls through (documents the fail-open the startup warning flags).
+	// so the CN IP falls through (documents the fail-open the startup warning
+	// flags).
 	let engine = AclEngine::builder("direct")
 		.rules([Rule::parse("GEOIP,CN,reject").unwrap()])
 		.build()

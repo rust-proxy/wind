@@ -142,8 +142,8 @@ struct StreamIo {
 	/// Peer FIN observed.
 	in_fin: bool,
 	/// Peer RESET_STREAM code observed on the recv side. When set, an
-	/// `Err(code)` is delivered after `pending_in` drains, so the handle sees an
-	/// error rather than a clean EOF for a truncated stream.
+	/// `Err(code)` is delivered after `pending_in` drains, so the handle sees
+	/// an error rather than a clean EOF for a truncated stream.
 	in_reset: Option<u64>,
 	/// Handle → driver data awaiting `stream_send`.
 	out_queue: VecDeque<Bytes>,

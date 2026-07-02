@@ -110,9 +110,9 @@ impl QuicSendStream for QuicheSend {
 pub struct QuicheRecv {
 	sid: u64,
 	cmd_tx: CmdTx,
-	/// Peer → application payload, fed by the worker. An `Err(code)` item is the
-	/// peer's RESET_STREAM (surfaced as an I/O error); `None` from the channel
-	/// (sender dropped) signals the peer's FIN → clean EOF.
+	/// Peer → application payload, fed by the worker. An `Err(code)` item is
+	/// the peer's RESET_STREAM (surfaced as an I/O error); `None` from the
+	/// channel (sender dropped) signals the peer's FIN → clean EOF.
 	rx: mpsc::Receiver<InboundItem>,
 	leftover: Bytes,
 }
