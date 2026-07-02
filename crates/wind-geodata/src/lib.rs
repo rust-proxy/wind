@@ -42,7 +42,16 @@ impl GeoData {
 		buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
 		buf.extend_from_slice(&[0u8; 4]);
 		buf.extend_from_slice(&payload[..]);
-		std::fs::write(cache_path, &buf)?;
+		// Write atomically: a partial write (process killed mid-write) or a
+		// concurrent builder must never leave a truncated cache that a later
+		// `open()` would read. Write to a pid-scoped temp file, then rename it
+		// into place (atomic on the same filesystem).
+		let tmp_path = cache_path.with_extension(format!("tmp.{}", std::process::id()));
+		std::fs::write(&tmp_path, &buf)?;
+		if let Err(e) = std::fs::rename(&tmp_path, cache_path) {
+			let _ = std::fs::remove_file(&tmp_path);
+			return Err(e.into());
+		}
 
 		let file = File::open(cache_path)?;
 		let mmap = unsafe { Mmap::map(&file)? };
