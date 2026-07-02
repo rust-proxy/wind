@@ -118,7 +118,7 @@ impl Server {
 	pub async fn start(cancel: CancellationToken) {
 		let server = SERVER.get().unwrap();
 
-		warn!(
+		info!(
 			"[socks5] server started, listening on {}",
 			server.listener.local_addr().unwrap()
 		);
