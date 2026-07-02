@@ -84,6 +84,15 @@ async fn main() -> eyre::Result<()> {
 		return Ok(());
 	}
 
+	// Honor `--work_dir`: change the process working directory before anything
+	// resolves relative paths (config load below, and the `init` generator).
+	// Previously this flag was parsed but never used.
+	if let Some(work_dir) = &cli.work_dir {
+		std::env::set_current_dir(work_dir)
+			.map_err(|e| eyre::eyre!("failed to set working directory to {}: {e}", work_dir.display()))?;
+		info!(target: "wind_main", "working directory set to {}", work_dir.display());
+	}
+
 	match &cli.command {
 		Some(crate::cli::Commands::Init { format }) => {
 			let default_config = PersistentConfig::default();
