@@ -275,10 +275,12 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 
 	info!("[Integration Test] Starting TUIC server on 127.0.0.1:8443...");
 	let server_handle = tokio::spawn(async move {
-		match timeout(Duration::from_secs(10), tuic_server::run(server_config)).await {
+		// Must outlast the whole test body (TCP + UDP + concurrent phases with
+		// their own timeouts); a 10s cap could kill the server mid-test.
+		match timeout(Duration::from_secs(30), tuic_server::run(server_config)).await {
 			Ok(Ok(())) => info!("[Integration Test] Server completed successfully"),
 			Ok(Err(e)) => error!("[Integration Test] Server error: {}", e),
-			Err(_) => error!("[Integration Test] Server timeout"),
+			Err(_) => info!("[Integration Test] Server timed out (expected at test end)"),
 		}
 	});
 
@@ -358,16 +360,20 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 		tokio::time::sleep(Duration::from_millis(200)).await;
 
 		let test_data = b"Hello, TUIC!";
-		test_tcp_through_socks5("127.0.0.1:1080", echo_addr, test_data, "TCP Test").await;
+		let ok = test_tcp_through_socks5("127.0.0.1:1080", echo_addr, test_data, "TCP Test").await;
 
 		info!("[TCP Test] Waiting for echo server to finish...");
 		tokio::time::sleep(Duration::from_millis(500)).await;
 
 		echo_task.abort();
 		info!("[TCP Test] TCP test completed\n");
+		ok
 	};
 
-	let _ = timeout(Duration::from_secs(6), tcp_test).await;
+	let tcp_ok = timeout(Duration::from_secs(6), tcp_test)
+		.await
+		.expect("TCP relay test timed out");
+	assert!(tcp_ok, "TCP relay through SOCKS5/TUIC failed");
 
 	let udp_test = async {
 		use std::net::{IpAddr, Ipv4Addr};
@@ -382,13 +388,17 @@ async fn test_server_client_integration() -> eyre::Result<()> {
 
 		let test_data = b"Hello, UDP through TUIC!";
 		let client_bind_addr = std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-		test_udp_through_socks5("127.0.0.1:1080", echo_addr, test_data, "UDP Test", client_bind_addr).await;
+		let ok = test_udp_through_socks5("127.0.0.1:1080", echo_addr, test_data, "UDP Test", client_bind_addr).await;
 
 		echo_task.abort();
 		info!("[UDP Test] UDP test completed\n");
+		ok
 	};
 
-	let _ = timeout(Duration::from_secs(3), udp_test).await;
+	let udp_ok = timeout(Duration::from_secs(3), udp_test)
+		.await
+		.expect("UDP relay test timed out");
+	assert!(udp_ok, "UDP relay through SOCKS5/TUIC failed");
 
 	let concurrent_test = async {
 		use fast_socks5::client::{Config, Socks5Stream};
@@ -514,6 +524,14 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 	info!("[IPv6 Test] Starting IPv6 Integration Test");
 	info!("[IPv6 Test] ========================================\n");
 
+	// Skip (rather than silently pass) when the environment has no IPv6
+	// loopback -- common on constrained CI runners. If [::1] is available we
+	// require the relay to actually work below.
+	if tokio::net::TcpListener::bind("[::1]:0").await.is_err() {
+		info!("[IPv6 Test] no IPv6 loopback available; skipping");
+		return Ok(());
+	}
+
 	let server_config = tuic_server::Config {
 		log_level: tuic_server::config::LogLevel::Debug,
 		server: "[::1]:8444".parse::<SocketAddr>()?,
@@ -547,6 +565,14 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 		max_external_packet_size: 1500,
 		stream_timeout: Duration::from_secs(60),
 		outbound: tuic_server::config::OutboundConfig::default(),
+		// The echo target is `[::1]` (loopback), so the loopback guard must be
+		// off or the relay is rejected before it reaches the outbound. The IPv4
+		// test sets this too; the IPv6 test previously relied on the default
+		// (guard on) and silently passed only because it made no assertions.
+		experimental: ExperimentalConfig {
+			drop_loopback: false,
+			..Default::default()
+		},
 		// Allow localhost connections for testing
 		acl: vec![tuic_server::legacy::AclRule {
 			outbound: "allow".to_string(),
@@ -559,10 +585,11 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 
 	info!("[IPv6 Test] Starting TUIC server on [::1]:8444...");
 	let server_handle = tokio::spawn(async move {
-		match timeout(Duration::from_secs(10), tuic_server::run(server_config)).await {
+		// Must outlast the whole test body; a 10s cap could kill it mid-test.
+		match timeout(Duration::from_secs(30), tuic_server::run(server_config)).await {
 			Ok(Ok(())) => info!("[IPv6 Test] Server completed successfully"),
 			Ok(Err(e)) => error!("[IPv6 Test] Server error: {}", e),
-			Err(_) => error!("[IPv6 Test] Server timeout"),
+			Err(_) => info!("[IPv6 Test] Server timed out (expected at test end)"),
 		}
 	});
 
@@ -648,13 +675,17 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 		tokio::time::sleep(Duration::from_millis(200)).await;
 
 		let test_data = b"Hello IPv6 TUIC!";
-		test_tcp_through_socks5("[::1]:1081", echo_addr, test_data, "IPv6 TCP Test").await;
+		let ok = test_tcp_through_socks5("[::1]:1081", echo_addr, test_data, "IPv6 TCP Test").await;
 
 		echo_task.abort();
 		info!("[IPv6 TCP Test] TCP test completed\n");
+		ok
 	};
 
-	let _ = timeout(Duration::from_secs(6), tcp_test).await;
+	let tcp_ok = timeout(Duration::from_secs(6), tcp_test)
+		.await
+		.expect("IPv6 TCP relay test timed out");
+	assert!(tcp_ok, "IPv6 TCP relay through SOCKS5/TUIC failed");
 
 	let udp_test = async {
 		use std::net::{IpAddr, Ipv6Addr};
@@ -667,13 +698,17 @@ async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
 
 		let test_data = b"Hello, IPv6 UDP through TUIC!";
 		let client_bind_addr = std::net::SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
-		test_udp_through_socks5("[::1]:1081", echo_addr, test_data, "IPv6 UDP Test", client_bind_addr).await;
+		let ok = test_udp_through_socks5("[::1]:1081", echo_addr, test_data, "IPv6 UDP Test", client_bind_addr).await;
 
 		echo_task.abort();
 		info!("[IPv6 UDP Test] UDP test completed\n");
+		ok
 	};
 
-	let _ = timeout(Duration::from_secs(3), udp_test).await;
+	let udp_ok = timeout(Duration::from_secs(3), udp_test)
+		.await
+		.expect("IPv6 UDP relay test timed out");
+	assert!(udp_ok, "IPv6 UDP relay through SOCKS5/TUIC failed");
 
 	client_handle.abort();
 	server_handle.abort();
