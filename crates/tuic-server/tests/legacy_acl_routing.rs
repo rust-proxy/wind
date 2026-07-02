@@ -1,9 +1,12 @@
 //! Routing-decision tests for the tuic-server legacy ACL dialect.
 //!
-//! These mirror tuic-server's real path: parse the space-separated legacy ACL,
-//! lower it to `wind_core::rule::Rule`s via [`acl_to_rules`], and route through
-//! a [`wind_core::AclRouter`] — the same wiring `wind_adapter::TuicRouter`
-//! uses.
+//! These parse the space-separated legacy ACL and lower it to
+//! `wind_core::rule::Rule`s via [`acl_to_rules`] — the same lowering
+//! `wind_adapter::TuicRouter` feeds into its router — then route through a
+//! [`wind_core::AclRouter`]. `TuicRouter` now compiles those rules with
+//! `wind_acl::AclEngine`, which preserves the same first-match-wins semantics
+//! (see `tests/geodata_routing.rs` for an `AclEngine`-based routing test), so
+//! these first-match assertions hold for both.
 
 use std::net::Ipv4Addr;
 

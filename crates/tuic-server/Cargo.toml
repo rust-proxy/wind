@@ -33,6 +33,7 @@ wind-socks = { path = "../wind-socks" }
 wind-tuic = { path = "../wind-tuic", features = ["server"] }
 wind-acme = { path = "../wind-acme" }
 wind-acl = { path = "../wind-acl" }
+wind-geodata = { path = "../wind-geodata" }
 
 toml = "1.0"
 clap = { version = "4", features = ["derive"] }
@@ -92,3 +93,4 @@ ip_network = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-test = "0.4"
+geosite-rs = "0.1.6"

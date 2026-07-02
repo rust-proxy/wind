@@ -29,17 +29,19 @@ use std::{sync::Arc, time::Duration};
 #[cfg(feature = "quiche")]
 use eyre::WrapErr as _;
 use tracing::Instrument;
+use wind_acl::AclEngine;
 use wind_base::{
 	direct::{DirectOutbound, DirectOutboundOpts},
 	resolve::resolve_target,
 };
 use wind_core::{
-	AclRouter, AppContext, Dispatcher, OutboundAction, RouteAction, Router, SystemResolver,
+	AppContext, Dispatcher, OutboundAction, RouteAction, Router, SystemResolver,
 	resolve::Resolver,
 	rule::Rule,
 	types::TargetAddr,
 	utils::{StackPrefer, is_private_ip},
 };
+use wind_geodata::GeoData;
 use wind_socks::action::{Socks5Action, Socks5ActionOpts};
 // The quiche backend lives behind the `quiche` cargo feature (enabled per target
 // via `.github/target.toml`).
@@ -128,11 +130,11 @@ fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>, stream
 pub struct TuicRouter {
 	ctx: Arc<TuicAppContext>,
 	resolver: Arc<dyn Resolver>,
-	acl_router: Option<AclRouter>,
+	acl_engine: Option<AclEngine>,
 }
 
 impl TuicRouter {
-	pub fn new(ctx: Arc<TuicAppContext>, resolver: Arc<dyn Resolver>) -> Self {
+	pub fn new(ctx: Arc<TuicAppContext>, resolver: Arc<dyn Resolver>, geodata: Option<Arc<GeoData>>) -> eyre::Result<Self> {
 		let converted = acl_to_rules(&ctx.cfg.acl);
 
 		let explicit: Vec<Rule> = ctx
@@ -144,7 +146,7 @@ impl TuicRouter {
 
 		let all_rules: Vec<Rule> = converted.into_iter().chain(explicit).collect();
 
-		let acl_router = if all_rules.is_empty() {
+		let acl_engine = if all_rules.is_empty() {
 			None
 		} else {
 			if !ctx.cfg.acl.is_empty() {
@@ -153,14 +155,21 @@ impl TuicRouter {
 					ctx.cfg.acl.len()
 				);
 			}
-			Some(AclRouter::new(all_rules, "default"))
+			// Route via wind-acl's AclEngine so GEOIP/GEOSITE rules resolve
+			// against the geodata database. Guards stay in `do_route` below
+			// (AclEngine's own guards are left off, so no double resolution).
+			let mut builder = AclEngine::builder("default").rules(all_rules);
+			if let Some(gd) = geodata {
+				builder = builder.geodata(gd);
+			}
+			Some(builder.build()?)
 		};
 
-		Self {
+		Ok(Self {
 			ctx,
 			resolver,
-			acl_router,
-		}
+			acl_engine,
+		})
 	}
 }
 
@@ -188,8 +197,8 @@ impl TuicRouter {
 			}
 		}
 
-		if let Some(acl_router) = &self.acl_router {
-			return acl_router.route(target, is_tcp).await;
+		if let Some(acl_engine) = &self.acl_engine {
+			return acl_engine.route(target, is_tcp).await;
 		}
 
 		Ok(RouteAction::Forward("default".to_string()))
@@ -212,13 +221,51 @@ fn build_resolver(cfg: &crate::Config) -> eyre::Result<Arc<dyn Resolver>> {
 	Ok(resolver)
 }
 
+/// Load the GeoIP / GeoSite database from config, compiling the v2ray `.dat`
+/// files into a cache under `data_dir`. Returns `None` when geodata is not
+/// configured (both files are required).
+async fn load_geodata(cfg: &crate::Config) -> eyre::Result<Option<Arc<GeoData>>> {
+	if !cfg.geodata.is_enabled() {
+		return Ok(None);
+	}
+	// `is_enabled()` guarantees both are `Some`.
+	let geosite_path = cfg.geodata.geosite.clone().unwrap();
+	let geoip_path = cfg.geodata.geoip.clone().unwrap();
+
+	let geosite_bytes = tokio::fs::read(&geosite_path)
+		.await
+		.map_err(|e| eyre::eyre!("reading geosite database {}: {e}", geosite_path.display()))?;
+	let geoip_bytes = tokio::fs::read(&geoip_path)
+		.await
+		.map_err(|e| eyre::eyre!("reading geoip database {}: {e}", geoip_path.display()))?;
+
+	let cache_path = cfg.data_dir.join("geodata.cache");
+	// Building the cache decodes + serializes + mmaps; keep it off the async
+	// runtime.
+	let geo = tokio::task::spawn_blocking(move || GeoData::build_and_open(&geosite_bytes, &geoip_bytes, &cache_path))
+		.await
+		.map_err(|e| eyre::eyre!("geodata build task panicked: {e}"))?
+		.map_err(|e| eyre::eyre!("building geodata cache: {e}"))?;
+
+	tracing::info!(
+		"[geodata] loaded geosite ({}) + geoip ({})",
+		geosite_path.display(),
+		geoip_path.display()
+	);
+	Ok(Some(Arc::new(geo)))
+}
+
 /// Assemble the routing [`Dispatcher`] (ACL router + named outbound handlers).
 ///
 /// Backend-agnostic: the dispatcher is identical for both QUIC backends, which
 /// differ only in the inbound listener paired with it.
-fn build_dispatcher(ctx: Arc<TuicAppContext>, resolver: Arc<dyn Resolver>) -> Dispatcher<TuicRouter> {
+fn build_dispatcher(
+	ctx: Arc<TuicAppContext>,
+	resolver: Arc<dyn Resolver>,
+	geodata: Option<Arc<GeoData>>,
+) -> eyre::Result<Dispatcher<TuicRouter>> {
 	let cfg = &ctx.cfg;
-	let router = TuicRouter::new(ctx.clone(), resolver.clone());
+	let router = TuicRouter::new(ctx.clone(), resolver.clone(), geodata)?;
 	let mut dispatcher = Dispatcher::new(router);
 
 	let stream_timeout = cfg.stream_timeout;
@@ -231,12 +278,13 @@ fn build_dispatcher(ctx: Arc<TuicAppContext>, resolver: Arc<dyn Resolver>) -> Di
 		dispatcher.add_handler(name.clone(), make_outbound_action(rule, resolver.clone(), stream_timeout));
 	}
 
-	dispatcher
+	Ok(dispatcher)
 }
 
 pub async fn create_inbound(ctx: Arc<TuicAppContext>) -> eyre::Result<(ServerInbound, Dispatcher<TuicRouter>)> {
 	let resolver = build_resolver(&ctx.cfg)?;
-	let dispatcher = build_dispatcher(ctx.clone(), resolver);
+	let geodata = load_geodata(&ctx.cfg).await?;
+	let dispatcher = build_dispatcher(ctx.clone(), resolver, geodata)?;
 
 	let inbound = match ctx.cfg.backend.mode {
 		BackendMode::Quinn => ServerInbound::Tuic(create_quinn_inbound(&ctx).await?),

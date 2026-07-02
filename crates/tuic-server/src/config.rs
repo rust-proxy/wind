@@ -75,6 +75,28 @@ pub struct Cli {
 	pub init: bool,
 }
 
+/// GeoIP / GeoSite database configuration.
+///
+/// Point `geosite` and `geoip` at v2ray-format `.dat` files; on startup they
+/// are compiled into a cache under `data_dir` and used to evaluate `GEOSITE` /
+/// `GEOIP` routing rules. When unset, geo rules never match.
+#[derive(Deserialize, Serialize, Educe, Clone, Debug)]
+#[educe(Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeoDataConfig {
+	/// Path to a v2ray `geosite.dat` file (domain category database).
+	pub geosite: Option<PathBuf>,
+	/// Path to a v2ray `geoip.dat` file (IP country database).
+	pub geoip: Option<PathBuf>,
+}
+
+impl GeoDataConfig {
+	/// Whether both database files are configured (both are required to build).
+	pub fn is_enabled(&self) -> bool {
+		self.geosite.is_some() && self.geoip.is_some()
+	}
+}
+
 #[derive(Deserialize, Serialize, Educe)]
 #[educe(Default)]
 #[serde(default, deny_unknown_fields)]
@@ -156,6 +178,11 @@ pub struct Config {
 
 	#[serde(default)]
 	pub dns: wind_dns::DnsConfig,
+
+	/// GeoIP / GeoSite database for `GEOIP` / `GEOSITE` routing rules. Without
+	/// it, those rules never match (and a warning is logged at startup).
+	#[serde(default)]
+	pub geodata: GeoDataConfig,
 
 	/// Old configuration fields
 	#[serde(default, rename = "self_sign")]
@@ -959,7 +986,7 @@ mod tests {
 		let result = test_parse_config(config, ".toml").await.unwrap();
 
 		assert_eq!(result.log_level, LogLevel::Warn);
-		assert_eq!(result.server, "127.0.0.1:8080".parse().unwrap());
+		assert_eq!(result.server, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
 		assert!(!result.udp_relay_ipv6);
 		assert!(result.zero_rtt_handshake);
 
@@ -1227,7 +1254,7 @@ mod tests {
 
 		// Check default values
 		assert_eq!(result.log_level, LogLevel::Info);
-		assert_eq!(result.server, "[::]:8443".parse().unwrap());
+		assert_eq!(result.server, "[::]:8443".parse::<SocketAddr>().unwrap());
 		assert!(result.udp_relay_ipv6);
 		assert!(!result.zero_rtt_handshake);
 		assert!(result.dual_stack);
@@ -1382,7 +1409,7 @@ send_window = 12345678
 
 		let result = test_parse_config(config, "").await.unwrap();
 		assert_eq!(result.log_level, LogLevel::Info);
-		assert_eq!(result.server, "127.0.0.1:8080".parse().unwrap());
+		assert_eq!(result.server, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
 	}
 
 	#[tokio::test]
@@ -1392,7 +1419,7 @@ send_window = 12345678
 
 		let result = test_parse_config(config, "").await.unwrap();
 		assert_eq!(result.log_level, LogLevel::Debug);
-		assert_eq!(result.server, "0.0.0.0:8443".parse().unwrap());
+		assert_eq!(result.server, "0.0.0.0:8443".parse::<SocketAddr>().unwrap());
 	}
 
 	#[tokio::test]
@@ -1405,7 +1432,7 @@ send_window = 12345678
 
 		let result = test_parse_config(config, ".yaml").await.unwrap();
 		assert_eq!(result.log_level, LogLevel::Warn);
-		assert_eq!(result.server, "127.0.0.1:9000".parse().unwrap());
+		assert_eq!(result.server, "127.0.0.1:9000".parse::<SocketAddr>().unwrap());
 		assert_eq!(result.tls.hostname, "yaml.test.com");
 	}
 
@@ -1416,7 +1443,7 @@ send_window = 12345678
 
 		let result = test_parse_config(config, ".json5").await.unwrap();
 		assert_eq!(result.log_level, LogLevel::Info);
-		assert_eq!(result.server, "127.0.0.1:8080".parse().unwrap());
+		assert_eq!(result.server, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
 		assert_eq!(result.tls.hostname, "test.json5.com");
 	}
 
@@ -1441,7 +1468,7 @@ send_window = 12345678
 
 		let result = test_parse_config(config, ".json5").await.unwrap();
 		assert_eq!(result.log_level, LogLevel::Warn);
-		assert_eq!(result.server, "0.0.0.0:8443".parse().unwrap());
+		assert_eq!(result.server, "0.0.0.0:8443".parse::<SocketAddr>().unwrap());
 		assert_eq!(result.tls.hostname, "unquoted.test.com");
 	}
 
@@ -1453,7 +1480,7 @@ send_window = 12345678
 		let result = test_parse_config(config, ".json5").await.unwrap();
 
 		assert_eq!(result.log_level, LogLevel::Info);
-		assert_eq!(result.server, "127.0.0.1:9443".parse().unwrap());
+		assert_eq!(result.server, "127.0.0.1:9443".parse::<SocketAddr>().unwrap());
 		assert!(!result.udp_relay_ipv6);
 		assert!(result.zero_rtt_handshake);
 
@@ -1498,7 +1525,7 @@ send_window = 12345678
 
 		let result = test_parse_config(config, ".json5").await.unwrap();
 		assert_eq!(result.log_level, LogLevel::Error);
-		assert_eq!(result.server, "192.168.1.1:8443".parse().unwrap());
+		assert_eq!(result.server, "192.168.1.1:8443".parse::<SocketAddr>().unwrap());
 		assert!(!result.tls.self_sign);
 	}
 	#[tokio::test]
@@ -1529,7 +1556,7 @@ send_window = 12345678
 		assert!(result.is_ok());
 		let config = result.unwrap();
 		assert_eq!(config.log_level, LogLevel::Info);
-		assert_eq!(config.server, "127.0.0.1:8080".parse().unwrap());
+		assert_eq!(config.server, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
 	}
 
 	#[tokio::test]
@@ -1675,7 +1702,7 @@ send_window = 12345678
 		// Use .json extension but content is TOML
 		let result = test_parse_config_with_env(config_content, ".json", env_state).await.unwrap();
 		assert_eq!(result.log_level, LogLevel::Info);
-		assert_eq!(result.server, "127.0.0.1:8443".parse().unwrap());
+		assert_eq!(result.server, "127.0.0.1:8443".parse::<SocketAddr>().unwrap());
 	}
 
 	#[tokio::test]
@@ -1712,7 +1739,7 @@ send_window = 12345678
 		// Use .toml extension but content is JSON
 		let result = test_parse_config_with_env(config_content, ".toml", env_state).await.unwrap();
 		assert_eq!(result.log_level, LogLevel::Warn);
-		assert_eq!(result.server, "127.0.0.1:9999".parse().unwrap());
+		assert_eq!(result.server, "127.0.0.1:9999".parse::<SocketAddr>().unwrap());
 	}
 
 	#[tokio::test]
@@ -1731,7 +1758,7 @@ send_window = 12345678
 			.await
 			.unwrap();
 		assert_eq!(result.log_level, LogLevel::Trace);
-		assert_eq!(result.server, "127.0.0.1:7777".parse().unwrap());
+		assert_eq!(result.server, "127.0.0.1:7777".parse::<SocketAddr>().unwrap());
 	}
 
 	#[tokio::test]

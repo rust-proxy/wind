@@ -79,6 +79,7 @@ impl AclEngine {
 			default_outbound: default_outbound.into(),
 			apernet: Vec::new(),
 			clash: Vec::new(),
+			raw: Vec::new(),
 			guards: GuardConfig::default(),
 			resolver: None,
 			inbound_name: None,
@@ -151,6 +152,9 @@ pub struct AclEngineBuilder {
 	default_outbound: String,
 	apernet: Vec<Rule>,
 	clash: Vec<Rule>,
+	/// Pre-converted `wind_core` rules supplied directly (e.g. a host's legacy
+	/// ACL already lowered to wind rules). Evaluated between apernet and clash.
+	raw: Vec<Rule>,
 	guards: GuardConfig,
 	resolver: Option<Arc<dyn Resolver>>,
 	inbound_name: Option<String>,
@@ -188,6 +192,15 @@ impl AclEngineBuilder {
 	pub fn apernet_acl_str(self, input: &str) -> eyre::Result<Self> {
 		let rules = apernet::parse_multiline(input)?;
 		Ok(self.apernet_acl(&rules))
+	}
+
+	/// Add already-lowered [`wind_core::rule::Rule`]s directly, in the given
+	/// order. Useful for hosts that convert their own config (e.g. a legacy ACL
+	/// table plus explicit rules) to wind rules before handing them off. These
+	/// are evaluated after apernet rules and before Clash rules.
+	pub fn rules(mut self, rules: impl IntoIterator<Item = Rule>) -> Self {
+		self.raw.extend(rules);
+		self
 	}
 
 	/// Enable loopback / private-range guards. Requires [`Self::resolver`].
@@ -242,14 +255,15 @@ impl AclEngineBuilder {
 		// their traffic silently falls through to later rules / the default
 		// outbound (fail-open). ASN rules (`IP-ASN`) are never supported yet.
 		if self.geodata.is_none() {
-			let (geo, asn) = self
-				.apernet
-				.iter()
-				.chain(self.clash.iter())
-				.fold((false, false), |(geo, asn), r| {
-					let (g, a) = rule_geo_kinds(r);
-					(geo || g, asn || a)
-				});
+			let (geo, asn) =
+				self.apernet
+					.iter()
+					.chain(self.raw.iter())
+					.chain(self.clash.iter())
+					.fold((false, false), |(geo, asn), r| {
+						let (g, a) = rule_geo_kinds(r);
+						(geo || g, asn || a)
+					});
 			if geo {
 				tracing::warn!(
 					"ACL contains GEOIP/GEOSITE rules but no geodata database was provided; those rules will never match. \
@@ -261,10 +275,10 @@ impl AclEngineBuilder {
 			}
 		}
 
-		// apernet-converted rules take precedence over explicit Clash rules. The
-		// IR embedding preserves source order and the optimizer preserves
-		// first-match-wins semantics.
-		let all: Vec<Rule> = self.apernet.into_iter().chain(self.clash).collect();
+		// apernet-converted rules take precedence, then directly-supplied raw
+		// rules, then explicit Clash rules. The IR embedding preserves source
+		// order and the optimizer preserves first-match-wins semantics.
+		let all: Vec<Rule> = self.apernet.into_iter().chain(self.raw).chain(self.clash).collect();
 		let ruleset = compile(Ruleset::from_rules(all, self.default_outbound));
 
 		Ok(AclEngine {
