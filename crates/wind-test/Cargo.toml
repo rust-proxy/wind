@@ -22,7 +22,7 @@ wind-socks = { version = "0.1.1", path = "../wind-socks"}
 wind-tuic = { version = "0.1.1", path = "../wind-tuic", features = ["quinn"] }
 
 bytes = "1"
-ctor = "0.6"
+ctor = "1.0"
 
 # Async
 tokio = { version = "1", default-features = false, features = ["net"] }
@@ -33,7 +33,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 
 # TLS
 rustls = "0.23"
-rcgen = "0.13"
+rcgen = "0.14"
 aws-lc-rs = { version = "*", optional = true, default-features = false }
 fast-socks5 = "1.0.0-rc.0"
 eyre = "0.6"

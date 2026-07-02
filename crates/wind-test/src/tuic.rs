@@ -129,7 +129,7 @@ impl InboundCallback for DirectCallback {
 pub fn generate_tuic_test_cert() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
 	let cert_der = CertificateDer::from(cert.cert);
-	let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+	let key_der = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
 	(vec![cert_der], PrivateKeyDer::Pkcs8(key_der))
 }
 

@@ -336,7 +336,7 @@ async fn handle_connection<C: InboundCallback>(
 
 	let conn = if zero_rtt {
 		match connecting.into_0rtt() {
-			Ok((conn, _)) => {
+			Ok(conn) => {
 				info!("accepted 0-RTT connection");
 				conn
 			}

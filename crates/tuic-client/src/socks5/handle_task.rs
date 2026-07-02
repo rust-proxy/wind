@@ -1,206 +1,181 @@
-use socks5_proto::{Address, Reply};
-use socks5_server::{
-	Associate, Bind, Connect,
-	connection::{associate, bind, connect},
+use std::{
+	net::{IpAddr, Ipv4Addr, SocketAddr},
+	sync::Arc,
 };
+
+use fast_socks5::{
+	ReplyError,
+	server::{Socks5ServerProtocol, states, wait_on_tcp},
+	util::target_addr::TargetAddr as SocksTargetAddr,
+};
+use tokio::{net::TcpStream, sync::mpsc};
 use tracing::{debug, warn};
 use wind_core::{
 	AbstractOutbound,
-	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
 };
 
-use super::{Server, UDP_SESSIONS, udp_session::UdpSession};
-use crate::wind_adapter::get_connection;
+use super::{
+	Server,
+	udp_session::{UdpSession, convert_target_addr, reply_origin_socket},
+};
+use crate::wind_adapter::{TuicOutboundAdapter, get_connection};
+
+type CommandProto = Socks5ServerProtocol<TcpStream, states::CommandRead>;
 
 impl Server {
+	/// Handle a SOCKS5 `CONNECT`: reply success and hand the raw stream to the
+	/// wind-tuic outbound, which relays it through the QUIC tunnel.
+	pub async fn handle_connect(proto: CommandProto, addr: SocksTargetAddr, peer_addr: SocketAddr) {
+		let target_addr = convert_target_addr(&addr);
+
+		let inner = match proto.reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await {
+			Ok(stream) => stream,
+			Err(err) => {
+				warn!("[socks5] [{peer_addr}] [connect] [{target_addr}] command reply error: {err}");
+				return;
+			}
+		};
+
+		match get_connection() {
+			Some(adapter) => {
+				if let Err(err) = adapter
+					.handle_tcp(target_addr.clone(), inner, None::<TuicOutboundAdapter>)
+					.await
+				{
+					warn!("[socks5] [{peer_addr}] [connect] [{target_addr}] TCP stream relay error: {err}");
+				}
+			}
+			None => {
+				warn!("[socks5] [{peer_addr}] [connect] [{target_addr}] no wind connection available");
+			}
+		}
+	}
+
+	/// Handle a SOCKS5 `UDP ASSOCIATE`: bind a relay socket, reply with its
+	/// address, then bridge SOCKS5 UDP datagrams to/from the wind-tuic outbound
+	/// via a channel-backed [`UdpStream`]. The association ends when the client
+	/// tears down the controlling TCP connection.
 	pub async fn handle_associate(
-		assoc: Associate<associate::NeedReply>,
+		proto: CommandProto,
 		assoc_id: u16,
+		peer_addr: SocketAddr,
+		reply_ip: IpAddr,
 		dual_stack: Option<bool>,
 		max_pkt_size: usize,
 	) {
-		let peer_addr = assoc.peer_addr().unwrap();
-		let local_ip = assoc.local_addr().unwrap().ip();
-
-		match UdpSession::new(assoc_id, peer_addr, local_ip, dual_stack, max_pkt_size) {
-			Ok(session) => {
-				let local_addr = session.local_addr().unwrap();
-				debug!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] bound to {local_addr}");
-
-				let mut assoc = match assoc.reply(Reply::Succeeded, Address::SocketAddress(local_addr)).await {
-					Ok(assoc) => assoc,
-					Err(err) => {
-						warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] command reply error: {err}");
-						return;
-					}
-				};
-
-				UDP_SESSIONS.get().unwrap().write().await.insert(assoc_id, session.clone());
-
-				// Create wind UdpStream channels
-				// wind_tx: packets from local SOCKS5 client → send to remote (outbound reads
-				// rx) wind_rx: packets from remote → send back to local SOCKS5 client
-				// (outbound writes tx)
-				let (local_to_remote_tx, local_to_remote_rx) = tokio::sync::mpsc::channel::<UdpPacket>(128);
-				let (remote_to_local_tx, mut remote_to_local_rx) = tokio::sync::mpsc::channel::<UdpPacket>(128);
-
-				let wind_udp_stream = UdpStream {
-					tx: remote_to_local_tx,
-					rx: local_to_remote_rx,
-				};
-
-				// Task: receive from local SOCKS5 UDP socket → forward to wind outbound
-				let session_recv = session.clone();
-				let local_to_remote_tx_clone = local_to_remote_tx.clone();
-				let handle_local_incoming_pkt = async move {
-					loop {
-						let (pkt, target_addr) = match session_recv.recv().await {
-							Ok(res) => res,
-							Err(err) => {
-								warn!(
-									"[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] failed to receive UDP packet: {err}"
-								);
-								continue;
-							}
-						};
-
-						let target = match target_addr {
-							Address::DomainAddress(domain, port) => TargetAddr::Domain(domain, port),
-							Address::SocketAddress(addr) => TargetAddr::from(addr),
-						};
-
-						let udp_pkt = UdpPacket {
-							source: None,
-							target,
-							payload: pkt,
-						};
-
-						if let Err(err) = local_to_remote_tx_clone.send(udp_pkt).await {
-							warn!(
-								"[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] failed forwarding UDP packet to wind: \
-								 {err}"
-							);
-						}
-					}
-				};
-
-				// Task: receive from wind outbound → forward back to local SOCKS5 UDP client
-				let session_send = session.clone();
-				let handle_remote_incoming_pkt = async move {
-					while let Some(pkt) = remote_to_local_rx.recv().await {
-						let src_addr = match pkt.source.or(Some(pkt.target.clone())) {
-							Some(TargetAddr::Domain(domain, port)) => Address::DomainAddress(domain, port),
-							Some(TargetAddr::IPv4(ip, port)) => {
-								Address::SocketAddress(std::net::SocketAddr::new(std::net::IpAddr::V4(ip), port))
-							}
-							Some(TargetAddr::IPv6(ip, port)) => {
-								Address::SocketAddress(std::net::SocketAddr::new(std::net::IpAddr::V6(ip), port))
-							}
-							None => Address::unspecified(),
-						};
-
-						if let Err(err) = session_send.send(pkt.payload, src_addr).await {
-							warn!(
-								"[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] failed sending UDP packet to local: \
-								 {err}"
-							);
-						}
-					}
-				};
-
-				let outbound_handle = tokio::spawn(async move {
-					match get_connection() {
-						Some(adapter) => {
-							if let Err(err) = adapter
-								.handle_udp(wind_udp_stream, None::<crate::wind_adapter::TuicOutboundAdapter>)
-								.await
-							{
-								warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] wind UDP handler error: {err}");
-							}
-						}
-						None => {
-							warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] no wind connection available");
-						}
-					}
-				});
-
-				tokio::spawn(handle_remote_incoming_pkt);
-
-				match tokio::select! {
-					res = assoc.wait_until_closed() => res,
-					_ = handle_local_incoming_pkt => unreachable!(),
-				} {
-					Ok(()) => {}
-					Err(err) => {
-						warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] associate connection error: {err}")
-					}
-				}
-
-				debug!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] stopped associating");
-
-				// `assoc_id` is `u16` and the allocator does fetch_add(Relaxed)
-				// without wraparound protection, so two concurrent SOCKS5
-				// connections can land on the same id. If a remote-side close
-				// path got there first this `remove` returns `None`; previously
-				// the trailing `.unwrap()` panicked and tore the entire SOCKS5
-				// connection handler down. Now drop the result quietly — the
-				// session is gone either way.
-				let _ = UDP_SESSIONS.get().unwrap().write().await.remove(&assoc_id);
-
-				outbound_handle.abort();
-			}
+		let session = match UdpSession::new(assoc_id, peer_addr, reply_ip, dual_stack, max_pkt_size) {
+			Ok(session) => session,
 			Err(err) => {
 				warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] failed setting up UDP associate session: {err}");
-
-				match assoc.reply(Reply::GeneralFailure, Address::unspecified()).await {
-					Ok(mut assoc) => {
-						let _ = assoc.shutdown().await;
-					}
-					Err(err) => {
-						warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] command reply error: {err}")
-					}
+				if let Err(err) = proto.reply_error(&ReplyError::GeneralFailure).await {
+					warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] command reply error: {err}");
 				}
+				return;
 			}
-		}
-	}
-
-	pub async fn handle_bind(bind: Bind<bind::NeedFirstReply>) {
-		let peer_addr = bind.peer_addr().unwrap();
-		warn!("[socks5] [{peer_addr}] [bind] command not supported");
-
-		match bind.reply(Reply::CommandNotSupported, Address::unspecified()).await {
-			Ok(mut bind) => {
-				let _ = bind.shutdown().await;
-			}
-			Err(err) => warn!("[socks5] [{peer_addr}] [bind] command reply error: {err}"),
-		}
-	}
-
-	pub async fn handle_connect(conn: Connect<connect::NeedReply>, addr: Address) {
-		let peer_addr = conn.peer_addr().unwrap();
-		let target_addr = match addr {
-			Address::DomainAddress(domain, port) => TargetAddr::Domain(domain, port),
-			Address::SocketAddress(addr) => TargetAddr::from(addr),
 		};
 
-		match conn.reply(Reply::Succeeded, Address::unspecified()).await {
-			Ok(conn) => match get_connection() {
+		let local_addr = match session.local_addr() {
+			Ok(addr) => addr,
+			Err(err) => {
+				warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] failed reading relay socket addr: {err}");
+				let _ = proto.reply_error(&ReplyError::GeneralFailure).await;
+				return;
+			}
+		};
+
+		// Reply with the relay's reachable address; `reply_success` returns the
+		// underlying control stream, whose EOF signals association teardown.
+		let mut ctrl = match proto.reply_success(SocketAddr::new(reply_ip, local_addr.port())).await {
+			Ok(ctrl) => ctrl,
+			Err(err) => {
+				warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] command reply error: {err}");
+				return;
+			}
+		};
+
+		debug!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] bound to {local_addr}");
+
+		let session = Arc::new(session);
+
+		// wind UdpStream channels.
+		//   local_to_remote: packets from the local SOCKS5 client → outbound (reads rx)
+		//   remote_to_local: packets from remote → local SOCKS5 client (outbound writes
+		// tx)
+		let (local_to_remote_tx, local_to_remote_rx) = mpsc::channel::<UdpPacket>(128);
+		let (remote_to_local_tx, mut remote_to_local_rx) = mpsc::channel::<UdpPacket>(128);
+
+		let wind_udp_stream = UdpStream {
+			tx: remote_to_local_tx,
+			rx: local_to_remote_rx,
+		};
+
+		// Drive the outbound UDP relay through the wind-tuic connection.
+		let outbound_handle = tokio::spawn(async move {
+			match get_connection() {
 				Some(adapter) => {
-					if let Err(err) = adapter
-						.handle_tcp(target_addr.clone(), conn, None::<crate::wind_adapter::TuicOutboundAdapter>)
-						.await
-					{
-						warn!("[socks5] [{peer_addr}] [connect] [{target_addr}] TCP stream relay error: {err}");
+					if let Err(err) = adapter.handle_udp(wind_udp_stream, None::<TuicOutboundAdapter>).await {
+						warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] wind UDP handler error: {err}");
 					}
 				}
 				None => {
-					warn!("[socks5] [{peer_addr}] [connect] [{target_addr}] no wind connection available");
+					warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] no wind connection available");
 				}
-			},
-			Err(err) => {
-				warn!("[socks5] [{peer_addr}] [connect] [{target_addr}] command reply error: {err}");
+			}
+		});
+
+		// remote → local: wrap replies in a SOCKS5 UDP header and send to the client.
+		let session_send = session.clone();
+		let remote_handle = tokio::spawn(async move {
+			while let Some(pkt) = remote_to_local_rx.recv().await {
+				let origin = reply_origin_socket(&pkt);
+				if let Err(err) = session_send.send(&pkt.payload, origin).await {
+					warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] failed sending UDP packet to local: {err}");
+				}
+			}
+		});
+
+		// local → remote: parse the SOCKS5 UDP header and forward payloads to the
+		// outbound.
+		let session_recv = session.clone();
+		let local_incoming = async move {
+			loop {
+				match session_recv.recv().await {
+					Ok((payload, target_addr)) => {
+						let packet = UdpPacket {
+							source: None,
+							target: convert_target_addr(&target_addr),
+							payload,
+						};
+						if local_to_remote_tx.send(packet).await.is_err() {
+							break;
+						}
+					}
+					// Dropped datagram (spoofed source or malformed header): keep
+					// serving the association rather than tearing it down.
+					Err(crate::error::Error::WrongPacketSource) | Err(crate::error::Error::Socks5(_)) => continue,
+					Err(err) => {
+						warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] failed to receive UDP packet: {err}");
+						break;
+					}
+				}
+			}
+		};
+
+		// The association lives until either the client closes the control TCP
+		// connection or the relay loop stops.
+		tokio::select! {
+			_ = local_incoming => {}
+			res = wait_on_tcp(&mut ctrl) => {
+				if let Err(err) = res {
+					debug!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] control connection closed: {err}");
+				}
 			}
 		}
+
+		debug!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] stopped associating");
+
+		outbound_handle.abort();
+		remote_handle.abort();
 	}
 }
