@@ -359,19 +359,31 @@ pub fn deserialize_server<'de, D>(deserializer: D) -> Result<(String, u16), D::E
 where
 	D: Deserializer<'de>,
 {
-	let mut s = String::deserialize(deserializer)?;
+	let s = String::deserialize(deserializer)?;
 
-	let (domain, port) = s.rsplit_once(':').ok_or(DeError::custom("invalid server address"))?;
-
-	let port = port.parse().map_err(DeError::custom)?;
-	s.truncate(domain.len());
-
-	// Strip brackets from IPv6 addresses (e.g., "[::1]" -> "::1")
-	if s.starts_with('[') && s.ends_with(']') {
-		s = s[1..s.len() - 1].to_string();
+	// Bracketed IPv6: "[host]:port" — the host may itself contain colons.
+	if let Some(rest) = s.strip_prefix('[') {
+		let (host, after) = rest
+			.split_once(']')
+			.ok_or_else(|| DeError::custom("unterminated '[' in IPv6 server address"))?;
+		let port = after
+			.strip_prefix(':')
+			.ok_or_else(|| DeError::custom("expected ':port' after ']' in server address"))?;
+		let port = port.parse().map_err(DeError::custom)?;
+		return Ok((host.to_string(), port));
 	}
 
-	Ok((s, port))
+	let (host, port) = s
+		.rsplit_once(':')
+		.ok_or_else(|| DeError::custom("server address must be 'host:port'"))?;
+	// A leftover colon in the host means an unbracketed IPv6 literal, which is
+	// ambiguous (`rsplit_once` would treat part of the address as the port).
+	if host.contains(':') {
+		return Err(DeError::custom("IPv6 server address must be bracketed as '[addr]:port'"));
+	}
+	let port = port.parse().map_err(DeError::custom)?;
+
+	Ok((host.to_string(), port))
 }
 
 pub fn deserialize_password<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
@@ -443,6 +455,26 @@ impl From<toml::de::Error> for ConfigError {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn parse_server(s: &str) -> Result<(String, u16), serde::de::value::Error> {
+		use serde::de::IntoDeserializer;
+		deserialize_server(s.into_deserializer())
+	}
+
+	#[test]
+	fn deserialize_server_handles_ipv6_domains_and_rejects_ambiguous() {
+		assert_eq!(parse_server("example.com:443").unwrap(), ("example.com".to_string(), 443));
+		assert_eq!(parse_server("1.2.3.4:8443").unwrap(), ("1.2.3.4".to_string(), 8443));
+		assert_eq!(parse_server("[2001:db8::1]:443").unwrap(), ("2001:db8::1".to_string(), 443));
+		assert_eq!(parse_server("[::1]:8443").unwrap(), ("::1".to_string(), 8443));
+
+		// Unbracketed IPv6 is ambiguous and must be rejected, not mis-split.
+		assert!(parse_server("2001:db8::1").is_err());
+		assert!(parse_server("::1").is_err());
+		// Missing port / malformed.
+		assert!(parse_server("example.com").is_err());
+		assert!(parse_server("[2001:db8::1]").is_err());
+	}
 
 	// Helper function for testing config file parsing
 	fn test_parse_config(config_content: &str, extension: &str) -> eyre::Result<Config> {
