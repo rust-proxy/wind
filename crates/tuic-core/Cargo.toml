@@ -23,7 +23,6 @@ tokio-util = { version = "0.7", features = ["codec"] }
 num_enum = "0.7"
 snafu = "0.9"
 uuid = { version = "1", features = ["v4"] }
-hex = { package = "const-hex", version = "1" }
 
 # UDP fragment reassembly state machine
 moka = { version = "0.12", features = ["future"] }
@@ -39,3 +38,4 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 tokio-stream = "0.1"
 test-log = { version = "0.2", features = ["trace"] }
 eyre = "0.6"
+hex = { package = "const-hex", version = "1" }
