@@ -29,6 +29,14 @@ license = "MIT OR Apache-2.0"
 
 
 [workspace.dependencies]
+# NOTE: the `bbrv3` branch is intentionally pinned in Cargo.lock to the rev
+# ce60e5b5 (the tip *before* the branch was rebased onto a newer upstream quinn).
+# That newer upstream's `quinn-udp` receive-timestamps code (RECVERR cmsg
+# handling) fails to compile on musl targets (a `u32`/`usize` mismatch on
+# `cmsg_len`). Keeping the `branch` spec (rather than a `rev`) lets cargo unify
+# this with `quinn-congestions`, which also depends on the fork via `bbrv3`;
+# `cargo update` on quinn must re-pin with `--precise ce60e5b5...` until the
+# fork's musl build is fixed upstream.
 quinn = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", default-features = false }
 quinn-proto = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", default-features = false }
 quinn-congestions = { git = "https://github.com/proxy-rs/quinn-congestions.git", default-features = false }

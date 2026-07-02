@@ -336,7 +336,10 @@ async fn handle_connection<C: InboundCallback>(
 
 	let conn = if zero_rtt {
 		match connecting.into_0rtt() {
-			Ok(conn) => {
+			// This quinn rev's `into_0rtt` yields `(Connection, ZeroRttAccepted)`;
+			// the accepted-future is unused here (we just proceed with the
+			// connection, as the newer API's single-value form did).
+			Ok((conn, _zero_rtt_accepted)) => {
 				info!("accepted 0-RTT connection");
 				conn
 			}
