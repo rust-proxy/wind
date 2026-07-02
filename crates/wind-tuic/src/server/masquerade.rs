@@ -66,6 +66,13 @@ pub async fn run_masquerade<C: QuicConnection>(
 ) -> eyre::Result<()> {
 	tokio::select! {
 		_ = cancel.cancelled() => return Ok(()),
+		// Bind the parked task to the connection's lifetime. A pure-TUIC peer
+		// never fires `go`, and the per-connection teardown only cancels the
+		// acceptor/UDP child tokens — not this `cancel` — so on a normal peer
+		// disconnect this task (holding a clone of the connection handle) would
+		// otherwise stay parked until global shutdown, leaking one task and one
+		// connection handle per closed connection when masquerade is enabled.
+		_ = conn.closed() => return Ok(()),
 		_ = go.notified() => {}
 	}
 
