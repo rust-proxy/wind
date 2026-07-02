@@ -175,7 +175,14 @@ impl Server {
 
 		debug!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] stopped associating");
 
-		outbound_handle.abort();
+		// Let the outbound UDP handler wind down on its own instead of aborting
+		// it. By this point `local_incoming` has ended (or been cancelled by the
+		// select), so its `local_to_remote_tx` is dropped and the handler's input
+		// channel is closed — `handle_udp` then exits gracefully and sends the
+		// `Dissociate` to the server. `abort()` here would kill it mid-teardown,
+		// leaking the server-side association until its GC timeout. Detaching (via
+		// drop) lets the self-terminating task finish that teardown.
+		drop(outbound_handle);
 		remote_handle.abort();
 	}
 }

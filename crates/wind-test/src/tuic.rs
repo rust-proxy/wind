@@ -269,6 +269,46 @@ mod tests {
 		Ok(client)
 	}
 
+	/// A UDP association must be torn down when its local stream closes:
+	/// `handle_udp` has to return (freeing its task, assoc id, and cache entry
+	/// and sending a `Dissociate`) rather than spinning forever. Before the fix
+	/// it looped on the global token only, so `handle_udp` never returned for a
+	/// finished session — this test would hang at the join timeout.
+	#[tokio::test]
+	async fn udp_association_is_released_when_local_stream_closes() {
+		let setup = setup_tuic_server().await.expect("start TUIC server");
+		let client = connect_tuic_client(&setup).await.expect("connect TUIC client");
+
+		for _ in 0..3 {
+			let (tx_to_client, rx_at_client) = tokio::sync::mpsc::channel::<UdpPacket>(32);
+			let (tx_to_test, _rx_at_test) = tokio::sync::mpsc::channel::<UdpPacket>(32);
+			let stream = UdpStream {
+				tx: tx_to_test,
+				rx: rx_at_client,
+			};
+			let c = client.clone();
+			let handle = tokio::spawn(async move { c.handle_udp(stream, None::<TuicOutbound>).await });
+
+			// Let the association get created, then close the local side.
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			drop(tx_to_client);
+
+			// `handle_udp` must now return promptly; before the fix it spun forever.
+			tokio::time::timeout(Duration::from_secs(5), handle)
+				.await
+				.expect("handle_udp did not return after the local stream closed")
+				.expect("handle_udp task panicked")
+				.expect("handle_udp errored");
+		}
+
+		client.udp_session.run_pending_tasks().await;
+		assert_eq!(
+			client.udp_session.entry_count(),
+			0,
+			"UDP session cache entries leaked after all local streams closed"
+		);
+	}
+
 	/// A TUIC client must be able to establish a QUIC connection to the server.
 	#[tokio::test]
 	async fn test_tuic_connection() {
