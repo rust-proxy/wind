@@ -36,7 +36,7 @@ jobs:
         instrument: [simulation, memory]
         runner: [ubuntu-latest]
     steps: &codspeed-steps
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -78,7 +78,7 @@ jobs:
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'walltime')) ||
       (github.event_name == 'push' && startsWith(github.ref_name, 'v'))
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@master
