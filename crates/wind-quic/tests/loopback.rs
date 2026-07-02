@@ -260,7 +260,12 @@ async fn quinn_bulk_transfer() {
 	run_bulk(server_conn, client_conn).await;
 }
 
-#[cfg(feature = "quiche")]
+// 64-bit only: pushing ~4 MiB drives quiche's congestion controller hard, and
+// quiche 0.29's PRR recovery code panics on 32-bit targets
+// (`congestion/prr.rs` overflow). That's an upstream quiche limitation
+// unrelated to the driver buffering this test exercises, so skip it on 32-bit
+// rather than assert against a library panic.
+#[cfg(all(feature = "quiche", target_pointer_width = "64"))]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_bulk_transfer() {
 	use wind_quic::quiche;
