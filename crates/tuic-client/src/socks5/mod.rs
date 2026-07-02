@@ -41,8 +41,9 @@ impl Server {
 				cfg.username,
 				cfg.password,
 			)?)
-			.map_err(|_| "failed initializing socks5 server")
-			.unwrap();
+			// Called more than once (SERVER already initialized): return an error
+			// instead of `unwrap()`-panicking the caller.
+			.map_err(|_| Error::Socks5("socks5 server already initialized".to_string()))?;
 
 		Ok(())
 	}
