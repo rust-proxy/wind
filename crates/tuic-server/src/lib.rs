@@ -6,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 // superficial resemblance. The parser lives in this crate's `legacy` module.
 pub mod legacy;
 use wind_core::AbstractInbound;
-pub mod compat;
 pub mod config;
 pub mod error;
 pub mod log;
