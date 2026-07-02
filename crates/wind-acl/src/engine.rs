@@ -252,8 +252,8 @@ impl AclEngineBuilder {
 				});
 			if geo {
 				tracing::warn!(
-					"ACL contains GEOIP/GEOSITE rules but no geodata database was provided; \
-					 those rules will never match. Call `AclEngineBuilder::geodata(..)`."
+					"ACL contains GEOIP/GEOSITE rules but no geodata database was provided; those rules will never match. \
+					 Call `AclEngineBuilder::geodata(..)`."
 				);
 			}
 			if asn {
@@ -284,12 +284,10 @@ fn rule_geo_kinds(rule: &Rule) -> (bool, bool) {
 	match &rule.rule_type {
 		RuleType::GeoIp(_) | RuleType::SrcGeoIp(_) | RuleType::GeoSite(_) => (true, false),
 		RuleType::IpAsn(_) | RuleType::SrcIpAsn(_) => (false, true),
-		RuleType::And(rs) | RuleType::Or(rs) | RuleType::SubRule(rs, _) => rs
-			.iter()
-			.fold((false, false), |(g, a), r| {
-				let (rg, ra) = rule_geo_kinds(r);
-				(g || rg, a || ra)
-			}),
+		RuleType::And(rs) | RuleType::Or(rs) | RuleType::SubRule(rs, _) => rs.iter().fold((false, false), |(g, a), r| {
+			let (rg, ra) = rule_geo_kinds(r);
+			(g || rg, a || ra)
+		}),
 		RuleType::Not(r) => rule_geo_kinds(r),
 		_ => (false, false),
 	}

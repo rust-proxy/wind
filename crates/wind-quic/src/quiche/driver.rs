@@ -102,9 +102,9 @@ pub(crate) enum DriverCommand {
 	Close { code: u32, reason: Vec<u8> },
 	/// Wake the worker so it re-flushes a stream's buffered inbound bytes after
 	/// the handle drained its recv channel. Without this, buffered `pending_in`
-	/// data (and the FIN that follows it) could stall until some unrelated event
-	/// happened to wake the worker — e.g. on a pure-upload stream with no
-	/// reverse traffic.
+	/// data (and the FIN that follows it) could stall until some unrelated
+	/// event happened to wake the worker — e.g. on a pure-upload stream with
+	/// no reverse traffic.
 	FlushInbound(u64),
 }
 
@@ -140,8 +140,8 @@ struct StreamIo {
 	/// Total bytes currently buffered in `out_queue` (for the outbound cap).
 	out_queue_len: usize,
 	/// The handle's send back-channel receiver, parked here when `out_queue`
-	/// hit [`MAX_PENDING_OUT`]. Re-armed by `write_stream` once the queue drains
-	/// below the cap, so the local writer sees back-pressure meanwhile.
+	/// hit [`MAX_PENDING_OUT`]. Re-armed by `write_stream` once the queue
+	/// drains below the cap, so the local writer sees back-pressure meanwhile.
 	parked_out_rx: Option<mpsc::Receiver<Bytes>>,
 	/// Handle closed its send half; emit a FIN once `out_queue` drains.
 	out_done: bool,
