@@ -116,6 +116,24 @@ pub struct NaiveOutbound {
 	client: Arc<tokio::sync::RwLock<NaiveClient>>,
 }
 
+/// Extract the host from a `host:port` authority, handling bracketed IPv6.
+///
+/// `[2001:db8::1]:443` -> `2001:db8::1`, `example.com:443` -> `example.com`,
+/// `1.2.3.4:443` -> `1.2.3.4`, `example.com` -> `example.com`. A naive
+/// `split(':').next()` would return `[2001` for the IPv6 case, producing a
+/// bogus SNI.
+fn host_from_authority(authority: &str) -> &str {
+	if let Some(rest) = authority.strip_prefix('[') {
+		// Bracketed IPv6: the host is everything up to the closing bracket.
+		if let Some(end) = rest.find(']') {
+			return &rest[..end];
+		}
+	}
+	// Otherwise strip a trailing `:port` (the last colon); no colon means the
+	// whole string is the host.
+	authority.rsplit_once(':').map_or(authority, |(host, _)| host)
+}
+
 impl NaiveOutbound {
 	/// Create and start a new `NaiveOutbound`.
 	///
@@ -131,7 +149,7 @@ impl NaiveOutbound {
 		let server_name = opts
 			.server_name
 			.clone()
-			.unwrap_or_else(|| opts.server_address.split(':').next().unwrap_or("").to_string());
+			.unwrap_or_else(|| host_from_authority(&opts.server_address).to_string());
 
 		let config = NaiveClientConfig {
 			server_address: opts.server_address.clone(),
@@ -517,6 +535,15 @@ fn load_cronet_dynamic(path: Option<String>) -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn host_from_authority_handles_ipv6_and_domains() {
+		assert_eq!(host_from_authority("[2001:db8::1]:443"), "2001:db8::1");
+		assert_eq!(host_from_authority("[::1]:8443"), "::1");
+		assert_eq!(host_from_authority("example.com:443"), "example.com");
+		assert_eq!(host_from_authority("1.2.3.4:443"), "1.2.3.4");
+		assert_eq!(host_from_authority("example.com"), "example.com");
+	}
 
 	#[test]
 	fn test_opts_default() {
