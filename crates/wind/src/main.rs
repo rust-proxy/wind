@@ -52,7 +52,6 @@ impl<R: Router> Manager<R> {
 	}
 }
 
-mod util;
 use crate::{cli::Cli, conf::persistent::PersistentConfig};
 mod cli;
 mod conf;
