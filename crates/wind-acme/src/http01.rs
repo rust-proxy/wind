@@ -95,13 +95,13 @@ async fn complete_http01_challenges(order: &mut Order) -> Result<()> {
 	Ok(())
 }
 
-fn cert_not_after(cert_pem: &[u8]) -> Result<time::OffsetDateTime> {
+pub(crate) fn cert_not_after(cert_pem: &[u8]) -> Result<time::OffsetDateTime> {
 	let (_, pem) = parse_x509_pem(cert_pem).map_err(|e| eyre::eyre!("parsing certificate PEM: {e}"))?;
 	let cert = pem.parse_x509().map_err(|e| eyre::eyre!("parsing certificate DER: {e}"))?;
 	Ok(cert.validity().not_after.to_datetime())
 }
 
-fn should_renew(not_after: time::OffsetDateTime, now: time::OffsetDateTime) -> bool {
+pub(crate) fn should_renew(not_after: time::OffsetDateTime, now: time::OffsetDateTime) -> bool {
 	const RENEW_BEFORE_DAYS: i64 = 30;
 	not_after <= now + time::Duration::days(RENEW_BEFORE_DAYS)
 }

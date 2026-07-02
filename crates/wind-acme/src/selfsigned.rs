@@ -10,7 +10,15 @@ use tokio::fs;
 /// already exist. The QUIC listener loads TLS material from file paths, so both
 /// backends consume the same on-disk PEMs.
 pub async fn ensure_self_signed_cert_files(hostname: &str, cert_path: &Path, key_path: &Path) -> Result<()> {
-	if cert_path.exists() && key_path.exists() {
+	// Reuse the existing pair only if the cert is still fresh. These certs have a
+	// ~45-day validity, so returning early merely because the files exist would
+	// serve an expired cert forever after the first 45 days.
+	if cert_path.exists()
+		&& key_path.exists()
+		&& let Ok(cert_pem) = fs::read(cert_path).await
+		&& let Ok(not_after) = crate::http01::cert_not_after(&cert_pem)
+		&& !crate::http01::should_renew(not_after, time::OffsetDateTime::now_utc())
+	{
 		return Ok(());
 	}
 	let (cert, key_pair) = generate_short_lived_self_signed(hostname)?;
