@@ -63,8 +63,8 @@ jobs:
       image-name: 'tuic-server'
       platforms: 'linux/amd64,linux/arm64'
       binary-dir: './docker-bins'
-      server-binary-amd64: 'tuic-server-x86_64-linux-musl'
-      server-binary-arm64: 'tuic-server-aarch64-linux-musl'
+      server-binary-amd64: 'tuic-server-x86_64-linux-static'
+      server-binary-arm64: 'tuic-server-aarch64-linux-static'
 
   docker:
     name: Docker
@@ -75,5 +75,5 @@ jobs:
       image-name: 'wind'
       platforms: 'linux/amd64,linux/arm64'
       binary-dir: './docker-bins'
-      server-binary-amd64: 'wind-x86_64-linux-musl'
-      server-binary-arm64: 'wind-aarch64-linux-musl'
+      server-binary-amd64: 'wind-x86_64-linux-static'
+      server-binary-arm64: 'wind-aarch64-linux-static'
