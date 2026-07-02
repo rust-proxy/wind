@@ -113,6 +113,56 @@ async fn run_case<C: QuicConnection>(server: C, client: C) {
 		.expect("client.closed() should resolve after close");
 }
 
+/// One-directional bulk transfer with a deliberately slow reader.
+///
+/// Regression guard for the quiche driver's inbound/outbound buffering rewrite.
+/// The payload is many times both the per-stream channel capacity and the
+/// outbound soft cap, so the sender must back-pressure through a bounded
+/// `out_queue` (rather than growing it without bound), while the receiver's
+/// periodic pauses drive the inbound `pending_in` buffering and re-flush path.
+/// A gross break in either — lost data, an accounting bug in the queue length,
+/// or a stalled re-arm — shows up here as a mismatch or a timeout.
+async fn run_bulk<C: QuicConnection>(server: C, client: C) {
+	const LEN: usize = 4 * 1024 * 1024;
+
+	let server_task = tokio::spawn(async move {
+		let (_s_send, mut s_recv) = server.accept_bi().await.expect("accept_bi");
+		let mut buf = vec![0u8; LEN];
+		let mut got = 0usize;
+		let mut reads = 0u32;
+		while got < LEN {
+			let n = s_recv.read(&mut buf[got..]).await.expect("server read bulk");
+			if n == 0 {
+				break; // EOF
+			}
+			got += n;
+			reads += 1;
+			// Pause periodically so the inbound channel fills and the driver
+			// buffers overflow in `pending_in`, exercising the re-flush wakeup.
+			if reads % 16 == 0 {
+				tokio::time::sleep(Duration::from_millis(1)).await;
+			}
+		}
+		buf.truncate(got);
+		buf
+	});
+
+	let (mut c_send, _c_recv) = client.open_bi().await.expect("open_bi");
+	let payload: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+	c_send.write_all(&payload).await.expect("client write bulk");
+	c_send.finish().expect("client finish bulk");
+
+	let got = tokio::time::timeout(Duration::from_secs(30), server_task)
+		.await
+		.expect("bulk transfer timed out (inbound re-flush stall?)")
+		.expect("server task");
+	assert_eq!(got.len(), LEN, "all bulk bytes must arrive");
+	assert_eq!(got, payload, "bulk payload must round-trip intact");
+
+	client.close(0, b"done");
+	let _ = tokio::time::timeout(Duration::from_secs(2), client.closed()).await;
+}
+
 #[cfg(feature = "quinn")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quinn_loopback() {
@@ -153,6 +203,48 @@ async fn quiche_loopback() {
 	let client_conn = client_conn.expect("client connect");
 
 	run_case(server_conn, client_conn).await;
+}
+
+#[cfg(feature = "quinn")]
+#[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
+async fn quinn_bulk_transfer() {
+	use wind_quic::quinn;
+
+	let (_dir, cert, key) = write_self_signed();
+	let (server_tls, client_tls, transport) = configs(&cert, &key);
+
+	let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+	let acceptor = quinn::bind_server(addr, &server_tls, &transport).expect("bind_server");
+	let local = acceptor.local_addr().expect("local_addr");
+
+	let server_fut = async move { acceptor.accept().await.expect("incoming").expect("server conn") };
+	let client_fut = quinn::connect(local, &client_tls, &transport);
+	let (server_conn, client_conn) = tokio::join!(server_fut, client_fut);
+	let client_conn = client_conn.expect("client connect");
+
+	run_bulk(server_conn, client_conn).await;
+}
+
+#[cfg(feature = "quiche")]
+#[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
+async fn quiche_bulk_transfer() {
+	use wind_quic::quiche;
+
+	let (_dir, cert, key) = write_self_signed();
+	let (server_tls, client_tls, transport) = configs(&cert, &key);
+
+	let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+	let mut acceptor = quiche::bind_server(addr, &server_tls, &transport, None)
+		.await
+		.expect("bind_server");
+	let local = acceptor.local_addr();
+
+	let server_fut = async move { acceptor.accept().await.expect("server conn") };
+	let client_fut = quiche::connect(local, &client_tls, &transport);
+	let (server_conn, client_conn) = tokio::join!(server_fut, client_fut);
+	let client_conn = client_conn.expect("client connect");
+
+	run_bulk(server_conn, client_conn).await;
 }
 
 /// Regression: per-user traffic accounting samples `byte_stats()` one final
