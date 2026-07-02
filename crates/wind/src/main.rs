@@ -1,7 +1,7 @@
 use std::{ops::Deref, sync::Arc, time::Duration};
 
 use clap::Parser as _;
-use tracing::{Level, info};
+use tracing::{Level, info, warn};
 use wind_core::{
 	AppContext,
 	dispatcher::{Dispatcher, OutboundAsAction, Router},
@@ -131,7 +131,11 @@ async fn main() -> eyre::Result<()> {
 	info!(target: "wind_main", "shutdown signal received, shutting down");
 	ctx.token.cancel();
 	ctx.tasks.close();
-	tokio::time::timeout(Duration::from_secs(10), ctx.tasks.wait()).await?;
+	// A drain timeout is normal when long-lived sessions are still open; treat
+	// it as a graceful (if forced) shutdown rather than a process error exit.
+	if tokio::time::timeout(Duration::from_secs(10), ctx.tasks.wait()).await.is_err() {
+		warn!(target: "wind_main", "shutdown drain timed out after 10s; forcing exit");
+	}
 
 	info!(target: "wind_main", "Shutdown complete");
 	Ok(())
