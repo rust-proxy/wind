@@ -12,6 +12,7 @@ description = "nftables-shaped intermediate representation and ACL routing engin
 # Wind framework
 wind-core = { path = "../wind-core" }
 wind-base = { path = "../wind-base" }
+wind-geodata = { path = "../wind-geodata" }
 
 # Rule parsing / matching
 pest = "2.8"
@@ -30,3 +31,5 @@ eyre = { version = "0.6" }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
 toml = "1.0"
+geosite-rs = "0.1.6"
+tempfile = "3"

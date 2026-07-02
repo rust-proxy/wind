@@ -6037,16 +6037,19 @@ version = "0.1.1"
 dependencies = [
  "derive_more",
  "eyre",
+ "geosite-rs",
  "ip_network",
  "ipnet",
  "pest",
  "pest_derive",
  "serde",
+ "tempfile",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "wind-base",
  "wind-core",
+ "wind-geodata",
 ]
 
 [[package]]
