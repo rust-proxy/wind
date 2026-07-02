@@ -468,7 +468,7 @@ mod tests {
 		assert_eq!(parse_server("[2001:db8::1]:443").unwrap(), ("2001:db8::1".to_string(), 443));
 		assert_eq!(parse_server("[::1]:8443").unwrap(), ("::1".to_string(), 8443));
 
-		// Unbracketed IPv6 is ambiguous and must be rejected, not mis-split.
+		// Unbracketed IPv6 is ambiguous and must be rejected rather than split wrong.
 		assert!(parse_server("2001:db8::1").is_err());
 		assert!(parse_server("::1").is_err());
 		// Missing port / malformed.
