@@ -78,9 +78,9 @@ impl wind_core::AbstractInbound for ServerInbound {
 
 /// Build an [`OutboundAction`] for a single configured outbound rule.
 ///
-/// `stream_timeout` is the configured half-close idle timeout for relays; it was
-/// previously hardcoded to `Duration::ZERO`, silently disabling the feature and
-/// ignoring the operator's `stream_timeout` setting.
+/// `stream_timeout` is the configured half-close idle timeout for relays; it
+/// was previously hardcoded to `Duration::ZERO`, silently disabling the feature
+/// and ignoring the operator's `stream_timeout` setting.
 fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>, stream_timeout: Duration) -> Arc<dyn OutboundAction> {
 	match rule.kind.as_str() {
 		"socks5" => Arc::new(Socks5Action::new(Socks5ActionOpts {
