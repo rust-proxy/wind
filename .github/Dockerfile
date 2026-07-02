@@ -2,8 +2,8 @@ FROM alpine:latest
 
 # Accept binary names and binary dir via build-args passed by reusable workflow
 ARG BINARY_DIR=./docker-bins
-ARG SERVER_BINARY_AMD64=wind-x86_64-linux-static
-ARG SERVER_BINARY_ARM64=wind-aarch64-linux-static
+ARG SERVER_BINARY_AMD64=wind-x86_64-linux-musl
+ARG SERVER_BINARY_ARM64=wind-aarch64-linux-musl
 ARG TARGETARCH
 
 # Select correct binary based on TARGETARCH using BuildKit bind mount (no layer created)

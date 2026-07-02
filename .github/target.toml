@@ -34,34 +34,21 @@ release-name = "i686-linux"
 extra-args = "--features tuic-server/quiche"
 tool = "cross"
 
-# ==================== Linux Targets (GNU, static CRT) ====================
-#
-# These replace the former `*-unknown-linux-musl` targets. The pinned quinn
-# fork's `quinn-udp` fails to compile against musl's libc (a `u32`/`usize`
-# field-width mismatch in `linux.rs`), so build against glibc and statically
-# link the CRT (`-C target-feature=+crt-static`) to keep a self-contained
-# binary for the (alpine-based) Docker images and release archives.
-#
-# NOTE: a statically-linked glibc cannot load NSS modules, so `getaddrinfo`
-# (the `System` DNS resolver, `tokio::net::lookup_host`) does not work at
-# runtime. Configure a network resolver instead (`[dns] mode = "cloudflare-tls"`
-# etc.), which resolves over the wire via hickory and bypasses NSS.
+# ==================== Linux Targets (MUSL) ====================
 
-# 64-bit Linux (glibc, statically-linked CRT)
+# 64-bit Linux (MUSL - statically linked)
 [[target]]
 os = "ubuntu-latest"
-target = "x86_64-unknown-linux-gnu"
-release-name = "x86_64-linux-static"
+target = "x86_64-unknown-linux-musl"
+release-name = "x86_64-linux-musl"
 extra-args = "--features tuic-server/quiche"
-rustflags = "--cfg reqwest_unstable -C target-feature=+crt-static"
 tool = "cross"
 
-# 32-bit Linux (glibc, statically-linked CRT)
+# 32-bit Linux (MUSL - statically linked)
 # [[target]]
 # os = "ubuntu-latest"
-# target = "i686-unknown-linux-gnu"
-# release-name = "i686-linux-static"
-# rustflags = "--cfg reqwest_unstable -C target-feature=+crt-static"
+# target = "i686-unknown-linux-musl"
+# release-name = "i686-linux-musl"
 # tool = "cross"
 
 # ==================== ARM Linux Targets (GNU) ====================
@@ -90,34 +77,28 @@ release-name = "armv7-linux-hf"
 extra-args = "--features tuic-server/quiche"
 tool = "cross"
 
-# ==================== ARM Linux Targets (GNU, static CRT) ====================
-#
-# glibc + static CRT, replacing the musl variants (see the x86_64 static-CRT
-# note above for the rationale and the static-glibc DNS caveat).
+# ==================== ARM Linux Targets (MUSL) ====================
 
-# ARM64 Linux (glibc, statically-linked CRT)
+# ARM64 Linux (MUSL - statically linked)
 [[target]]
 os = "ubuntu-latest"
-target = "aarch64-unknown-linux-gnu"
-release-name = "aarch64-linux-static"
+target = "aarch64-unknown-linux-musl"
+release-name = "aarch64-linux-musl"
 extra-args = "--features tuic-server/quiche"
-rustflags = "--cfg reqwest_unstable -C target-feature=+crt-static"
 tool = "cross"
 
-# ARMv7 Linux (glibc, statically-linked CRT - soft float ABI)
+# ARMv7 Linux (MUSL - soft float ABI, statically linked)
 # [[target]]
 # os = "ubuntu-latest"
-# target = "armv7-unknown-linux-gnueabi"
-# release-name = "armv7-linux-static"
-# rustflags = "--cfg reqwest_unstable -C target-feature=+crt-static"
+# target = "armv7-unknown-linux-musleabi"
+# release-name = "armv7-linux-musl"
 # tool = "cross"
 
-# ARMv7 Linux (glibc, statically-linked CRT - hard float ABI)
+# ARMv7 Linux (MUSL - hard float ABI, statically linked)
 # [[target]]
 # os = "ubuntu-latest"
-# target = "armv7-unknown-linux-gnueabihf"
-# release-name = "armv7-linux-static-hf"
-# rustflags = "--cfg reqwest_unstable -C target-feature=+crt-static"
+# target = "armv7-unknown-linux-musleabihf"
+# release-name = "armv7-linux-muslhf"
 # tool = "cross"
 
 # ==================== Windows Targets ====================
