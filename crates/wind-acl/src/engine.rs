@@ -16,9 +16,10 @@ use wind_base::resolve::resolve_target;
 use wind_core::{
 	RouteAction, Router, is_private_ip,
 	resolve::Resolver,
-	rule::{InboundType, MatchContext, NetworkType, Rule},
+	rule::{InboundType, MatchContext, NetworkType, Rule, RuleType},
 	types::TargetAddr,
 };
+use wind_geodata::GeoData;
 
 use crate::{
 	Ruleset, compile,
@@ -64,6 +65,10 @@ pub struct AclEngine {
 	resolver: Option<Arc<dyn Resolver>>,
 	inbound_name: Option<String>,
 	inbound_type: Option<InboundType>,
+	/// GeoIP / GeoSite database. When present, `GEOIP` / `GEOSITE` rules match
+	/// against it; when absent those rules can never match (and a warning is
+	/// emitted at build time if any are present).
+	geodata: Option<Arc<GeoData>>,
 }
 
 impl AclEngine {
@@ -78,6 +83,7 @@ impl AclEngine {
 			resolver: None,
 			inbound_name: None,
 			inbound_type: None,
+			geodata: None,
 			hijack_seen: false,
 		}
 	}
@@ -108,6 +114,13 @@ impl AclEngine {
 			TargetAddr::IPv4(ip, p) => (None, Some(IpAddr::V4(*ip)), *p),
 			TargetAddr::IPv6(ip, p) => (None, Some(IpAddr::V6(*ip)), *p),
 		};
+
+		// Bind the geodata lookup closures to locals so their borrows of
+		// `self.geodata` outlive the `MatchContext` that references them. Without
+		// this wiring `GEOIP` / `GEOSITE` rules would silently never match.
+		let geoip_fn = self.geodata.as_ref().map(|gd| gd.geoip_lookup());
+		let geosite_fn = self.geodata.as_ref().map(|gd| gd.geosite_lookup());
+
 		let ctx = MatchContext {
 			domain,
 			dst_ip,
@@ -115,6 +128,8 @@ impl AclEngine {
 			network: Some(if is_tcp { NetworkType::Tcp } else { NetworkType::Udp }),
 			inbound_name: self.inbound_name.as_deref(),
 			inbound_type: self.inbound_type,
+			geoip_lookup: geoip_fn.as_ref().map(|f| f as &dyn Fn(&str, IpAddr) -> bool),
+			geosite_lookup: geosite_fn.as_ref().map(|f| f as &dyn Fn(&str, &str) -> bool),
 			..Default::default()
 		};
 
@@ -140,6 +155,7 @@ pub struct AclEngineBuilder {
 	resolver: Option<Arc<dyn Resolver>>,
 	inbound_name: Option<String>,
 	inbound_type: Option<InboundType>,
+	geodata: Option<Arc<GeoData>>,
 	hijack_seen: bool,
 }
 
@@ -200,6 +216,14 @@ impl AclEngineBuilder {
 		self
 	}
 
+	/// Provide the GeoIP / GeoSite database so `GEOIP` / `GEOSITE` rules can
+	/// match. Without it those rules never match (and [`Self::build`] warns if
+	/// any are present).
+	pub fn geodata(mut self, geodata: Arc<GeoData>) -> Self {
+		self.geodata = Some(geodata);
+		self
+	}
+
 	/// Finalize the engine. Errors if a guard is enabled without a resolver.
 	pub fn build(self) -> eyre::Result<AclEngine> {
 		if self.guards.enabled() && self.resolver.is_none() {
@@ -211,6 +235,30 @@ impl AclEngineBuilder {
 		let apernet_count = self.apernet.len();
 		if apernet_count > 0 {
 			tracing::info!("[acl] compiled {apernet_count} apernet ACL rule(s) to Metacubex format");
+		}
+
+		// Warn if geo rules are present but the data to evaluate them is not:
+		// without a database, `GEOIP` / `GEOSITE` rules can never match and
+		// their traffic silently falls through to later rules / the default
+		// outbound (fail-open). ASN rules (`IP-ASN`) are never supported yet.
+		if self.geodata.is_none() {
+			let (geo, asn) = self
+				.apernet
+				.iter()
+				.chain(self.clash.iter())
+				.fold((false, false), |(geo, asn), r| {
+					let (g, a) = rule_geo_kinds(r);
+					(geo || g, asn || a)
+				});
+			if geo {
+				tracing::warn!(
+					"ACL contains GEOIP/GEOSITE rules but no geodata database was provided; \
+					 those rules will never match. Call `AclEngineBuilder::geodata(..)`."
+				);
+			}
+			if asn {
+				tracing::warn!("ACL contains IP-ASN rules, which are not yet supported; those rules will never match");
+			}
 		}
 
 		// apernet-converted rules take precedence over explicit Clash rules. The
@@ -225,6 +273,24 @@ impl AclEngineBuilder {
 			resolver: self.resolver,
 			inbound_name: self.inbound_name,
 			inbound_type: self.inbound_type,
+			geodata: self.geodata,
 		})
+	}
+}
+
+/// Whether a rule (recursing through logical combinators) references a
+/// geo-database match: `.0` for GEOIP/GEOSITE, `.1` for IP-ASN.
+fn rule_geo_kinds(rule: &Rule) -> (bool, bool) {
+	match &rule.rule_type {
+		RuleType::GeoIp(_) | RuleType::SrcGeoIp(_) | RuleType::GeoSite(_) => (true, false),
+		RuleType::IpAsn(_) | RuleType::SrcIpAsn(_) => (false, true),
+		RuleType::And(rs) | RuleType::Or(rs) | RuleType::SubRule(rs, _) => rs
+			.iter()
+			.fold((false, false), |(g, a), r| {
+				let (rg, ra) = rule_geo_kinds(r);
+				(g || rg, a || ra)
+			}),
+		RuleType::Not(r) => rule_geo_kinds(r),
+		_ => (false, false),
 	}
 }
