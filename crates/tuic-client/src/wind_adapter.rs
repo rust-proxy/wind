@@ -46,7 +46,13 @@ impl TuicOutboundAdapter {
 		let sni = match relay.sni.clone() {
 			Some(s) => s,
 			None => {
-				if relay.server.0.parse::<std::net::IpAddr>().is_ok() {
+				// Strip any surrounding brackets so a bracketed IPv6 literal
+				// (`[::1]`) is recognized as an IP literal too -- otherwise the
+				// bracketed form fails `IpAddr::parse` and gets announced
+				// verbatim as the SNI, which rustls rejects ("invalid server
+				// name").
+				let host = relay.server.0.trim_start_matches('[').trim_end_matches(']');
+				if host.parse::<std::net::IpAddr>().is_ok() {
 					tracing::warn!(
 						"relay server `{}` is an IP literal but no `sni` was configured; TLS verification will likely fail. \
 						 Set `sni = \"<hostname>\"` in the relay config to fix.",
