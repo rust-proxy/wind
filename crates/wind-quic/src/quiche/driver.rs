@@ -60,6 +60,16 @@ const READ_BUF_SIZE: usize = 64 * 1024;
 /// Soft cap on buffered inbound bytes per stream before we stop draining the
 /// QUIC stream (lets flow control back-pressure the peer).
 const MAX_PENDING_IN: usize = 256 * 1024;
+/// Soft cap on buffered *outbound* bytes per stream. Once `out_queue` reaches
+/// this, the driver stops draining the handle's send back-channel until
+/// `write_stream` flushes below the cap — so a slow/flow-controlled peer
+/// back-pressures the local writer instead of letting `out_queue` grow without
+/// bound (previously a single slow peer could OOM the process).
+const MAX_PENDING_OUT: usize = 256 * 1024;
+/// Hard cap on queued outbound datagrams. Datagrams are unreliable, so the
+/// oldest are dropped past this — bounding memory when the app queues faster
+/// than the peer drains (the command channel itself is unbounded).
+const MAX_OUT_DATAGRAMS: usize = 2048;
 
 /// Command channel sender from a handle to its driver.
 pub(crate) type CmdTx = mpsc::UnboundedSender<DriverCommand>;
@@ -90,6 +100,12 @@ pub(crate) enum DriverCommand {
 	StreamShutdown { sid: u64, write: bool, code: u64 },
 	/// Close the connection.
 	Close { code: u32, reason: Vec<u8> },
+	/// Wake the worker so it re-flushes a stream's buffered inbound bytes after
+	/// the handle drained its recv channel. Without this, buffered `pending_in`
+	/// data (and the FIN that follows it) could stall until some unrelated event
+	/// happened to wake the worker — e.g. on a pure-upload stream with no
+	/// reverse traffic.
+	FlushInbound(u64),
 }
 
 /// State shared between a driver and its handle(s).
@@ -121,6 +137,12 @@ struct StreamIo {
 	in_fin: bool,
 	/// Handle → driver data awaiting `stream_send`.
 	out_queue: VecDeque<Bytes>,
+	/// Total bytes currently buffered in `out_queue` (for the outbound cap).
+	out_queue_len: usize,
+	/// The handle's send back-channel receiver, parked here when `out_queue`
+	/// hit [`MAX_PENDING_OUT`]. Re-armed by `write_stream` once the queue drains
+	/// below the cap, so the local writer sees back-pressure meanwhile.
+	parked_out_rx: Option<mpsc::Receiver<Bytes>>,
 	/// Handle closed its send half; emit a FIN once `out_queue` drains.
 	out_done: bool,
 	fin_sent: bool,
@@ -136,6 +158,8 @@ impl StreamIo {
 			pending_in_len: 0,
 			in_fin: false,
 			out_queue: VecDeque::new(),
+			out_queue_len: 0,
+			parked_out_rx: None,
 			out_done: false,
 			fin_sent: false,
 			has_send,
@@ -393,43 +417,54 @@ impl BridgeDriver {
 	}
 
 	fn write_stream(&mut self, qconn: &mut QuicheConnection, sid: u64) {
+		let mut rearm: Option<mpsc::Receiver<Bytes>> = None;
 		if let Some(st) = self.streams.get_mut(&sid)
 			&& st.has_send
 		{
-			{
-				while let Some(front) = st.out_queue.front_mut() {
-					if front.is_empty() {
-						st.out_queue.pop_front();
-						continue;
-					}
-					match qconn.stream_send(sid, front.as_ref(), false) {
-						Ok(0) => break,
-						Ok(n) => {
-							front.advance(n);
-							if front.is_empty() {
-								st.out_queue.pop_front();
-							}
-						}
-						Err(quiche::Error::Done) => break,
-						Err(e) => {
-							debug!(stream = sid, "stream_send error: {e}");
-							st.out_queue.clear();
-							st.out_done = true;
-							break;
-						}
-					}
+			while let Some(front) = st.out_queue.front_mut() {
+				if front.is_empty() {
+					st.out_queue.pop_front();
+					continue;
 				}
-				if st.out_done && st.out_queue.is_empty() && !st.fin_sent {
-					match qconn.stream_send(sid, b"", true) {
-						Ok(_) => st.fin_sent = true,
-						Err(quiche::Error::Done) => {}
-						Err(e) => {
-							debug!(stream = sid, "stream_send fin error: {e}");
-							st.fin_sent = true;
+				match qconn.stream_send(sid, front.as_ref(), false) {
+					Ok(0) => break,
+					Ok(n) => {
+						front.advance(n);
+						st.out_queue_len -= n;
+						if front.is_empty() {
+							st.out_queue.pop_front();
 						}
+					}
+					Err(quiche::Error::Done) => break,
+					Err(e) => {
+						debug!(stream = sid, "stream_send error: {e}");
+						st.out_queue.clear();
+						st.out_queue_len = 0;
+						st.out_done = true;
+						break;
 					}
 				}
 			}
+			if st.out_done && st.out_queue.is_empty() && !st.fin_sent {
+				match qconn.stream_send(sid, b"", true) {
+					Ok(_) => st.fin_sent = true,
+					Err(quiche::Error::Done) => {}
+					Err(e) => {
+						debug!(stream = sid, "stream_send fin error: {e}");
+						st.fin_sent = true;
+					}
+				}
+			}
+			// Resume draining the handle's back-channel now that we're back under
+			// the outbound cap (see `MAX_PENDING_OUT`).
+			if st.out_queue_len < MAX_PENDING_OUT
+				&& let Some(rx) = st.parked_out_rx.take()
+			{
+				rearm = Some(rx);
+			}
+		}
+		if let Some(rx) = rearm {
+			self.waiters.push(WaitOut::new(sid, rx));
 		}
 		self.maybe_cleanup(sid);
 	}
@@ -451,7 +486,17 @@ impl BridgeDriver {
 		match cmd {
 			DriverCommand::OpenBi(reply) => self.pending_opens.push_back(PendingOpen::Bi(reply)),
 			DriverCommand::OpenUni(reply) => self.pending_opens.push_back(PendingOpen::Uni(reply)),
-			DriverCommand::SendDatagram(b) => self.out_datagrams.push_back(b),
+			DriverCommand::SendDatagram(b) => {
+				self.out_datagrams.push_back(b);
+				// Bound queued datagrams: drop the oldest past the cap (datagrams
+				// are unreliable, and the command channel is unbounded).
+				while self.out_datagrams.len() > MAX_OUT_DATAGRAMS {
+					self.out_datagrams.pop_front();
+				}
+			}
+			// The wake itself is the work: `process_writes` re-flushes every
+			// stream's `pending_in` right after `wait_for_data` returns.
+			DriverCommand::FlushInbound(_sid) => {}
 			DriverCommand::Export {
 				out_len,
 				label,
@@ -538,10 +583,27 @@ impl ApplicationOverQuic for BridgeDriver {
 		match ev {
 			Ev::Out((sid, data, rx)) => match data {
 				Some(b) => {
-					if let Some(st) = self.streams.get_mut(&sid) {
-						st.out_queue.push_back(b);
+					// Buffer the chunk; re-arm the back-channel only while under
+					// the outbound cap. At/over the cap we park `rx` (stop
+					// draining) so the local writer back-pressures; `write_stream`
+					// re-arms once the queue drains. If the stream is gone, drop
+					// both `b` and `rx`.
+					let rearm = match self.streams.get_mut(&sid) {
+						Some(st) => {
+							st.out_queue_len += b.len();
+							st.out_queue.push_back(b);
+							if st.out_queue_len >= MAX_PENDING_OUT {
+								st.parked_out_rx = Some(rx);
+								None
+							} else {
+								Some(rx)
+							}
+						}
+						None => None,
+					};
+					if let Some(rx) = rearm {
+						self.waiters.push(WaitOut::new(sid, rx));
 					}
-					self.waiters.push(WaitOut::new(sid, rx));
 				}
 				None => {
 					if let Some(st) = self.streams.get_mut(&sid) {

@@ -130,8 +130,19 @@ impl QuicheRecv {
 impl AsyncRead for QuicheRecv {
 	fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
 		if self.leftover.is_empty() {
+			// If the channel was full, the driver may be holding overflow in its
+			// `pending_in` (and possibly a queued FIN). Draining it here frees a
+			// slot, so nudge the driver to re-flush — otherwise that data could
+			// stall until some other event happened to wake the worker (e.g. a
+			// pure-upload stream with no reverse traffic).
+			let was_full = self.rx.capacity() == 0;
 			match self.rx.poll_recv(cx) {
-				Poll::Ready(Some(b)) => self.leftover = b,
+				Poll::Ready(Some(b)) => {
+					self.leftover = b;
+					if was_full {
+						let _ = self.cmd_tx.send(DriverCommand::FlushInbound(self.sid));
+					}
+				}
 				// Sender dropped → peer finished sending → clean EOF.
 				Poll::Ready(None) => return Poll::Ready(Ok(())),
 				Poll::Pending => return Poll::Pending,
