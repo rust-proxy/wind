@@ -42,7 +42,13 @@ impl UdpSession {
 		let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
 			.map_err(|err| Error::Socket("failed to create socks5 server UDP associate socket", err))?;
 
-		if let Some(dual_stack) = dual_stack {
+		// `IPV6_V6ONLY` only exists on IPv6 sockets. Setting it on an IPv4 socket
+		// fails with ENOPROTOOPT ("Protocol not available"), which broke every
+		// UDP ASSOCIATE on an IPv4 SOCKS5 listener. Mirror `Server::new`: only
+		// apply the dual-stack option when this socket is actually IPv6.
+		if local_ip.is_ipv6()
+			&& let Some(dual_stack) = dual_stack
+		{
 			socket
 				.set_only_v6(!dual_stack)
 				.map_err(|err| Error::Socket("socks5 server UDP associate dual-stack socket setting error", err))?;
