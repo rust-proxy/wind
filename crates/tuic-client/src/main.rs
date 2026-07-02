@@ -34,8 +34,21 @@ async fn main() -> eyre::Result<()> {
 		}
 	};
 	let level = tracing::Level::from_str(&cfg.log_level)?;
+	// Cover the crates and custom targets the client actually logs under. The
+	// old list (`tuic`, `tuic_quinn`) predated the wind-tuic split, so relay
+	// debug (emitted under `wind_tuic` / the `tuic_out` and `udp` targets) fell
+	// through to the default INFO filter and `log_level = "debug"` was
+	// ineffective for it.
 	let filter = tracing_subscriber::filter::Targets::new()
-		.with_targets(vec![("tuic", level), ("tuic_quinn", level), ("tuic_client", level)])
+		.with_targets(vec![
+			("tuic_client", level),
+			("tuic_core", level),
+			("tuic_out", level),
+			("udp", level),
+			("wind_core", level),
+			("wind_quic", level),
+			("wind_tuic", level),
+		])
 		.with_default(LevelFilter::INFO);
 	let registry = tracing_subscriber::registry();
 	registry
