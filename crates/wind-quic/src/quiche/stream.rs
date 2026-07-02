@@ -26,7 +26,7 @@ use tokio_util::sync::PollSender;
 
 use crate::{
 	error::QuicError,
-	quiche::driver::{CmdTx, DriverCommand},
+	quiche::driver::{CmdTx, DriverCommand, InboundItem},
 	traits::{QuicRecvStream, QuicSendStream},
 };
 
@@ -110,14 +110,15 @@ impl QuicSendStream for QuicheSend {
 pub struct QuicheRecv {
 	sid: u64,
 	cmd_tx: CmdTx,
-	/// Peer → application payload, fed by the worker. `None` from the channel
-	/// (sender dropped) signals the peer's FIN → EOF.
-	rx: mpsc::Receiver<Bytes>,
+	/// Peer → application payload, fed by the worker. An `Err(code)` item is the
+	/// peer's RESET_STREAM (surfaced as an I/O error); `None` from the channel
+	/// (sender dropped) signals the peer's FIN → clean EOF.
+	rx: mpsc::Receiver<InboundItem>,
 	leftover: Bytes,
 }
 
 impl QuicheRecv {
-	pub(crate) fn new(sid: u64, cmd_tx: CmdTx, rx: mpsc::Receiver<Bytes>) -> Self {
+	pub(crate) fn new(sid: u64, cmd_tx: CmdTx, rx: mpsc::Receiver<InboundItem>) -> Self {
 		Self {
 			sid,
 			cmd_tx,
@@ -137,11 +138,19 @@ impl AsyncRead for QuicheRecv {
 			// pure-upload stream with no reverse traffic).
 			let was_full = self.rx.capacity() == 0;
 			match self.rx.poll_recv(cx) {
-				Poll::Ready(Some(b)) => {
+				Poll::Ready(Some(Ok(b))) => {
 					self.leftover = b;
 					if was_full {
 						let _ = self.cmd_tx.send(DriverCommand::FlushInbound(self.sid));
 					}
+				}
+				// Peer reset the stream → surface an error, not a truncated-but-clean
+				// EOF, so callers can tell a complete stream from an aborted one.
+				Poll::Ready(Some(Err(code))) => {
+					return Poll::Ready(Err(io::Error::new(
+						io::ErrorKind::ConnectionReset,
+						format!("quic stream reset by peer (code {code})"),
+					)));
 				}
 				// Sender dropped → peer finished sending → clean EOF.
 				Poll::Ready(None) => return Poll::Ready(Ok(())),
