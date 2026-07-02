@@ -289,8 +289,8 @@ impl<C: QuicConnection> OpenStreams<Bytes> for H3Opener<C> {
 		poll_open_send(&self.conn, &mut self.open_uni_fut, cx)
 	}
 
-	fn close(&mut self, _code: h3::error::Code, reason: &[u8]) {
-		self.conn.close(0, reason);
+	fn close(&mut self, code: h3::error::Code, reason: &[u8]) {
+		self.conn.close(h3_code_to_u32(code), reason);
 	}
 }
 
@@ -316,9 +316,16 @@ impl<C: QuicConnection> OpenStreams<Bytes> for H3Conn<C> {
 		poll_open_send(&self.conn, &mut self.open_uni_fut, cx)
 	}
 
-	fn close(&mut self, _code: h3::error::Code, reason: &[u8]) {
-		self.conn.close(0, reason);
+	fn close(&mut self, code: h3::error::Code, reason: &[u8]) {
+		self.conn.close(h3_code_to_u32(code), reason);
 	}
+}
+
+/// Map an h3 application error code onto the `u32` close code the QUIC handle
+/// accepts, saturating rather than silently discarding the code as 0 (which
+/// erased the protocol-level reason the peer saw).
+fn h3_code_to_u32(code: h3::error::Code) -> u32 {
+	u32::try_from(code.value()).unwrap_or(u32::MAX)
 }
 
 impl<C: QuicConnection> Connection<Bytes> for H3Conn<C> {
