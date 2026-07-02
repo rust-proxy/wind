@@ -77,14 +77,18 @@ impl wind_core::AbstractInbound for ServerInbound {
 }
 
 /// Build an [`OutboundAction`] for a single configured outbound rule.
-fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc<dyn OutboundAction> {
+///
+/// `stream_timeout` is the configured half-close idle timeout for relays; it was
+/// previously hardcoded to `Duration::ZERO`, silently disabling the feature and
+/// ignoring the operator's `stream_timeout` setting.
+fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>, stream_timeout: Duration) -> Arc<dyn OutboundAction> {
 	match rule.kind.as_str() {
 		"socks5" => Arc::new(Socks5Action::new(Socks5ActionOpts {
 			addr: rule.addr.clone().unwrap_or_default(),
 			username: rule.username.clone(),
 			password: rule.password.clone(),
 			allow_udp: rule.allow_udp,
-			stream_timeout: Duration::ZERO,
+			stream_timeout,
 			tcp_keepalive: Some(wind_core::tcp::TcpKeepalive::default()),
 		})),
 		"direct" => Arc::new(DirectOutbound::new(
@@ -92,7 +96,7 @@ fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc
 				bind_ipv4: rule.bind_ipv4,
 				bind_ipv6: rule.bind_ipv6,
 				bind_device: rule.bind_device.clone(),
-				stream_timeout: Duration::ZERO,
+				stream_timeout,
 				tcp_keepalive: Some(wind_core::tcp::TcpKeepalive::default()),
 			},
 			resolver,
@@ -112,7 +116,7 @@ fn make_outbound_action(rule: &OutboundRule, resolver: Arc<dyn Resolver>) -> Arc
 					bind_ipv4: rule.bind_ipv4,
 					bind_ipv6: rule.bind_ipv6,
 					bind_device: rule.bind_device.clone(),
-					stream_timeout: Duration::ZERO,
+					stream_timeout,
 					tcp_keepalive: Some(wind_core::tcp::TcpKeepalive::default()),
 				},
 				resolver,
@@ -217,10 +221,14 @@ fn build_dispatcher(ctx: Arc<TuicAppContext>, resolver: Arc<dyn Resolver>) -> Di
 	let router = TuicRouter::new(ctx.clone(), resolver.clone());
 	let mut dispatcher = Dispatcher::new(router);
 
-	dispatcher.add_handler("default", make_outbound_action(&cfg.outbound.default, resolver.clone()));
+	let stream_timeout = cfg.stream_timeout;
+	dispatcher.add_handler(
+		"default",
+		make_outbound_action(&cfg.outbound.default, resolver.clone(), stream_timeout),
+	);
 
 	for (name, rule) in &cfg.outbound.named {
-		dispatcher.add_handler(name.clone(), make_outbound_action(rule, resolver.clone()));
+		dispatcher.add_handler(name.clone(), make_outbound_action(rule, resolver.clone(), stream_timeout));
 	}
 
 	dispatcher
