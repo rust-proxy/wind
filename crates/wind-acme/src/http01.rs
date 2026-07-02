@@ -45,9 +45,16 @@ async fn complete_http01_challenges(order: &mut Order) -> Result<()> {
 	let challenges: ChallengeMap = Arc::new(RwLock::new(HashMap::new()));
 	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-	let listener = TcpListener::bind("0.0.0.0:80").await.context(
-		"Failed to bind port 80 for ACME challenge. Ensure port 80 is open and you are running as root (or use authbind).",
-	)?;
+	// Bind `[::]` (dual-stack on Linux, the ACME deployment target) rather than
+	// IPv4-only `0.0.0.0`: Let's Encrypt validates AAAA records over IPv6 when
+	// present, and this matches the resolver flow's bind. Falls back to IPv4 if
+	// the host has no IPv6 stack.
+	let listener = match TcpListener::bind("[::]:80").await {
+		Ok(l) => l,
+		Err(_) => TcpListener::bind("0.0.0.0:80").await.context(
+			"Failed to bind port 80 for ACME challenge. Ensure port 80 is open and you are running as root (or use authbind).",
+		)?,
+	};
 
 	let app = Router::new()
 		.route("/.well-known/acme-challenge/{token}", get(handle_challenge))
