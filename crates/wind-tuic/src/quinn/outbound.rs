@@ -1,5 +1,5 @@
 use std::{
-	net::{Ipv4Addr, SocketAddr},
+	net::{Ipv4Addr, Ipv6Addr, SocketAddr},
 	sync::{Arc, atomic::AtomicU16},
 	time::Duration,
 };
@@ -107,7 +107,15 @@ impl TuicOutbound {
 			client_config.transport_config(Arc::new(transport_config));
 			client_config
 		};
-		let socket_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+		// Bind the local socket in the same address family as the peer. A quinn
+		// endpoint bound to 0.0.0.0 cannot dial an IPv6 peer -- `connect` returns
+		// `InvalidRemoteAddress` -- so an IPv6 server (`[::1]:8444`) was
+		// unreachable when we always bound IPv4.
+		let socket_addr = if peer_addr.is_ipv6() {
+			SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+		} else {
+			SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+		};
 		let socket = UdpSocket::bind(&socket_addr)
 			.await
 			.map_err(|e| eyre::eyre!("Failed to bind socket to {}: {}", socket_addr, e))?
