@@ -36,11 +36,16 @@ jobs:
       rustflags: "--cfg reqwest_unstable"
       enable-tmate: false
       only-clippy-tests-on-pr: false
-      # GitHub caps the per-repo Actions cache at 10 GB and each matrix target
-      # keeps its own sccache directory, so size each one at 10 GB / number of
-      # active targets in .github/target.toml (currently 12) ≈ 850M. Re-derive
-      # when targets are added or removed.
-      sccache-max-size: "850M"
+      # Two constraints:
+      #  1. GitHub caps the per-repo Actions cache at 10 GB, shared across all
+      #     matrix targets (currently 12) → 10 GB / 12 ≈ 850M each.
+      #  2. The sccache directory also consumes runner-local disk *during* the
+      #     build, on top of the (large) `target/` tree. The release build with
+      #     the `quiche`/boringssl stack was exhausting the ~14 GB runner disk
+      #     ("No space left on device") at 850M, so keep it well below the cache
+      #     cap to leave build headroom.
+      # Re-derive if targets are added/removed or the dependency footprint grows.
+      sccache-max-size: "400M"
 
   release:
     name: Release
