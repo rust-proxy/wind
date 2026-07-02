@@ -528,19 +528,25 @@ impl AbstractOutbound for TuicOutbound {
 			}
 			eyre::Ok(())
 		};
-		self.ctx.tasks.spawn(udp_task.in_current_span());
+		let handle = self.ctx.tasks.spawn(udp_task.in_current_span());
 
-		let cancel_healthy = self.ctx.token.clone();
-		loop {
-			tokio::select! {
-				_ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
-					info!(target: "tuic_out", "UDP handler for association {:#06x} active", assoc_id);
-				}
-
-				_ = cancel_healthy.cancelled() => break,
-			}
+		// Wait for the session to end: either the bridge task finished (the local
+		// UDP channel closed, the remote errored, or `cancel` fired) or the
+		// process is shutting down. The previous version looped forever on the
+		// global token only, so once a session's bridge task exited on its own,
+		// `handle_udp` kept spinning — pinning the `udp_session` cache entry and
+		// never sending a `Dissociate`. A long-lived client that churns UDP
+		// associations thus leaked one task slot and one assoc id per dead
+		// session until the u16 assoc space was exhausted.
+		tokio::select! {
+			_ = handle => {}
+			_ = self.ctx.token.cancelled() => {}
 		}
 
+		// Tear down: stop the bridge task if it is still running (global-shutdown
+		// path), release the association id, and tell the peer to dissociate.
+		cancel.cancel();
+		self.udp_session.remove(&assoc_id).await;
 		let connection = self.connection.load_full();
 		if let Err(err) = connection.drop_udp(assoc_id).await {
 			info!(target: "tuic_out", "Error dropping UDP association {:#06x}: {}", assoc_id, err);
