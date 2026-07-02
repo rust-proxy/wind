@@ -632,8 +632,14 @@ impl ApplicationOverQuic for BridgeDriver {
 			let waiters = &mut self.waiters;
 			let cmd_rx = &mut self.cmd_rx;
 			tokio::select! {
-				Some(w) = waiters.next() => Ev::Out(w),
+				// `biased`: drain commands before out-channel events. A `reset()`
+				// enqueues a `StreamShutdown` command and then (on drop) closes the
+				// out back-channel; the channel-close would otherwise be observed
+				// first and emit a clean FIN that races the RESET. Command-first
+				// ordering guarantees the reset is applied before the close.
+				biased;
 				Some(c) = cmd_rx.recv() => Ev::Cmd(c),
+				Some(w) = waiters.next() => Ev::Out(w),
 				// Keep the future pending (never resolving) when there is no app
 				// event, rather than busy-looping. The worker still processes
 				// inbound packets and timers in parallel.
@@ -747,6 +753,17 @@ impl ApplicationOverQuic for BridgeDriver {
 		while let Some((sid, write, code)) = self.pending_shutdowns.pop_front() {
 			let dir = if write { Shutdown::Write } else { Shutdown::Read };
 			let _ = qconn.stream_shutdown(sid, dir, code);
+			// A write-direction reset supersedes any pending FIN. Mark the send
+			// side finished/failed so `write_stream` doesn't later emit a clean
+			// FIN (which would race the RESET and could surface as a clean EOF at
+			// the peer).
+			if write && let Some(st) = self.streams.get_mut(&sid) {
+				st.out_queue.clear();
+				st.out_queue_len = 0;
+				st.out_done = true;
+				st.fin_sent = true;
+				st.send_failed = true;
+			}
 		}
 
 		while let Some(dg) = self.out_datagrams.front() {
