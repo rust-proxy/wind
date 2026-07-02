@@ -64,8 +64,12 @@ impl GeoData {
 		if version != FORMAT_VERSION {
 			return Err(GeoDataError::UnsupportedVersion(version));
 		}
-		rkyv::access::<ArchivedGeoDataSnapshot, rkyv::rancor::Error>(&bytes[HEADER_LEN..])
+		let snapshot = rkyv::access::<ArchivedGeoDataSnapshot, rkyv::rancor::Error>(&bytes[HEADER_LEN..])
 			.map_err(|e| GeoDataError::Validate(e.to_string()))?;
+		// rkyv confirms the archive is structurally sound; additionally check the
+		// application-level slice-offset invariants so a corrupt cache can't cause
+		// an out-of-bounds panic at query time.
+		snapshot.validate_offsets().map_err(GeoDataError::Validate)?;
 		Ok(())
 	}
 
@@ -260,5 +264,45 @@ mod tests {
 		let tmp = tempfile::NamedTempFile::new().unwrap();
 		std::fs::write(tmp.path(), b"hi").unwrap();
 		assert!(matches!(GeoData::open(tmp.path()), Err(GeoDataError::Truncated)));
+	}
+
+	#[test]
+	fn open_rejects_out_of_bounds_offsets() {
+		use crate::snapshot::{CategoryInfo, CountryInfo, GeoDataSnapshot, GeoIpIndex, GeoSiteIndex};
+
+		// Structurally valid rkyv archive, but a category claims exact domains
+		// far beyond the (empty) exact_domains vector. Must be rejected, not
+		// allowed to panic later during a query.
+		let snapshot = GeoDataSnapshot {
+			geosite: GeoSiteIndex {
+				categories: vec![CategoryInfo {
+					name: "EVIL".to_string(),
+					exact_start: 5,
+					exact_len: 100,
+					suffix_start: 0,
+					suffix_len: 0,
+					keyword_start: 0,
+					keyword_len: 0,
+				}],
+				exact_domains: Vec::new(),
+				suffix_domains: Vec::new(),
+				keyword_domains: Vec::new(),
+			},
+			geoip: GeoIpIndex {
+				countries: Vec::<CountryInfo>::new(),
+				v4_ranges: Vec::new(),
+				v6_ranges: Vec::new(),
+			},
+		};
+		let payload = rkyv::api::high::to_bytes::<rkyv::rancor::Error>(&snapshot).unwrap();
+		let mut buf = Vec::new();
+		buf.extend_from_slice(&MAGIC);
+		buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+		buf.extend_from_slice(&[0u8; 4]);
+		buf.extend_from_slice(&payload[..]);
+
+		let tmp = tempfile::NamedTempFile::new().unwrap();
+		std::fs::write(tmp.path(), &buf).unwrap();
+		assert!(matches!(GeoData::open(tmp.path()), Err(GeoDataError::Validate(_))));
 	}
 }

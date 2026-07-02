@@ -4,6 +4,57 @@ use rkyv::{Archived, vec::ArchivedVec};
 
 use crate::snapshot::*;
 
+impl ArchivedGeoDataSnapshot {
+	/// Verify every category/country slice `[start, start + len)` lies within
+	/// its backing vector, and that the name lists are sorted for the binary
+	/// searches. rkyv's structural check does not cover these application-level
+	/// invariants, so a corrupt or bit-flipped cache that still passes it could
+	/// otherwise drive an out-of-bounds index panic on every query (DoS).
+	pub fn validate_offsets(&self) -> Result<(), String> {
+		let gs = &self.geosite;
+		let (ex, sf, kw) = (gs.exact_domains.len(), gs.suffix_domains.len(), gs.keyword_domains.len());
+		let mut prev: Option<&str> = None;
+		for c in gs.categories.iter() {
+			check_slice(c.exact_start.to_native(), c.exact_len.to_native(), ex, "geosite exact")?;
+			check_slice(c.suffix_start.to_native(), c.suffix_len.to_native(), sf, "geosite suffix")?;
+			check_slice(c.keyword_start.to_native(), c.keyword_len.to_native(), kw, "geosite keyword")?;
+			let name = c.name.as_str();
+			if let Some(p) = prev
+				&& p > name
+			{
+				return Err(format!("geosite categories not sorted: {p:?} before {name:?}"));
+			}
+			prev = Some(name);
+		}
+
+		let gi = &self.geoip;
+		let (v4, v6) = (gi.v4_ranges.len(), gi.v6_ranges.len());
+		let mut prev: Option<&str> = None;
+		for c in gi.countries.iter() {
+			check_slice(c.v4_start.to_native(), c.v4_len.to_native(), v4, "geoip v4")?;
+			check_slice(c.v6_start.to_native(), c.v6_len.to_native(), v6, "geoip v6")?;
+			let name = c.name.as_str();
+			if let Some(p) = prev
+				&& p > name
+			{
+				return Err(format!("geoip countries not sorted: {p:?} before {name:?}"));
+			}
+			prev = Some(name);
+		}
+		Ok(())
+	}
+}
+
+fn check_slice(start: u32, len: u32, total: usize, what: &str) -> Result<(), String> {
+	let end = (start as usize)
+		.checked_add(len as usize)
+		.ok_or_else(|| format!("{what} slice offset overflow"))?;
+	if end > total {
+		return Err(format!("{what} slice [{start}, {end}) out of bounds (backing len {total})"));
+	}
+	Ok(())
+}
+
 impl ArchivedGeoSiteIndex {
 	pub fn contains(&self, category: &str, domain: &str) -> bool {
 		let Some(idx) = binary_search_cat(&self.categories, category) else {
