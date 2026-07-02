@@ -11,11 +11,14 @@ pub fn init_log(level: Level) -> eyre::Result<()> {
 	let filter = tracing_subscriber::filter::Targets::new()
 		.with_targets(vec![
 			("wind", level),
+			("wind_acl", level),
 			("wind_acme", level),
 			("wind_base", level),
 			("wind_core", level),
 			("wind_dns", level),
+			("wind_geodata", level),
 			("wind_naive", level),
+			("wind_quic", level),
 			("wind_socks", level),
 			("wind_tuic", level),
 		])
