@@ -63,12 +63,12 @@ impl<T: AbstractInbound + Send + Sync> DynInbound for T {
 	}
 }
 
-type InboundFactory = Box<dyn FnOnce(InboundHooks, Arc<AppContext>) -> Box<dyn DynInbound>>;
+type InboundFactory = Box<dyn FnOnce(InboundHooks, Arc<AppContext>) -> Box<dyn DynInbound> + Send>;
 
 /// A composable unit of configuration, applied to the [`App`] via
 /// [`App::add_plugin`].
 pub trait Plugin {
-	fn build(self, app: &mut App);
+	fn build(self, app: App) -> App;
 }
 
 /// The runtime builder. Construct with [`App::new`], register everything, then
@@ -113,9 +113,8 @@ impl App {
 		&self.ctx
 	}
 
-	pub fn add_plugin(mut self, plugin: impl Plugin) -> Self {
-		plugin.build(&mut self);
-		self
+	pub fn add_plugin(self, plugin: impl Plugin) -> Self {
+		plugin.build(self)
 	}
 
 	pub fn add_outbound(mut self, name: impl Into<String>, handler: Arc<dyn OutboundAction>) -> Self {
@@ -161,7 +160,7 @@ impl App {
 	pub fn add_inbound_with<I, F>(mut self, factory: F) -> Self
 	where
 		I: AbstractInbound + Send + Sync + 'static,
-		F: FnOnce(InboundHooks, Arc<AppContext>) -> I + 'static,
+		F: FnOnce(InboundHooks, Arc<AppContext>) -> I + Send + 'static,
 	{
 		self.inbounds.push(Box::new(move |hooks, ctx| {
 			Box::new(factory(hooks, ctx)) as Box<dyn DynInbound>
