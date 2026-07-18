@@ -27,7 +27,7 @@ jobs:
     uses: rust-proxy/workflows/.github/workflows/rust-build.yml@main
     with:
       rust-toolchain: "stable"
-      packages: "wind,tuic-server,tuic-client"
+      packages: "wind"
       target-config-file: ".github/target.toml"
       # The reusable workflow exports this as the `RUSTFLAGS` env var, which
       # overrides `.cargo/config.toml [build] rustflags`; mirror the committed
@@ -55,21 +55,6 @@ jobs:
     with:
       cliff-config: '.github/cliff.toml'
       create-latest-on-push: true
-
-  docker_tuic:
-    name: Docker of TUIC
-    needs: [build]
-    uses: rust-proxy/workflows/.github/workflows/docker-publish.yml@main
-    # secrets:
-    #   registrys: |
-    #     ${{ secrets.DOCKERHUB_USERNAME }}:$${{ secrets.DOCKERHUB_TOKEN }}@docker.io
-    with:
-      docker-file: '.github/Dockerfile_TUIC'
-      image-name: 'tuic-server'
-      platforms: 'linux/amd64,linux/arm64'
-      binary-dir: './docker-bins'
-      server-binary-amd64: 'tuic-server-x86_64-linux-musl'
-      server-binary-arm64: 'tuic-server-aarch64-linux-musl'
 
   docker:
     name: Docker
