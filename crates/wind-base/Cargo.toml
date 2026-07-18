@@ -9,7 +9,8 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 wind-core = { version = "0.1.1", path = "../wind-core" }
 
-tokio = { version = "1", default-features = false, features = ["net"] }
+tokio = { version = "1", default-features = false, features = ["net", "sync", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 socket2 = "0.6"
 
 eyre = "0.6"
@@ -19,5 +20,6 @@ async-trait = "0.1"
 
 [dev-dependencies]
 wind-core = { version = "0.1.1", path = "../wind-core" }
-tokio = { version = "1", default-features = false, features = ["macros", "rt", "net", "time", "sync"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "rt", "net", "time", "sync"] }
 bytes = "1"
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }

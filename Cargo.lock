@@ -6082,6 +6082,7 @@ dependencies = [
  "eyre",
  "socket2 0.6.4",
  "tokio",
+ "tokio-util",
  "tracing",
  "wind-core",
 ]
