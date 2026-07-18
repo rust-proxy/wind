@@ -247,9 +247,11 @@ fn create_tcp_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use std::time::Duration;
+
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+	use super::*;
 
 	fn free_tcp_addr() -> SocketAddr {
 		let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -337,9 +339,7 @@ mod tests {
 		loop {
 			match tokio::net::TcpStream::connect(addr).await {
 				Ok(s) => return Ok(s),
-				Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
-					&& tokio::time::Instant::now() < deadline =>
-				{
+				Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused && tokio::time::Instant::now() < deadline => {
 					tokio::time::sleep(Duration::from_millis(10)).await;
 				}
 				Err(e) => return Err(e),
@@ -366,7 +366,9 @@ mod tests {
 		let cancel = CancellationToken::new();
 		let addr = free_tcp_addr();
 		let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
-		let cb = RecordCallback { targets: targets.clone() };
+		let cb = RecordCallback {
+			targets: targets.clone(),
+		};
 		let inbound = TunnelTcpInbound::new(addr, ("google.com".into(), 443), cancel);
 
 		let _join = tokio::spawn(async move { inbound.listen(&cb).await });
@@ -403,7 +405,9 @@ mod tests {
 		let cancel = CancellationToken::new();
 		let addr = free_tcp_addr();
 		let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
-		let cb = RecordCallback { targets: targets.clone() };
+		let cb = RecordCallback {
+			targets: targets.clone(),
+		};
 		let inbound = TunnelTcpInbound::new(addr, ("multi.test".into(), 8080), cancel);
 
 		let _join = tokio::spawn(async move { inbound.listen(&cb).await });
@@ -424,11 +428,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn tcp_tunnel_drains_on_cancel() {
 		let cancel = CancellationToken::new();
-		let inbound = TunnelTcpInbound::new(
-			free_tcp_addr(),
-			("127.0.0.1".into(), 9),
-			cancel.clone(),
-		);
+		let inbound = TunnelTcpInbound::new(free_tcp_addr(), ("127.0.0.1".into(), 9), cancel.clone());
 
 		let _join = tokio::spawn(async move { inbound.listen(&RejectCallback).await });
 
@@ -464,13 +464,7 @@ mod tests {
 	async fn udp_tunnel_binds_and_listens() {
 		let cancel = CancellationToken::new();
 		let addr = free_udp_addr();
-		let inbound = TunnelUdpInbound::new(
-			addr,
-			("example.com".into(), 53),
-			Duration::from_secs(60),
-			cancel,
-		)
-		.unwrap();
+		let inbound = TunnelUdpInbound::new(addr, ("example.com".into(), 53), Duration::from_secs(60), cancel).unwrap();
 
 		let _join = tokio::spawn(async move { inbound.listen(&RejectCallback).await });
 		tokio::time::sleep(Duration::from_millis(50)).await;
@@ -518,13 +512,7 @@ mod tests {
 	async fn udp_tunnel_echo_relay() {
 		let cancel = CancellationToken::new();
 		let addr = free_udp_addr();
-		let inbound = TunnelUdpInbound::new(
-			addr,
-			("echo.test".into(), 53),
-			Duration::from_secs(60),
-			cancel,
-		)
-		.unwrap();
+		let inbound = TunnelUdpInbound::new(addr, ("echo.test".into(), 53), Duration::from_secs(60), cancel).unwrap();
 
 		let _join = tokio::spawn(async move { inbound.listen(&UdpEchoCallback).await });
 		tokio::time::sleep(Duration::from_millis(50)).await;
@@ -546,13 +534,7 @@ mod tests {
 	async fn udp_tunnel_per_source_session_isolation() {
 		let cancel = CancellationToken::new();
 		let addr = free_udp_addr();
-		let inbound = TunnelUdpInbound::new(
-			addr,
-			("multi.test".into(), 53),
-			Duration::from_secs(60),
-			cancel,
-		)
-		.unwrap();
+		let inbound = TunnelUdpInbound::new(addr, ("multi.test".into(), 53), Duration::from_secs(60), cancel).unwrap();
 
 		let _join = tokio::spawn(async move { inbound.listen(&UdpEchoCallback).await });
 		tokio::time::sleep(Duration::from_millis(50)).await;
@@ -621,6 +603,7 @@ mod tests {
 			) -> eyre::Result<()> {
 				Ok(())
 			}
+
 			async fn handle_udpstream(&self, stream: UdpStream) -> eyre::Result<()> {
 				self.count.fetch_add(1, Ordering::Relaxed);
 				// Keep the session alive briefly, then drop.
@@ -631,7 +614,9 @@ mod tests {
 			}
 		}
 
-		let cb = CountCallback { count: Arc::new(std::sync::atomic::AtomicUsize::new(0)) };
+		let cb = CountCallback {
+			count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+		};
 		let count = cb.count.clone();
 		let inbound = TunnelUdpInbound::new(
 			addr,
@@ -679,6 +664,7 @@ mod tests {
 			) -> eyre::Result<()> {
 				Ok(())
 			}
+
 			async fn handle_udpstream(&self, _stream: UdpStream) -> eyre::Result<()> {
 				// Never read → queue stays full.
 				std::future::pending::<()>().await;
@@ -686,13 +672,7 @@ mod tests {
 			}
 		}
 
-		let inbound = TunnelUdpInbound::new(
-			addr,
-			("stall.test".into(), 53),
-			Duration::from_secs(60),
-			cancel,
-		)
-		.unwrap();
+		let inbound = TunnelUdpInbound::new(addr, ("stall.test".into(), 53), Duration::from_secs(60), cancel).unwrap();
 
 		let _join = tokio::spawn(async move { inbound.listen(&StallCallback).await });
 		tokio::time::sleep(Duration::from_millis(50)).await;
