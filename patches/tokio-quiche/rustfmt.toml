@@ -1,4 +1,0 @@
-# Vendored upstream crate (tokio-quiche 0.19.0) consumed via [patch.crates-io].
-# Keep it byte-identical to upstream (apart from the documented gso.rs fix) so it
-# stays easy to diff/update; the wind repo style must not rewrite it.
-disable_all_formatting = true
