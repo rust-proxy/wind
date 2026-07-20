@@ -14,7 +14,7 @@ decode = []
 encode = []
 
 [dependencies]
-wind-core = { version = "0.1.1", path = "../wind-core", default-features = false }
+wind-core = { path = "../wind-core", default-features = false }
 
 # Wire codecs
 bytes = "1"

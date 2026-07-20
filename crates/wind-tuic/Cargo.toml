@@ -55,12 +55,12 @@ ring = [
 quiche = ["wind-quic/quiche"]
 
 [dependencies]
-wind-core = { version = "0.1.1", path = "../wind-core", features = ["quic"] }
-tuic-core = { version = "0.1.1", path = "../tuic-core", default-features = false }
+wind-core = { path = "../wind-core", features = ["quic"] }
+tuic-core = { path = "../tuic-core", default-features = false }
 # Backend-agnostic QUIC abstraction. The TUIC protocol core is generic over
 # `wind_quic::QuicConnection`; the `quinn`/`quiche` features enable the matching
 # wind-quic backend.
-wind-quic = { version = "0.1.1", path = "../wind-quic", default-features = false }
+wind-quic = { path = "../wind-quic", default-features = false }
 
 # Async
 tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "sync", "io-util", "macros"] }

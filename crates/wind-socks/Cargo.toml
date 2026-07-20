@@ -7,7 +7,7 @@ description.workspace = true
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-wind-core = { version = "0.1.1", path = "../wind-core"}
+wind-core = { path = "../wind-core"}
 # Async
 tokio = { version = "1", default-features = false, features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }

@@ -1,6 +1,6 @@
 [package]
 name = "wind-naive"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 
 [features]
@@ -16,7 +16,7 @@ static-link = ["cronet-rs/static-link"]
 cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", branch = "next", default-features = false }
 
 # Wind core abstractions
-wind-core = { version = "0.1.1", path = "../wind-core" }
+wind-core = { path = "../wind-core" }
 
 # Async runtime
 tokio = { version = "1", default-features = false, features = ["net", "sync", "io-util", "rt", "macros"] }
