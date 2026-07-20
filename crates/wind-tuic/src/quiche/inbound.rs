@@ -59,6 +59,36 @@ impl TuicheInbound {
 		TuicheInboundBuilder::new()
 	}
 
+	/// Direct constructor — build a [`TuicheInbound`] without going through the
+	/// async builder. Useful when the caller has already generated certs and
+	/// knows the paths are valid.
+	#[allow(clippy::too_many_arguments)]
+	pub fn new(
+		listen_addr: SocketAddr,
+		users: HashMap<Uuid, String>,
+		opts: ConnectionOpts,
+		cert_path: String,
+		private_key_path: String,
+		cert_store: CertStore,
+		cancel: CancellationToken,
+		masquerade: Option<crate::server::MasqueradeConfig>,
+		hooks: InboundHooks,
+		active: Option<crate::active::ActiveConnections>,
+	) -> Self {
+		Self {
+			listen_addr,
+			users,
+			opts,
+			cert_path,
+			private_key_path,
+			cert_store,
+			cancel,
+			masquerade,
+			hooks,
+			active,
+		}
+	}
+
 	/// Handle to the hot-swappable certificate store. Call
 	/// [`CertStore::update`] to rotate the served certificate live.
 	pub fn cert_store(&self) -> CertStore {
