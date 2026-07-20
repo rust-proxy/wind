@@ -5282,7 +5282,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuic-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -5685,7 +5685,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "wind"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "clap_derive",
@@ -5711,7 +5711,7 @@ dependencies = [
 
 [[package]]
 name = "wind-acl"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "derive_more",
  "eyre",
@@ -5732,7 +5732,7 @@ dependencies = [
 
 [[package]]
 name = "wind-acme"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5752,7 +5752,7 @@ dependencies = [
 
 [[package]]
 name = "wind-base"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5766,7 +5766,7 @@ dependencies = [
 
 [[package]]
 name = "wind-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5792,7 +5792,7 @@ dependencies = [
 
 [[package]]
 name = "wind-dns"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "educe",
  "eyre",
@@ -5806,7 +5806,7 @@ dependencies = [
 
 [[package]]
 name = "wind-geodata"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "codspeed-criterion-compat",
  "geosite-rs",
@@ -5819,7 +5819,7 @@ dependencies = [
 
 [[package]]
 name = "wind-naive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "cronet-rs",
@@ -5832,7 +5832,7 @@ dependencies = [
 
 [[package]]
 name = "wind-quic"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",
@@ -5865,7 +5865,7 @@ dependencies = [
 
 [[package]]
 name = "wind-socks"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5884,7 +5884,7 @@ dependencies = [
 
 [[package]]
 name = "wind-test"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -5909,7 +5909,7 @@ dependencies = [
 
 [[package]]
 name = "wind-tuic"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",
