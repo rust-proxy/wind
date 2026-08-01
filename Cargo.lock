@@ -5703,6 +5703,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wind-base",
  "wind-core",
  "wind-naive",
  "wind-socks",
