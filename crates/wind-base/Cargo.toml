@@ -18,6 +18,9 @@ tracing = "0.1"
 bytes = "1"
 async-trait = "0.1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 wind-core = { path = "../wind-core" }
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "rt", "net", "time", "sync"] }
