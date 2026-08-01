@@ -157,7 +157,14 @@ async fn connect_direct_tcp_socket2(
 		SocketAddr::V4(_) => Domain::IPV4,
 		SocketAddr::V6(_) => Domain::IPV6,
 	};
-	let protocol = if mptcp { Some(Protocol::MPTCP) } else { None };
+	// Protocol::MPTCP is `#[cfg(target_os = "linux")]` in socket2 0.6,
+	// but this function is compiled for android as well.  Use the raw
+	// libc constant (IPPROTO_MPTCP = 262) which is available on both.
+	let protocol = if mptcp {
+		Some(Protocol::from(libc::IPPROTO_MPTCP))
+	} else {
+		None
+	};
 	let sock = Socket::new(domain, Type::STREAM, protocol)?;
 
 	// SO_MARK
