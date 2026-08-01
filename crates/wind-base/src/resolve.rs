@@ -30,9 +30,8 @@ pub async fn resolve_target_with_preference(
 	resolver: &dyn Resolver,
 	prefer: Option<StackPrefer>,
 ) -> eyre::Result<SocketAddr> {
-	let prefer = match prefer {
-		Some(p) => p,
-		None => return resolve_target(target, resolver).await,
+	let Some(prefer) = prefer else {
+		return resolve_target(target, resolver).await;
 	};
 	match target {
 		TargetAddr::IPv4(ip, port) => Ok(SocketAddr::from((*ip, *port))),

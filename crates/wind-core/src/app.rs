@@ -71,9 +71,8 @@ type InboundFactory = Box<dyn FnOnce(InboundHooks, Arc<AppContext>) -> Box<dyn D
 /// The `build` method is async so plugins can perform I/O (DNS, QUIC
 /// handshakes, etc.) during construction.  It is called once, immediately
 /// inside [`App::add_plugin`].
-#[allow(async_fn_in_trait)]
 pub trait Plugin {
-	async fn build(self, app: App) -> App;
+	fn build(self, app: App) -> impl Future<Output = App> + Send;
 }
 
 /// The runtime builder. Construct with [`App::new`], register everything, then
