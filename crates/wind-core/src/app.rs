@@ -72,7 +72,7 @@ type InboundFactory = Box<dyn FnOnce(InboundHooks, Arc<AppContext>) -> Box<dyn D
 /// handshakes, etc.) during construction.  It is called once, immediately
 /// inside [`App::add_plugin`].
 pub trait Plugin {
-	fn build(self, app: App) -> impl Future<Output = App> + Send;
+	fn build(self, app: App) -> impl Future<Output = eyre::Result<App>> + Send;
 }
 
 /// The runtime builder. Construct with [`App::new`], register everything, then
@@ -117,7 +117,7 @@ impl App {
 		&self.ctx
 	}
 
-	pub async fn add_plugin(self, plugin: impl Plugin) -> Self {
+	pub async fn add_plugin(self, plugin: impl Plugin) -> eyre::Result<Self> {
 		plugin.build(self).await
 	}
 
