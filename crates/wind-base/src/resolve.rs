@@ -1,10 +1,6 @@
 use std::net::SocketAddr;
 
-use wind_core::{
-	resolve::Resolver,
-	types::TargetAddr,
-	utils::StackPrefer,
-};
+use wind_core::{resolve::Resolver, types::TargetAddr, utils::StackPrefer};
 
 /// Resolve a `TargetAddr` to a single `SocketAddr` using the given resolver.
 ///

@@ -32,8 +32,9 @@ pub fn check_loopback(addr: &SocketAddr) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use std::net::{Ipv4Addr, Ipv6Addr};
+
+	use super::*;
 
 	#[test]
 	fn rejects_ipv4_loopback() {

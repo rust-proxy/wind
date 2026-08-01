@@ -146,8 +146,8 @@ async fn build_dispatcher(outbounds: Vec<OutboundRuntime>, ctx: Arc<AppContext>)
 
 	// Two-phase construction:
 	//  1. Build regular outbounds (tuic, naive) and stash them by tag.
-	//  2. Build load-balance outbounds, resolving child proxy tags from
-	//     the map built in phase 1.
+	//  2. Build load-balance outbounds, resolving child proxy tags from the map
+	//     built in phase 1.
 	let mut handlers: HashMap<String, Arc<dyn wind_core::dispatcher::OutboundAction>> = HashMap::new();
 	let mut lb_configs: Vec<(String, crate::conf::runtime::LoadBalanceRuntimeOpts)> = Vec::new();
 
@@ -176,7 +176,10 @@ async fn build_dispatcher(outbounds: Vec<OutboundRuntime>, ctx: Arc<AppContext>)
 				.iter()
 				.map(|t| {
 					handlers.get(t).cloned().ok_or_else(|| {
-						eyre::eyre!("load-balance '{tag}' references unknown proxy '{t}'; proxies must be declared before the load-balance group")
+						eyre::eyre!(
+							"load-balance '{tag}' references unknown proxy '{t}'; proxies must be declared before the \
+							 load-balance group"
+						)
 					})
 				})
 				.collect::<eyre::Result<Vec<_>>>()?

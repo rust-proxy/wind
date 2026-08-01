@@ -14,12 +14,7 @@ use tokio::{
 	sync::Mutex,
 };
 use tracing::Instrument;
-use wind_core::{
-	OutboundAction,
-	tcp::AbstractTcpStream,
-	types::TargetAddr,
-	udp::UdpStream,
-};
+use wind_core::{OutboundAction, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -193,11 +188,7 @@ impl LoadBalanceOutbound {
 
 #[async_trait]
 impl OutboundAction for LoadBalanceOutbound {
-	async fn handle_tcp(
-		&self,
-		target: TargetAddr,
-		stream: Box<dyn AbstractTcpStream + 'static>,
-	) -> eyre::Result<()> {
+	async fn handle_tcp(&self, target: TargetAddr, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 		let idx = self.select_index(&target).await;
 		let span = tracing::debug_span!("lb_tcp", target = %target, proxy_index = idx);
 		async move {
@@ -350,8 +341,9 @@ fn parse_http_url(url: &str) -> Option<(&str, u16, &str)> {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use std::sync::atomic::AtomicBool;
+
+	use super::*;
 
 	struct DummyOutbound {
 		_called: AtomicBool,
@@ -367,11 +359,7 @@ mod tests {
 
 	#[async_trait]
 	impl OutboundAction for DummyOutbound {
-		async fn handle_tcp(
-			&self,
-			_target: TargetAddr,
-			_stream: Box<dyn AbstractTcpStream + 'static>,
-		) -> eyre::Result<()> {
+		async fn handle_tcp(&self, _target: TargetAddr, _stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 			Ok(())
 		}
 
@@ -390,8 +378,9 @@ mod tests {
 	}
 
 	fn make_lb(strategy: LoadBalanceStrategy, n: usize) -> LoadBalanceOutbound {
-		let proxies: Vec<Arc<dyn OutboundAction>> =
-			(0..n).map(|_| Arc::new(DummyOutbound::new()) as Arc<dyn OutboundAction>).collect();
+		let proxies: Vec<Arc<dyn OutboundAction>> = (0..n)
+			.map(|_| Arc::new(DummyOutbound::new()) as Arc<dyn OutboundAction>)
+			.collect();
 		LoadBalanceOutbound::new(make_opts(strategy), proxies)
 	}
 

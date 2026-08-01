@@ -370,12 +370,10 @@ impl<O: AbstractOutbound + Send + Sync + 'static> OutboundAction for OutboundAsA
 	}
 }
 
+// ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-	use std::sync::{
-		Arc,
-		atomic::{AtomicBool, Ordering},
-	};
+	use std::sync::atomic::{AtomicBool, Ordering};
 
 	use super::*;
 
