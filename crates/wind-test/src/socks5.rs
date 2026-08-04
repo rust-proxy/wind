@@ -407,6 +407,7 @@ async fn start_test_proxy(socks_port: u16) -> eyre::Result<(Arc<wind_core::AppCo
 			auth: wind_socks::inbound::AuthMode::NoAuth,
 			skip_auth: false,
 			allow_udp: true,
+			inbound_tag: "test-socks".into(),
 			hooks: Default::default(),
 		},
 		tuic_port: 0, // Let OS assign a port
@@ -433,7 +434,7 @@ struct TestConfig {
 async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> eyre::Result<()> {
 	use std::collections::HashMap;
 
-	use wind_core::{InboundCallback, inbound::AbstractInbound, tcp::AbstractTcpStream, types::TargetAddr};
+	use wind_core::{FlowContext, InboundCallback, inbound::AbstractInbound, tcp::AbstractTcpStream};
 
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
 	let cert_der = cert.cert.der().to_vec();
@@ -466,21 +467,21 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 	}
 
 	impl InboundCallback for TestManager {
-		async fn handle_tcpstream(&self, target_addr: TargetAddr, stream: impl AbstractTcpStream) -> eyre::Result<()> {
-			handle_tcp_direct(target_addr, stream).await?;
+		async fn handle_tcpstream(&self, ctx: FlowContext, stream: impl AbstractTcpStream) -> eyre::Result<()> {
+			handle_tcp_direct(ctx, stream).await?;
 			Ok(())
 		}
 
-		async fn handle_udpstream(&self, stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
-			handle_udp_direct(stream).await?;
+		async fn handle_udpstream(&self, ctx: FlowContext, stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
+			handle_udp_direct(ctx, stream).await?;
 			Ok(())
 		}
 	}
 
-	async fn handle_tcp_direct(target_addr: TargetAddr, mut inbound_stream: impl AbstractTcpStream) -> eyre::Result<()> {
+	async fn handle_tcp_direct(ctx: FlowContext, mut inbound_stream: impl AbstractTcpStream) -> eyre::Result<()> {
 		use tokio::io::AsyncWriteExt;
 
-		let addr = target_addr.to_string();
+		let addr = ctx.target.to_string();
 		let mut outbound_stream = tokio::net::TcpStream::connect(&addr).await?;
 
 		let (mut inbound_read, mut inbound_write) = tokio::io::split(&mut inbound_stream);
@@ -502,7 +503,7 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 		Ok(())
 	}
 
-	async fn handle_udp_direct(stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
+	async fn handle_udp_direct(_ctx: FlowContext, stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
 		use std::{collections::HashMap, sync::Arc};
 
 		use tokio::sync::Mutex;

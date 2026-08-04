@@ -24,8 +24,8 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use uuid::Uuid;
 use wind_core::{
-	AclRouter, App, ConnInfo, ConnectDecision, ConnectionHooks, OutboundAction, TrafficSink, TuicAuthenticator, UserId,
-	UserTraffic, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream,
+	AclRouter, App, ConnInfo, ConnectDecision, ConnectionHooks, FlowContext, OutboundAction, TrafficSink, TuicAuthenticator,
+	UserId, UserTraffic, tcp::AbstractTcpStream, udp::UdpStream,
 };
 
 /// Authentication backed by an in-memory map (stand-in for a DB lookup).
@@ -90,11 +90,11 @@ struct NoopOutbound;
 
 #[async_trait]
 impl OutboundAction for NoopOutbound {
-	async fn handle_tcp(&self, _target: TargetAddr, _stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
+	async fn handle_tcp(&self, _ctx: FlowContext, _stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 		Ok(())
 	}
 
-	async fn handle_udp(&self, _stream: UdpStream) -> eyre::Result<()> {
+	async fn handle_udp(&self, _ctx: FlowContext, _stream: UdpStream) -> eyre::Result<()> {
 		Ok(())
 	}
 }

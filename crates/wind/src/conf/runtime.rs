@@ -30,6 +30,7 @@ impl InboundRuntime {
 					},
 					skip_auth: s.skip_auth,
 					allow_udp: s.allow_udp,
+					inbound_tag: std::sync::Arc::from(s.tag.as_str()),
 					hooks: Default::default(),
 				}),
 			},

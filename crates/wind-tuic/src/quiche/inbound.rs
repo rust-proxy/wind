@@ -49,6 +49,8 @@ pub struct TuicheInbound {
 	/// Downstream extensibility hooks (auth / traffic stats / connection
 	/// management). Defaults to all-`None` (no behavior change).
 	hooks: InboundHooks,
+	/// Stable per-inbound identifier used by `IN-NAME` routing rules.
+	inbound_tag: Arc<str>,
 	/// Live-connection registry for per-user connection limits + active kick.
 	active: Option<crate::active::ActiveConnections>,
 }
@@ -74,6 +76,7 @@ impl TuicheInbound {
 		masquerade: Option<crate::server::MasqueradeConfig>,
 		hooks: InboundHooks,
 		active: Option<crate::active::ActiveConnections>,
+		inbound_tag: Arc<str>,
 	) -> Self {
 		Self {
 			listen_addr,
@@ -86,6 +89,7 @@ impl TuicheInbound {
 			masquerade,
 			hooks,
 			active,
+			inbound_tag,
 		}
 	}
 
@@ -147,8 +151,19 @@ impl AbstractInbound for TuicheInbound {
 			let hooks = self.hooks.clone();
 			let active = self.active.clone();
 			conn_tasks.spawn(
-				crate::server::serve_connection(conn, remote, users, AUTH_TIMEOUT, cb, cancel, masquerade, hooks, active)
-					.instrument(span),
+				crate::server::serve_connection(
+					conn,
+					remote,
+					users,
+					AUTH_TIMEOUT,
+					cb,
+					cancel,
+					masquerade,
+					hooks,
+					active,
+					self.inbound_tag.clone(),
+				)
+				.instrument(span),
 			);
 		}
 
@@ -169,6 +184,7 @@ pub struct TuicheInboundBuilder {
 	cancel: Option<CancellationToken>,
 	masquerade: Option<crate::server::MasqueradeConfig>,
 	hooks: InboundHooks,
+	inbound_tag: Arc<str>,
 	active: Option<crate::active::ActiveConnections>,
 }
 
@@ -184,6 +200,7 @@ impl TuicheInboundBuilder {
 			cancel: None,
 			masquerade: None,
 			hooks: InboundHooks::default(),
+			inbound_tag: Arc::from("tuic"),
 			active: None,
 		}
 	}
@@ -192,6 +209,13 @@ impl TuicheInboundBuilder {
 	/// connection management).
 	pub fn hooks(mut self, hooks: InboundHooks) -> Self {
 		self.hooks = hooks;
+		self
+	}
+
+	/// Set the stable per-inbound identifier used by `IN-NAME` routing rules.
+	/// Defaults to `"tuic"`.
+	pub fn inbound_tag(mut self, tag: impl Into<Arc<str>>) -> Self {
+		self.inbound_tag = tag.into();
 		self
 	}
 
@@ -281,6 +305,7 @@ impl TuicheInboundBuilder {
 			masquerade: self.masquerade,
 			hooks: self.hooks,
 			active: self.active,
+			inbound_tag: self.inbound_tag,
 		})
 	}
 }

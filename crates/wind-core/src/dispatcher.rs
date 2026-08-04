@@ -15,16 +15,16 @@
 //!   implements [`InboundCallback`] so it can be passed directly to
 //!   `inbound.listen()`.
 
-use std::{collections::HashMap, future::Future, net::IpAddr, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use tracing::Instrument;
 
 use crate::{
 	InboundCallback,
-	rule::{MatchContext, NetworkType, Rule},
+	flow::FlowContext,
+	rule::{MatchContext, Rule},
 	tcp::AbstractTcpStream,
-	types::TargetAddr,
 	udp::UdpStream,
 };
 
@@ -52,11 +52,8 @@ pub enum RouteAction {
 /// Implementations are free to perform DNS resolution, consult ACL tables, or
 /// apply any other policy.
 pub trait Router: Send + Sync + 'static {
-	/// Classify a TCP or UDP connection.
-	///
-	/// * `target` – the destination address as reported by the inbound.
-	/// * `is_tcp`  – `true` for TCP streams, `false` for UDP streams.
-	fn route(&self, target: &TargetAddr, is_tcp: bool) -> impl Future<Output = eyre::Result<RouteAction>> + Send;
+	/// Classify a TCP or UDP connection from its full [`FlowContext`].
+	fn route(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send;
 }
 
 /// Object-safe outbound handler.
@@ -71,10 +68,10 @@ pub trait OutboundAction: Send + Sync + 'static {
 	/// The stream is boxed and `'static` so it can be stored or sent across
 	/// tasks.  All concrete `AbstractTcpStream` implementations (owned
 	/// `TcpStream`, `Socks5Stream<TcpStream>`, …) satisfy this bound.
-	async fn handle_tcp(&self, target: TargetAddr, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()>;
+	async fn handle_tcp(&self, ctx: FlowContext, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()>;
 
 	/// Handle an inbound UDP session.
-	async fn handle_udp(&self, stream: UdpStream) -> eyre::Result<()>;
+	async fn handle_udp(&self, ctx: FlowContext, stream: UdpStream) -> eyre::Result<()>;
 }
 
 /// Routes inbound connections to named outbound handlers.
@@ -128,21 +125,21 @@ impl<R: Router> Clone for Dispatcher<R> {
 }
 
 impl<R: Router> InboundCallback for Dispatcher<R> {
-	async fn handle_tcpstream(&self, target_addr: TargetAddr, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
-		let span = tracing::debug_span!("dispatch_tcp", target = %target_addr);
-		self.dispatch_tcp(target_addr, stream).instrument(span).await
+	async fn handle_tcpstream(&self, ctx: FlowContext, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
+		let span = tracing::debug_span!("dispatch_tcp", target = %ctx.target);
+		self.dispatch_tcp(ctx, stream).instrument(span).await
 	}
 
-	async fn handle_udpstream(&self, udp_stream: UdpStream) -> eyre::Result<()> {
-		self.dispatch_udp(udp_stream)
+	async fn handle_udpstream(&self, ctx: FlowContext, udp_stream: UdpStream) -> eyre::Result<()> {
+		self.dispatch_udp(ctx, udp_stream)
 			.instrument(tracing::debug_span!("dispatch_udp"))
 			.await
 	}
 }
 
 impl<R: Router> Dispatcher<R> {
-	async fn dispatch_tcp(&self, target_addr: TargetAddr, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
-		let action = self.router.route(&target_addr, true).await?;
+	async fn dispatch_tcp(&self, ctx: FlowContext, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
+		let action = self.router.route(&ctx).await?;
 
 		match action {
 			RouteAction::Reject(reason) => {
@@ -156,12 +153,12 @@ impl<R: Router> Dispatcher<R> {
 					.resolve_handler(&name)
 					.ok_or_else(|| eyre::eyre!("no outbound handler registered for '{}' (and no 'default')", name))?;
 
-				handler.handle_tcp(target_addr, Box::new(stream)).await
+				handler.handle_tcp(ctx, Box::new(stream)).await
 			}
 		}
 	}
 
-	async fn dispatch_udp(&self, udp_stream: UdpStream) -> eyre::Result<()> {
+	async fn dispatch_udp(&self, ctx: FlowContext, udp_stream: UdpStream) -> eyre::Result<()> {
 		// Wait for the first packet so the routing decision can be made
 		// against the real `packet.target`. The previous implementation
 		// routed against a `TargetAddr::IPv4(0.0.0.0, 0)` sentinel, so every
@@ -179,7 +176,11 @@ impl<R: Router> Dispatcher<R> {
 			return Ok(()); // remote closed before sending anything
 		};
 
-		let action = self.router.route(&first.target, false).await?;
+		// The inbound could not know the destination before the first packet,
+		// so the real target is stamped in here.
+		let ctx = ctx.with_target(first.target.clone());
+
+		let action = self.router.route(&ctx).await?;
 
 		match action {
 			RouteAction::Reject(reason) => {
@@ -210,7 +211,7 @@ impl<R: Router> Dispatcher<R> {
 				});
 
 				let routed_stream = UdpStream { tx, rx: proxy_rx };
-				handler.handle_udp(routed_stream).await
+				handler.handle_udp(ctx, routed_stream).await
 			}
 		}
 	}
@@ -266,30 +267,20 @@ impl AclRouter {
 }
 
 impl Router for AclRouter {
-	async fn route(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction> {
-		let span = tracing::trace_span!("acl_route", target = %target, proto = if is_tcp { "tcp" } else { "udp" });
-		self.eval_rules(target, is_tcp).instrument(span).await
+	async fn route(&self, ctx: &FlowContext) -> eyre::Result<RouteAction> {
+		let span = tracing::trace_span!("acl_route", target = %ctx.target, proto = if ctx.is_tcp() { "tcp" } else { "udp" });
+		self.eval_rules(ctx).instrument(span).await
 	}
 }
 
 impl AclRouter {
-	async fn eval_rules(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction> {
-		let (domain, dst_ip, port) = match target {
-			TargetAddr::Domain(d, p) => (Some(d.as_str()), None, *p),
-			TargetAddr::IPv4(ip, p) => (None, Some(IpAddr::V4(*ip)), *p),
-			TargetAddr::IPv6(ip, p) => (None, Some(IpAddr::V6(*ip)), *p),
-		};
-
-		let ctx = MatchContext {
-			domain,
-			dst_ip,
-			dst_port: Some(port),
-			network: Some(if is_tcp { NetworkType::Tcp } else { NetworkType::Udp }),
-			..Default::default()
-		};
+	async fn eval_rules(&self, ctx: &FlowContext) -> eyre::Result<RouteAction> {
+		// Lower the connection context once; every rule shares it.
+		let mut match_ctx = MatchContext::default();
+		ctx.apply_to_match_context(&mut match_ctx);
 
 		for rule in &self.rules {
-			if rule.matches(&ctx) {
+			if rule.matches(&match_ctx) {
 				tracing::debug!(rule = %rule, "matched");
 				return Ok(rule_target_to_action(&rule.target, rule));
 			}
@@ -330,7 +321,7 @@ pub struct NoChain;
 impl AbstractOutbound for NoChain {
 	async fn handle_tcp(
 		&self,
-		_target_addr: TargetAddr,
+		_ctx: FlowContext,
 		_stream: impl crate::tcp::AbstractTcpStream,
 		_via: Option<impl AbstractOutbound + Sized + Send>,
 	) -> eyre::Result<()> {
@@ -339,6 +330,7 @@ impl AbstractOutbound for NoChain {
 
 	async fn handle_udp(
 		&self,
+		_ctx: FlowContext,
 		_stream: crate::udp::UdpStream,
 		_via: Option<impl AbstractOutbound + Sized + Send>,
 	) -> eyre::Result<()> {
@@ -356,16 +348,12 @@ pub struct OutboundAsAction<O> {
 
 #[async_trait]
 impl<O: AbstractOutbound + Send + Sync + 'static> OutboundAction for OutboundAsAction<O> {
-	async fn handle_tcp(
-		&self,
-		target: TargetAddr,
-		stream: Box<dyn crate::tcp::AbstractTcpStream + 'static>,
-	) -> eyre::Result<()> {
-		self.inner.handle_tcp(target, stream, Option::<NoChain>::None).await
+	async fn handle_tcp(&self, ctx: FlowContext, stream: Box<dyn crate::tcp::AbstractTcpStream + 'static>) -> eyre::Result<()> {
+		self.inner.handle_tcp(ctx, stream, Option::<NoChain>::None).await
 	}
 
-	async fn handle_udp(&self, stream: crate::udp::UdpStream) -> eyre::Result<()> {
-		self.inner.handle_udp(stream, Option::<NoChain>::None).await
+	async fn handle_udp(&self, ctx: FlowContext, stream: crate::udp::UdpStream) -> eyre::Result<()> {
+		self.inner.handle_udp(ctx, stream, Option::<NoChain>::None).await
 	}
 }
 
@@ -375,9 +363,30 @@ mod tests {
 	use std::sync::atomic::{AtomicBool, Ordering};
 
 	use super::*;
+	use crate::{hooks::Protocol, rule::NetworkType, types::TargetAddr};
 
 	fn parse_rules(text: &str) -> Vec<Rule> {
 		Rule::parse_rules(text).into_iter().filter_map(Result::ok).collect()
+	}
+
+	/// Build a minimal [`FlowContext`] for routing tests.
+	fn fc(target: &TargetAddr, tcp: bool) -> FlowContext {
+		FlowContext {
+			target: target.clone(),
+			network: if tcp { NetworkType::Tcp } else { NetworkType::Udp },
+			source: None,
+			inbound_tag: Arc::from("test"),
+			protocol: Protocol::Tuic,
+			user: None,
+			inbound_port: None,
+			inbound_type: None,
+		}
+	}
+
+	/// UDP placeholder context — the dispatcher stamps the real target from
+	/// the first packet.
+	fn fc_udp() -> FlowContext {
+		fc(&TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0), false)
 	}
 
 	/// A trivial `OutboundAction` that just records whether it was called.
@@ -397,12 +406,12 @@ mod tests {
 
 	#[async_trait]
 	impl OutboundAction for MockHandler {
-		async fn handle_tcp(&self, _target: TargetAddr, _stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
+		async fn handle_tcp(&self, _ctx: FlowContext, _stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 			self.tcp_called.store(true, Ordering::Relaxed);
 			Ok(())
 		}
 
-		async fn handle_udp(&self, _stream: UdpStream) -> eyre::Result<()> {
+		async fn handle_udp(&self, _ctx: FlowContext, _stream: UdpStream) -> eyre::Result<()> {
 			self.udp_called.store(true, Ordering::Relaxed);
 			Ok(())
 		}
@@ -413,7 +422,7 @@ mod tests {
 		let router = AclRouter::new(parse_rules("DOMAIN-SUFFIX,google.com,proxy"), "direct");
 
 		let target = TargetAddr::Domain("www.google.com".into(), 443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
 	}
 
@@ -422,7 +431,7 @@ mod tests {
 		let router = AclRouter::new(parse_rules("DOMAIN,example.com,proxy"), "direct");
 
 		let target = TargetAddr::Domain("other.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
@@ -431,11 +440,11 @@ mod tests {
 		let router = AclRouter::new(parse_rules("IP-CIDR,192.168.0.0/16,lan"), "default");
 
 		let target = TargetAddr::IPv4("192.168.1.100".parse().unwrap(), 8080);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "lan"));
 
 		let target = TargetAddr::IPv4("10.0.0.1".parse().unwrap(), 8080);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "default"));
 	}
 
@@ -444,7 +453,7 @@ mod tests {
 		let router = AclRouter::new(parse_rules("DOMAIN-KEYWORD,ads,reject"), "direct");
 
 		let target = TargetAddr::Domain("ads.example.com".into(), 443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Reject(_)));
 	}
 
@@ -458,10 +467,16 @@ mod tests {
 		);
 		let router = AclRouter::new(rules, "direct");
 
-		let action = router.route(&TargetAddr::Domain("block.com".into(), 80), true).await.unwrap();
+		let action = router
+			.route(&fc(&TargetAddr::Domain("block.com".into(), 80), true))
+			.await
+			.unwrap();
 		assert!(matches!(action, RouteAction::Reject(_)));
 
-		let action = router.route(&TargetAddr::Domain("deny.com".into(), 80), true).await.unwrap();
+		let action = router
+			.route(&fc(&TargetAddr::Domain("deny.com".into(), 80), true))
+			.await
+			.unwrap();
 		assert!(matches!(action, RouteAction::Reject(_)));
 	}
 
@@ -477,10 +492,10 @@ mod tests {
 
 		let target = TargetAddr::Domain("any.com".into(), 443);
 
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
 
-		let action = router.route(&target, false).await.unwrap();
+		let action = router.route(&fc(&target, false)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
@@ -489,11 +504,11 @@ mod tests {
 		let router = AclRouter::new(parse_rules("DST-PORT,443,proxy"), "direct");
 
 		let target = TargetAddr::Domain("example.com".into(), 443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
 
 		let target = TargetAddr::Domain("example.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
@@ -509,7 +524,7 @@ mod tests {
 		let router = AclRouter::new(rules, "default");
 
 		let target = TargetAddr::Domain("www.google.com".into(), 443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "first"));
 	}
 
@@ -524,7 +539,7 @@ mod tests {
 		let router = AclRouter::new(rules, "default");
 
 		let target = TargetAddr::Domain("random.org".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "catchall"));
 	}
 
@@ -533,11 +548,11 @@ mod tests {
 		let router = AclRouter::new(parse_rules("IP-CIDR6,fc00::/7,local"), "default");
 
 		let target = TargetAddr::IPv6("fd12::1".parse().unwrap(), 443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "local"));
 
 		let target = TargetAddr::IPv6("2001:db8::1".parse().unwrap(), 443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "default"));
 	}
 
@@ -560,7 +575,7 @@ mod tests {
 		let (client, _server) = tokio::io::duplex(1024);
 
 		let target = TargetAddr::Domain("app.proxy.me".into(), 443);
-		dispatcher.handle_tcpstream(target, client).await.unwrap();
+		dispatcher.handle_tcpstream(fc(&target, true), client).await.unwrap();
 
 		assert!(proxy_handler.tcp_called.load(Ordering::Relaxed));
 		assert!(!default_handler.tcp_called.load(Ordering::Relaxed));
@@ -591,7 +606,7 @@ mod tests {
 		.unwrap();
 		drop(tx2);
 
-		dispatcher.handle_udpstream(stream).await.unwrap();
+		dispatcher.handle_udpstream(fc_udp(), stream).await.unwrap();
 		assert!(handler.udp_called.load(Ordering::Relaxed));
 	}
 
@@ -605,7 +620,7 @@ mod tests {
 		let (client, _server) = tokio::io::duplex(1024);
 		let target = TargetAddr::Domain("blocked.com".into(), 80);
 
-		let result = dispatcher.handle_tcpstream(target, client).await;
+		let result = dispatcher.handle_tcpstream(fc(&target, true), client).await;
 		assert!(result.is_err());
 		assert!(result.unwrap_err().to_string().contains("rejected"));
 	}
@@ -620,7 +635,7 @@ mod tests {
 
 		let (client, _server) = tokio::io::duplex(1024);
 		let target = TargetAddr::Domain("other.com".into(), 80);
-		dispatcher.handle_tcpstream(target, client).await.unwrap();
+		dispatcher.handle_tcpstream(fc(&target, true), client).await.unwrap();
 
 		assert!(default_handler.tcp_called.load(Ordering::Relaxed));
 	}
@@ -636,7 +651,7 @@ mod tests {
 
 		let (client, _server) = tokio::io::duplex(1024);
 		let target = TargetAddr::Domain("any.com".into(), 80);
-		dispatcher.handle_tcpstream(target, client).await.unwrap();
+		dispatcher.handle_tcpstream(fc(&target, true), client).await.unwrap();
 
 		assert!(default_handler.tcp_called.load(Ordering::Relaxed));
 	}
@@ -649,7 +664,7 @@ mod tests {
 
 		let (client, _server) = tokio::io::duplex(1024);
 		let result = dispatcher
-			.handle_tcpstream(TargetAddr::Domain("a.com".into(), 80), client)
+			.handle_tcpstream(fc(&TargetAddr::Domain("a.com".into(), 80), true), client)
 			.await;
 		assert!(result.is_err());
 	}
@@ -659,11 +674,11 @@ mod tests {
 		let router = AclRouter::new(parse_rules("DST-PORT,8000-9000,proxy"), "direct");
 
 		let target = TargetAddr::Domain("example.com".into(), 8080);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
 
 		let target = TargetAddr::Domain("example.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
@@ -674,17 +689,17 @@ mod tests {
 
 		// Both match → secure_proxy
 		let target = TargetAddr::Domain("www.example.com".into(), 443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "secure_proxy"));
 
 		// Domain matches but port doesn't → direct
 		let target = TargetAddr::Domain("www.example.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 
 		// Port matches but domain doesn't → direct
 		let target = TargetAddr::Domain("other.org".into(), 443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
@@ -694,15 +709,15 @@ mod tests {
 		let router = AclRouter::new(rules, "direct");
 
 		let target = TargetAddr::Domain("a.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
 
 		let target = TargetAddr::Domain("b.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
 
 		let target = TargetAddr::Domain("c.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
@@ -713,12 +728,12 @@ mod tests {
 
 		// Doesn't match suffix → NOT succeeds → proxy
 		let target = TargetAddr::Domain("external.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
 
 		// Matches suffix → NOT fails → direct
 		let target = TargetAddr::Domain("app.internal.corp".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
@@ -727,7 +742,7 @@ mod tests {
 		let router = AclRouter::new(parse_rules("SRC-IP-CIDR,192.168.0.0/16,local"), "default");
 
 		let target = TargetAddr::Domain("example.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		// SRC-IP-CIDR can't match because AclRouter doesn't have src_ip context
 		assert!(matches!(action, RouteAction::Forward(name) if name == "default"));
 	}
@@ -745,17 +760,17 @@ mod tests {
 
 		// api.example.com:8443 → api_proxy (first rule)
 		let target = TargetAddr::Domain("api.example.com".into(), 8443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "api_proxy"));
 
 		// api.example.com:443 → web_proxy (second rule)
 		let target = TargetAddr::Domain("api.example.com".into(), 443);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "web_proxy"));
 
 		// other.org:80 → direct (MATCH)
 		let target = TargetAddr::Domain("other.org".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
 	}
 
@@ -767,7 +782,7 @@ mod tests {
 	async fn router_forwards_with_original_case() {
 		let router = AclRouter::new(parse_rules("DOMAIN-SUFFIX,example.com,Proxy_Out"), "default");
 		let target = TargetAddr::Domain("foo.example.com".into(), 80);
-		let action = router.route(&target, true).await.unwrap();
+		let action = router.route(&fc(&target, true)).await.unwrap();
 		assert!(matches!(action, RouteAction::Forward(name) if name == "Proxy_Out"));
 	}
 
@@ -778,7 +793,7 @@ mod tests {
 		for kw in ["REJECT", "Reject", "reject", "BLOCK", "Block", "deny", "Deny", "DENY"] {
 			let r = AclRouter::new(parse_rules(&format!("DOMAIN-SUFFIX,blocked.com,{kw}")), "default");
 			let target = TargetAddr::Domain("a.blocked.com".into(), 443);
-			let action = r.route(&target, true).await.unwrap();
+			let action = r.route(&fc(&target, true)).await.unwrap();
 			assert!(
 				matches!(action, RouteAction::Reject(_)),
 				"keyword {kw:?} must map to RouteAction::Reject"

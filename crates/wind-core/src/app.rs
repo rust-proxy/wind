@@ -16,24 +16,23 @@ use bytesize::ByteSize;
 use tracing::{error, info, warn};
 
 use crate::{
-	AbstractInbound, AppContext, Dispatcher, OutboundAction, RouteAction, Router,
+	AbstractInbound, AppContext, Dispatcher, FlowContext, OutboundAction, RouteAction, Router,
 	hooks::{
 		ConnectionHooks, FanOutConnectionHooks, InboundHooks, StatsCollector, TrafficSink, TuicAuthenticator,
 		UserPassAuthenticator,
 	},
-	types::TargetAddr,
 };
 
 /// Object-safe form of [`Router`] so the App can store a `dyn` router.
 #[async_trait]
 pub trait DynRouter: Send + Sync + 'static {
-	async fn route_dyn(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction>;
+	async fn route_dyn(&self, ctx: FlowContext) -> eyre::Result<RouteAction>;
 }
 
 #[async_trait]
 impl<R: Router> DynRouter for R {
-	async fn route_dyn(&self, target: &TargetAddr, is_tcp: bool) -> eyre::Result<RouteAction> {
-		self.route(target, is_tcp).await
+	async fn route_dyn(&self, ctx: FlowContext) -> eyre::Result<RouteAction> {
+		self.route(&ctx).await
 	}
 }
 
@@ -43,10 +42,10 @@ impl<R: Router> DynRouter for R {
 pub struct ArcRouter(Arc<dyn DynRouter>);
 
 impl Router for ArcRouter {
-	fn route(&self, target: &TargetAddr, is_tcp: bool) -> impl Future<Output = eyre::Result<RouteAction>> + Send {
+	fn route(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send {
 		let inner = self.0.clone();
-		let target = target.clone();
-		async move { inner.route_dyn(&target, is_tcp).await }
+		let ctx = ctx.clone();
+		async move { inner.route_dyn(ctx).await }
 	}
 }
 

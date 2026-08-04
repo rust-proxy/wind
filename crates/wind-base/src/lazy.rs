@@ -5,7 +5,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use async_trait::async_trait;
 use eyre;
 use tokio::sync::{Mutex, Notify};
-use wind_core::{OutboundAction, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
+use wind_core::{FlowContext, OutboundAction, tcp::AbstractTcpStream, udp::UdpStream};
 
 /// Boxed future that produces the initialised [`OutboundAction`] handler.
 type OutboundFactory = Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn OutboundAction>>> + Send>>;
@@ -107,13 +107,13 @@ impl LazyOutbound {
 
 #[async_trait]
 impl OutboundAction for LazyOutbound {
-	async fn handle_tcp(&self, target: TargetAddr, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
+	async fn handle_tcp(&self, ctx: FlowContext, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 		let handler = self.get_or_init().await?;
-		handler.handle_tcp(target, stream).await
+		handler.handle_tcp(ctx, stream).await
 	}
 
-	async fn handle_udp(&self, stream: UdpStream) -> eyre::Result<()> {
+	async fn handle_udp(&self, ctx: FlowContext, stream: UdpStream) -> eyre::Result<()> {
 		let handler = self.get_or_init().await?;
-		handler.handle_udp(stream).await
+		handler.handle_udp(ctx, stream).await
 	}
 }

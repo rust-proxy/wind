@@ -10,7 +10,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use tokio_util::sync::CancellationToken;
-use wind_core::{AbstractInbound, InboundCallback, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
+use wind_core::{AbstractInbound, FlowContext, InboundCallback, tcp::AbstractTcpStream, udp::UdpStream};
 use wind_socks::inbound::{AuthMode, SocksInbound, SocksInboundOpt};
 
 /// A callback whose handlers never complete on their own. Forces shutdown to be
@@ -20,12 +20,12 @@ use wind_socks::inbound::{AuthMode, SocksInbound, SocksInboundOpt};
 struct ParkCallback;
 
 impl InboundCallback for ParkCallback {
-	async fn handle_tcpstream(&self, _target: TargetAddr, _stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
+	async fn handle_tcpstream(&self, _ctx: FlowContext, _stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
 		std::future::pending::<()>().await;
 		Ok(())
 	}
 
-	async fn handle_udpstream(&self, _udp_stream: UdpStream) -> eyre::Result<()> {
+	async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
 		std::future::pending::<()>().await;
 		Ok(())
 	}
@@ -45,6 +45,7 @@ async fn spawn_inbound(cancel: CancellationToken) -> (SocketAddr, tokio::task::J
 		auth: AuthMode::NoAuth,
 		skip_auth: false,
 		allow_udp: false,
+		inbound_tag: "test-socks".into(),
 		hooks: Default::default(),
 	};
 	let inbound = SocksInbound::new(opts, cancel);

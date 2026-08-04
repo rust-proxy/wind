@@ -135,6 +135,10 @@ pub struct TuicInboundOpts {
 	/// management). Defaults to all-`None` (no behavior change).
 	pub hooks: InboundHooks,
 
+	/// Stable per-inbound identifier used by `IN-NAME` routing rules.
+	/// Defaults to `"tuic"`.
+	pub inbound_tag: Arc<str>,
+
 	/// Live-connection registry for per-user connection limits + active kick.
 	/// Defaults to `None` (no registration). When set, each authenticated
 	/// connection registers itself and `kick_user` can drop it.
@@ -165,6 +169,7 @@ impl Default for TuicInboundOpts {
 			newreno_loss_reduction_factor: None,
 			masquerade: None,
 			hooks: InboundHooks::default(),
+			inbound_tag: Arc::from("tuic"),
 			active: None,
 		}
 	}
@@ -312,6 +317,7 @@ impl AbstractInbound for TuicInbound {
 					let masquerade = opts.masquerade.clone();
 					let hooks = opts.hooks.clone();
 					let active = opts.active.clone();
+					let inbound_tag = opts.inbound_tag.clone();
 					let cb = cb.clone();
 					let conn_cancel = self.cancel.child_token();
 					let remote = incoming.remote_address();
@@ -327,7 +333,7 @@ impl AbstractInbound for TuicInbound {
 					// `tasks.close()` + `tasks.wait()` after cancelling).
 					self.ctx.tasks.spawn(spawn_logged(
 						"Connection handler",
-						handle_connection(incoming, users, auth_timeout, zero_rtt, masquerade, cb, conn_cancel, hooks, active),
+						handle_connection(incoming, users, auth_timeout, zero_rtt, masquerade, cb, conn_cancel, hooks, active, inbound_tag),
 					).instrument(span));
 				}
 				else => {
@@ -361,6 +367,7 @@ async fn handle_connection<C: InboundCallback>(
 	cancel: CancellationToken,
 	hooks: InboundHooks,
 	active: Option<crate::active::ActiveConnections>,
+	inbound_tag: Arc<str>,
 ) -> eyre::Result<()> {
 	let remote_addr = incoming.remote_address();
 
@@ -410,6 +417,7 @@ async fn handle_connection<C: InboundCallback>(
 		masquerade,
 		hooks,
 		active,
+		inbound_tag,
 	)
 	.await;
 

@@ -14,7 +14,7 @@ use tracing::{Instrument as _, warn};
 #[cfg(test)]
 use wind_core::AppContext;
 use wind_core::{
-	InboundCallback,
+	FlowContext, InboundCallback,
 	tcp::AbstractTcpStream,
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
@@ -28,18 +28,14 @@ use wind_core::{
 pub struct DirectCallback;
 
 impl InboundCallback for DirectCallback {
-	async fn handle_tcpstream(
-		&self,
-		target_addr: TargetAddr,
-		mut stream: impl AbstractTcpStream + 'static,
-	) -> eyre::Result<()> {
-		let addr = target_addr.to_string();
+	async fn handle_tcpstream(&self, ctx: FlowContext, mut stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
+		let addr = ctx.target.to_string();
 		let mut target = tokio::net::TcpStream::connect(&addr).await?;
 		tokio::io::copy_bidirectional(&mut stream, &mut target).await?;
 		Ok(())
 	}
 
-	async fn handle_udpstream(&self, stream: UdpStream) -> eyre::Result<()> {
+	async fn handle_udpstream(&self, _ctx: FlowContext, stream: UdpStream) -> eyre::Result<()> {
 		let UdpStream { tx, mut rx } = stream;
 		let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
@@ -137,13 +133,40 @@ pub fn generate_tuic_test_cert() -> (Vec<CertificateDer<'static>>, PrivateKeyDer
 mod tests {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 	use uuid::Uuid;
-	use wind_core::{AbstractInbound, AbstractOutbound};
+	use wind_core::{AbstractInbound, AbstractOutbound, hooks::Protocol, rule::NetworkType};
 	use wind_tuic::quinn::{
 		inbound::{TuicInbound, TuicInboundOpts},
 		outbound::{ReconnectConfig, TuicOutbound, TuicOutboundOpts},
 	};
 
 	use super::*;
+
+	/// Minimal context for direct outbound-handler tests.
+	fn test_ctx(target: &TargetAddr) -> FlowContext {
+		FlowContext {
+			target: target.clone(),
+			network: NetworkType::Tcp,
+			source: None,
+			inbound_tag: "wind-test".into(),
+			protocol: Protocol::Tunnel,
+			user: None,
+			inbound_port: None,
+			inbound_type: None,
+		}
+	}
+
+	fn test_udp_ctx() -> FlowContext {
+		FlowContext {
+			target: TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
+			network: NetworkType::Udp,
+			source: None,
+			inbound_tag: "wind-test".into(),
+			protocol: Protocol::Tunnel,
+			user: None,
+			inbound_port: None,
+			inbound_type: None,
+		}
+	}
 
 	const TEST_PASSWORD: &[u8] = b"wind_tuic_test_secret";
 
@@ -289,7 +312,7 @@ mod tests {
 				rx: rx_at_client,
 			};
 			let c = client.clone();
-			let handle = tokio::spawn(async move { c.handle_udp(stream, None::<TuicOutbound>).await });
+			let handle = tokio::spawn(async move { c.handle_udp(test_udp_ctx(), stream, None::<TuicOutbound>).await });
 
 			// Let the association get created, then close the local side.
 			tokio::time::sleep(Duration::from_millis(100)).await;
@@ -417,7 +440,7 @@ mod tests {
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
 
 		tokio::spawn(async move {
-			let _ = client.handle_tcp(target, remote, None::<TuicOutbound>).await;
+			let _ = client.handle_tcp(test_ctx(&target), remote, None::<TuicOutbound>).await;
 		});
 
 		let msg = b"hello wind-tuic";
@@ -453,7 +476,7 @@ mod tests {
 		let (mut local, remote) = tokio::io::duplex(65536);
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
 		tokio::spawn(async move {
-			let _ = client.handle_tcp(target, remote, None::<TuicOutbound>).await;
+			let _ = client.handle_tcp(test_ctx(&target), remote, None::<TuicOutbound>).await;
 		});
 
 		let payload: Vec<u8> = (0u8..=255).cycle().take(32 * 1024).collect();
@@ -533,7 +556,9 @@ mod tests {
 		let client_for_udp = client.clone();
 		tokio::spawn(
 			async move {
-				let _ = client_for_udp.handle_udp(stream_for_client, None::<TuicOutbound>).await;
+				let _ = client_for_udp
+					.handle_udp(test_udp_ctx(), stream_for_client, None::<TuicOutbound>)
+					.await;
 			}
 			.in_current_span(),
 		);
@@ -691,7 +716,7 @@ mod tests {
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_port);
 		let c = client.clone();
 		tokio::spawn(async move {
-			let _ = c.handle_tcp(target, remote, None::<TuicOutbound>).await;
+			let _ = c.handle_tcp(test_ctx(&target), remote, None::<TuicOutbound>).await;
 		});
 		local.write_all(msg).await?;
 		let mut buf = vec![0u8; msg.len()];
@@ -974,7 +999,7 @@ mod tests {
 			let client = client.clone();
 			tokio::spawn(
 				async move {
-					let _ = client.handle_tcp(target, remote, None::<TuicOutbound>).await;
+					let _ = client.handle_tcp(test_ctx(&target), remote, None::<TuicOutbound>).await;
 				}
 				.in_current_span(),
 			);
@@ -1006,7 +1031,7 @@ mod tests {
 		.await;
 		let (_l2, r2) = tokio::io::duplex(1024);
 		let t2 = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
-		let _ = c2.handle_tcp(t2, r2, None::<TuicOutbound>).await;
+		let _ = c2.handle_tcp(test_ctx(&t2), r2, None::<TuicOutbound>).await;
 		tokio::time::sleep(Duration::from_millis(400)).await;
 		assert!(
 			limiter.rejected.load(Ordering::SeqCst) >= 1,

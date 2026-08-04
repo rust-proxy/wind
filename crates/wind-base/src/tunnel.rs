@@ -20,7 +20,8 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, warn};
 use wind_core::{
-	AbstractInbound, InboundCallback,
+	AbstractInbound, FlowContext, InboundCallback, Protocol as WProtocol,
+	rule::NetworkType,
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
 };
@@ -69,12 +70,22 @@ impl AbstractInbound for TunnelTcpInbound {
 					Ok((stream, peer)) => {
 						let cb = cb.clone();
 						let target = TargetAddr::Domain(self.remote.0.clone(), self.remote.1);
+						let ctx = FlowContext {
+							target,
+							network: NetworkType::Tcp,
+							source: Some(peer),
+							inbound_tag: "tunnel".into(),
+							protocol: WProtocol::Tunnel,
+							user: None,
+							inbound_port: Some(self.listen.port()),
+							inbound_type: None,
+						};
 						let conn_cancel = self.cancel.child_token();
 						conn_tasks.spawn(
 							async move {
 								tokio::select! {
 									_ = conn_cancel.cancelled() => {}
-									res = cb.handle_tcpstream(target, stream) => {
+									res = cb.handle_tcpstream(ctx, stream) => {
 										if let Err(e) = res {
 											warn!("[tunnel-tcp] [{peer}] error: {e}");
 										}
@@ -166,6 +177,20 @@ impl AbstractInbound for TunnelUdpInbound {
 							let (tx_to_local, mut rx_from_out) = tokio::sync::mpsc::channel::<UdpPacket>(64);
 							let udp_stream = UdpStream { tx: tx_to_local, rx: rx_from_local };
 
+							// Per-session context. `target` is a placeholder —
+							// the dispatcher stamps the first packet's real
+							// destination onto it before routing.
+							let ctx = FlowContext {
+								target: TargetAddr::Domain(self.remote.0.clone(), self.remote.1),
+								network: NetworkType::Udp,
+								source: Some(src_addr),
+								inbound_tag: "tunnel".into(),
+								protocol: WProtocol::Tunnel,
+								user: None,
+								inbound_port: self.socket.local_addr().ok().map(|a| a.port()),
+								inbound_type: None,
+							};
+
 							// Reply bridge: packets from remote → local socket.
 							tokio::spawn(async move {
 								while let Some(reply_pkt) = rx_from_out.recv().await {
@@ -178,7 +203,7 @@ impl AbstractInbound for TunnelUdpInbound {
 							// Relay through dispatcher
 							let cb = cb.clone();
 							tokio::spawn(async move {
-								if let Err(e) = cb.handle_udpstream(udp_stream).await {
+								if let Err(e) = cb.handle_udpstream(ctx, udp_stream).await {
 									warn!("[tunnel-udp] [{assoc_id:#06x}] relay error: {e}");
 								}
 							}.in_current_span());
@@ -274,7 +299,7 @@ mod tests {
 	impl InboundCallback for EchoCallback {
 		async fn handle_tcpstream(
 			&self,
-			_target_addr: TargetAddr,
+			_ctx: FlowContext,
 			mut stream: impl wind_core::tcp::AbstractTcpStream,
 		) -> eyre::Result<()> {
 			let mut buf = vec![0u8; 1024];
@@ -284,7 +309,7 @@ mod tests {
 			Ok(())
 		}
 
-		async fn handle_udpstream(&self, _udp_stream: UdpStream) -> eyre::Result<()> {
+		async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
 			Ok(())
 		}
 	}
@@ -298,10 +323,10 @@ mod tests {
 	impl InboundCallback for RecordCallback {
 		async fn handle_tcpstream(
 			&self,
-			target_addr: TargetAddr,
+			ctx: FlowContext,
 			mut stream: impl wind_core::tcp::AbstractTcpStream,
 		) -> eyre::Result<()> {
-			self.targets.lock().unwrap().push(target_addr);
+			self.targets.lock().unwrap().push(ctx.target);
 			// drain the stream so the peer sees EOF
 			let mut buf = [0u8; 64];
 			let _ = stream.read(&mut buf).await;
@@ -309,7 +334,7 @@ mod tests {
 			Ok(())
 		}
 
-		async fn handle_udpstream(&self, _udp_stream: UdpStream) -> eyre::Result<()> {
+		async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
 			Ok(())
 		}
 	}
@@ -321,13 +346,13 @@ mod tests {
 	impl InboundCallback for RejectCallback {
 		async fn handle_tcpstream(
 			&self,
-			_target_addr: TargetAddr,
+			_ctx: FlowContext,
 			_stream: impl wind_core::tcp::AbstractTcpStream,
 		) -> eyre::Result<()> {
 			Err(eyre::eyre!("rejected"))
 		}
 
-		async fn handle_udpstream(&self, _udp_stream: UdpStream) -> eyre::Result<()> {
+		async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
 			Err(eyre::eyre!("rejected"))
 		}
 	}
@@ -484,13 +509,13 @@ mod tests {
 	impl InboundCallback for UdpEchoCallback {
 		async fn handle_tcpstream(
 			&self,
-			_target_addr: TargetAddr,
+			_ctx: FlowContext,
 			_stream: impl wind_core::tcp::AbstractTcpStream,
 		) -> eyre::Result<()> {
 			Ok(())
 		}
 
-		async fn handle_udpstream(&self, udp_stream: UdpStream) -> eyre::Result<()> {
+		async fn handle_udpstream(&self, _ctx: FlowContext, udp_stream: UdpStream) -> eyre::Result<()> {
 			let UdpStream { tx, mut rx } = udp_stream;
 			while let Some(pkt) = rx.recv().await {
 				// Echo the payload back with source=target so the reply bridge
@@ -598,13 +623,13 @@ mod tests {
 		impl InboundCallback for CountCallback {
 			async fn handle_tcpstream(
 				&self,
-				_target: TargetAddr,
+				_ctx: FlowContext,
 				_stream: impl wind_core::tcp::AbstractTcpStream,
 			) -> eyre::Result<()> {
 				Ok(())
 			}
 
-			async fn handle_udpstream(&self, stream: UdpStream) -> eyre::Result<()> {
+			async fn handle_udpstream(&self, _ctx: FlowContext, stream: UdpStream) -> eyre::Result<()> {
 				self.count.fetch_add(1, Ordering::Relaxed);
 				// Keep the session alive briefly, then drop.
 				let UdpStream { tx: _tx, mut rx } = stream;
@@ -659,13 +684,13 @@ mod tests {
 		impl InboundCallback for StallCallback {
 			async fn handle_tcpstream(
 				&self,
-				_target: TargetAddr,
+				_ctx: FlowContext,
 				_stream: impl wind_core::tcp::AbstractTcpStream,
 			) -> eyre::Result<()> {
 				Ok(())
 			}
 
-			async fn handle_udpstream(&self, _stream: UdpStream) -> eyre::Result<()> {
+			async fn handle_udpstream(&self, _ctx: FlowContext, _stream: UdpStream) -> eyre::Result<()> {
 				// Never read → queue stays full.
 				std::future::pending::<()>().await;
 				Ok(())

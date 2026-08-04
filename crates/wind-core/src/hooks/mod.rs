@@ -111,6 +111,8 @@ pub enum Protocol {
 	Tuic,
 	Socks5,
 	Naive,
+	/// Fixed-target port forwarder (tunnel inbound).
+	Tunnel,
 }
 
 /// Per-connection context handed to [`ConnectionHooks`].

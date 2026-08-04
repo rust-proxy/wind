@@ -33,7 +33,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, error, info, warn};
 use uuid::Uuid;
 use wind_core::{
-	ConnInfo, ConnectDecision, InboundCallback, InboundHooks, Protocol, StatsCollector, UserId,
+	ConnInfo, ConnectDecision, FlowContext, InboundCallback, InboundHooks, Protocol, StatsCollector, UserId,
+	rule::NetworkType,
 	udp::{UdpPacket, UdpStream as CoreUdpStream},
 };
 use wind_quic::{QuicConnection, QuicError};
@@ -162,6 +163,8 @@ struct InboundCtx<C: QuicConnection> {
 	hooks: InboundHooks,
 	/// Per-connection context handed to connection-management hooks.
 	conn_info: ConnInfo,
+	/// Stable per-inbound identifier used by `IN-NAME` routing rules.
+	inbound_tag: Arc<str>,
 	/// Live-connection registry for per-user limits + active kick. The
 	/// connection registers itself here once authenticated and deregisters on
 	/// close; `kick_user` cancels `conn_cancel` to drop it.
@@ -316,6 +319,7 @@ pub async fn serve_connection<C, CB>(
 	masq: Option<MasqueradeConfig>,
 	hooks: InboundHooks,
 	active: Option<ActiveConnections>,
+	inbound_tag: Arc<str>,
 ) where
 	C: QuicConnection,
 	CB: InboundCallback,
@@ -369,6 +373,7 @@ pub async fn serve_connection<C, CB>(
 		udp_root_cancel,
 		hooks,
 		conn_info,
+		inbound_tag,
 		active,
 		conn_cancel: cancel.clone(),
 	});
@@ -758,9 +763,20 @@ async fn handle_bi_stream<C: QuicConnection, CB: InboundCallback>(
 				stats.record_request(&user);
 			}
 
+			let ctx = FlowContext {
+				target: target_addr,
+				network: NetworkType::Tcp,
+				source: Some(connection.conn_info.remote_addr),
+				inbound_tag: connection.inbound_tag.clone(),
+				protocol: Protocol::Tuic,
+				user: connection.user(),
+				inbound_port: None,
+				inbound_type: None,
+			};
+
 			let stream = tokio::io::join(recv, send);
 
-			callback.handle_tcpstream(target_addr, stream).await?;
+			callback.handle_tcpstream(ctx, stream).await?;
 		}
 		_ => {
 			warn!("Unexpected command on bi stream: {:?}", header.command);
@@ -970,6 +986,20 @@ async fn get_or_create_session<C: QuicConnection, CB: InboundCallback>(
 		stats.record_request(&user);
 	}
 
+	// Session-level context: the destination is a placeholder — the dispatcher
+	// stamps the first packet's real target onto it before routing (the
+	// per-session routing decision is made on that packet, once).
+	let udp_ctx = FlowContext {
+		target: wind_core::types::TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0),
+		network: NetworkType::Udp,
+		source: Some(ctx.conn_info.remote_addr),
+		inbound_tag: ctx.inbound_tag.clone(),
+		protocol: Protocol::Tuic,
+		user: ctx.user(),
+		inbound_port: None,
+		inbound_type: None,
+	};
+
 	let cb = callback.clone();
 	let conn = ctx.conn.clone();
 	let session_cancel = ctx.udp_root_cancel.child_token();
@@ -1056,7 +1086,7 @@ async fn get_or_create_session<C: QuicConnection, CB: InboundCallback>(
 						// hostage after eviction/dissociate.
 						tokio::select! {
 							_ = cancel_c.cancelled() => {}
-							res = cb.handle_udpstream(outbound_stream) => {
+							res = cb.handle_udpstream(udp_ctx, outbound_stream) => {
 								if let Err(e) = res {
 									error!("UDP stream handler error (assoc {}): {}", assoc_id, e);
 								}
@@ -1158,7 +1188,7 @@ mod tests {
 	};
 
 	use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-	use wind_core::{InboundCallback, types::TargetAddr, udp::UdpStream as CoreUdpStream};
+	use wind_core::{InboundCallback, udp::UdpStream as CoreUdpStream};
 	use wind_quic::{QuicRecvStream, QuicSendStream};
 
 	// Brings in Arc, Duration, Ordering, CancellationToken, QuicError, CmdType,
@@ -1312,13 +1342,13 @@ mod tests {
 	impl InboundCallback for HangingUdpCallback {
 		async fn handle_tcpstream(
 			&self,
-			_target_addr: TargetAddr,
+			_ctx: FlowContext,
 			_stream: impl wind_core::tcp::AbstractTcpStream + 'static,
 		) -> eyre::Result<()> {
 			Ok(())
 		}
 
-		async fn handle_udpstream(&self, _udp_stream: CoreUdpStream) -> eyre::Result<()> {
+		async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: CoreUdpStream) -> eyre::Result<()> {
 			let _guard = NotifyOnDrop {
 				dropped: self.dropped.clone(),
 				was_dropped: self.was_dropped.clone(),
@@ -1365,6 +1395,7 @@ mod tests {
 				protocol: Protocol::Tuic,
 				conn_id: 1,
 			},
+			inbound_tag: Arc::from("test-tuic"),
 			active: None,
 			conn_cancel: CancellationToken::new(),
 		});

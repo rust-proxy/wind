@@ -17,7 +17,7 @@ use tokio::{
 	net::{TcpListener, TcpStream},
 };
 use tokio_util::sync::CancellationToken;
-use wind_core::{AbstractInbound, InboundCallback, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
+use wind_core::{AbstractInbound, FlowContext, InboundCallback, tcp::AbstractTcpStream, udp::UdpStream};
 use wind_socks::inbound::{AuthMode, SocksInbound, SocksInboundOpt};
 
 /// Inbound callback that relays an accepted SOCKS5 TCP stream to its real
@@ -26,13 +26,13 @@ use wind_socks::inbound::{AuthMode, SocksInbound, SocksInboundOpt};
 struct TcpRelayCallback;
 
 impl InboundCallback for TcpRelayCallback {
-	async fn handle_tcpstream(&self, target: TargetAddr, mut stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
-		let mut upstream = TcpStream::connect(target.to_string()).await?;
+	async fn handle_tcpstream(&self, ctx: FlowContext, mut stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
+		let mut upstream = TcpStream::connect(ctx.target.to_string()).await?;
 		tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
 		Ok(())
 	}
 
-	async fn handle_udpstream(&self, _udp_stream: UdpStream) -> eyre::Result<()> {
+	async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
 		Ok(())
 	}
 }
@@ -74,6 +74,7 @@ async fn spawn_socks(auth: AuthMode) -> (SocketAddr, CancellationToken) {
 		auth,
 		skip_auth: false,
 		allow_udp: false,
+		inbound_tag: "test-socks".into(),
 		hooks: Default::default(),
 	};
 	let cancel = CancellationToken::new();

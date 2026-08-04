@@ -5,7 +5,7 @@ use fast_socks5::{
 	Socks5Command,
 	client::{Config, Socks5Stream},
 };
-use wind_core::{AbstractOutbound, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
+use wind_core::{AbstractOutbound, FlowContext, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
 
 pub struct SocksOutboundOpt {
 	pub server_addr: SocketAddr,
@@ -25,13 +25,13 @@ impl SocksOutbound {
 impl AbstractOutbound for SocksOutbound {
 	async fn handle_tcp(
 		&self,
-		target_addr: TargetAddr,
+		ctx: FlowContext,
 		mut stream: impl AbstractTcpStream,
 		via: Option<impl AbstractOutbound + Sized + Send>,
 	) -> eyre::Result<()> {
 		let socks_config = Config::default();
 
-		let socks_addr = crate::convert_to_socks_addr(&target_addr);
+		let socks_addr = crate::convert_to_socks_addr(&ctx.target);
 
 		let auth = self
 			.opts
@@ -50,8 +50,15 @@ impl AbstractOutbound for SocksOutbound {
 				std::net::IpAddr::V6(v6) => TargetAddr::IPv6(v6, self.opts.server_addr.port()),
 			};
 
-			let via_future = via.handle_tcp(server_addr_target, remote_stream, None::<SocksOutbound>);
+			// The chained outbound dials the SOCKS *server* (not the original
+			// target); the SOCKS handshake on the duplex then requests the
+			// original destination. Keep the rest of the connection context.
+			let via_ctx = FlowContext {
+				target: server_addr_target,
+				..ctx
+			};
 
+			let via_future = via.handle_tcp(via_ctx, remote_stream, None::<SocksOutbound>);
 			let socks_future = async move {
 				let mut p = Socks5Stream::use_stream(local_stream, auth, socks_config)
 					.await
@@ -86,7 +93,12 @@ impl AbstractOutbound for SocksOutbound {
 		Ok(())
 	}
 
-	async fn handle_udp(&self, _udp_stream: UdpStream, _via: Option<impl AbstractOutbound + Sized + Send>) -> eyre::Result<()> {
+	async fn handle_udp(
+		&self,
+		_ctx: FlowContext,
+		_udp_stream: UdpStream,
+		_via: Option<impl AbstractOutbound + Sized + Send>,
+	) -> eyre::Result<()> {
 		Err(eyre!("SOCKS5 UDP outbound is not yet supported"))
 	}
 }

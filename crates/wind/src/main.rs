@@ -32,11 +32,7 @@ struct DefaultRouter {
 }
 
 impl Router for DefaultRouter {
-	async fn route(
-		&self,
-		_target: &wind_core::types::TargetAddr,
-		_is_tcp: bool,
-	) -> eyre::Result<wind_core::dispatcher::RouteAction> {
+	async fn route(&self, _ctx: &wind_core::FlowContext) -> eyre::Result<wind_core::dispatcher::RouteAction> {
 		Ok(wind_core::dispatcher::RouteAction::Forward(self.default.clone()))
 	}
 }

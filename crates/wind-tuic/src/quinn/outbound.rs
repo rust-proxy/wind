@@ -12,7 +12,7 @@ use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, info, warn};
 use uuid::Uuid;
-use wind_core::{AbstractOutbound, AppContext, tcp::AbstractTcpStream, types::TargetAddr};
+use wind_core::{AbstractOutbound, AppContext, FlowContext, tcp::AbstractTcpStream, types::TargetAddr};
 use wind_quic::{QuicConnection as _, quinn::QuinnConnection};
 
 use crate::{
@@ -427,17 +427,18 @@ pub struct TuicTcpStream;
 impl AbstractOutbound for TuicOutbound {
 	async fn handle_tcp(
 		&self,
-		target_addr: TargetAddr,
+		ctx: FlowContext,
 		stream: impl AbstractTcpStream,
 		_dialer: Option<impl AbstractOutbound>,
 	) -> eyre::Result<()> {
 		let connection = self.connection.load_full();
-		connection.open_tcp(&target_addr, stream).await?;
+		connection.open_tcp(&ctx.target, stream).await?;
 		Ok(())
 	}
 
 	async fn handle_udp(
 		&self,
+		_ctx: FlowContext,
 		client_stream: wind_core::udp::UdpStream,
 		_dialer: Option<impl AbstractOutbound>,
 	) -> eyre::Result<()> {
