@@ -529,19 +529,14 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 						let source_addr = packet.target.clone();
 						tokio::spawn(async move {
 							let mut buf = vec![0u8; 65536];
-							loop {
-								match target_sock_for_recv.recv_from(&mut buf).await {
-									Ok((len, _from)) => {
-										let reply_packet = wind_core::udp::UdpPacket {
-											source: None,
-											target: source_addr.clone(),
-											payload: tokio_util::bytes::Bytes::copy_from_slice(&buf[..len]),
-										};
-										if let Err(e) = tx_for_recv.send(reply_packet).await {
-											eprintln!("UDP relay: failed to send reply packet: {}", e);
-										}
-									}
-									Err(_) => break,
+							while let Ok((len, _from)) = target_sock_for_recv.recv_from(&mut buf).await {
+								let reply_packet = wind_core::udp::UdpPacket {
+									source: None,
+									target: source_addr.clone(),
+									payload: tokio_util::bytes::Bytes::copy_from_slice(&buf[..len]),
+								};
+								if let Err(e) = tx_for_recv.send(reply_packet).await {
+									eprintln!("UDP relay: failed to send reply packet: {}", e);
 								}
 							}
 						});

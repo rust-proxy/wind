@@ -528,13 +528,8 @@ mod tests {
 		tokio::spawn(
 			async move {
 				let mut buf = vec![0u8; 65536];
-				loop {
-					match echo.recv_from(&mut buf).await {
-						Ok((n, from)) => {
-							let _ = echo.send_to(&buf[..n], from).await;
-						}
-						Err(_) => break,
-					}
+				while let Ok((n, from)) = echo.recv_from(&mut buf).await {
+					let _ = echo.send_to(&buf[..n], from).await;
 				}
 			}
 			.in_current_span(),
