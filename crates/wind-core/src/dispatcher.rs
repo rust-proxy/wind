@@ -63,7 +63,7 @@ pub trait Router: Send + Sync + 'static {
 /// ```ignore
 /// let mut dispatcher = Dispatcher::new(my_router);
 /// dispatcher.add_handler("default", Arc::new(DirectOutbound::new(/* ... */)));
-/// dispatcher.add_handler("socks5", Arc::new(Socks5Action::new(/* ... */)));
+/// dispatcher.add_handler("socks5", Arc::new(SocksOutbound::new(/* ... */)));
 /// ```
 ///
 /// Then pass `dispatcher` (or `dispatcher.clone()`) to `inbound.listen()`.

@@ -13,7 +13,7 @@ use wind_core::{
 
 /// Options for a SOCKS5 outbound action handler.
 #[derive(Clone, Debug)]
-pub struct Socks5ActionOpts {
+pub struct SocksOutboundOpts {
 	/// SOCKS5 proxy address (e.g. "127.0.0.1:1080").
 	pub addr: String,
 	/// Optional authentication credentials.
@@ -31,18 +31,18 @@ pub struct Socks5ActionOpts {
 }
 
 /// SOCKS5 outbound handler implementing the object-safe [`Outbound`] trait.
-pub struct Socks5Action {
-	opts: Socks5ActionOpts,
+pub struct SocksOutbound {
+	opts: SocksOutboundOpts,
 }
 
-impl Socks5Action {
-	pub fn new(opts: Socks5ActionOpts) -> Self {
+impl SocksOutbound {
+	pub fn new(opts: SocksOutboundOpts) -> Self {
 		Self { opts }
 	}
 }
 
 #[async_trait]
-impl Outbound for Socks5Action {
+impl Outbound for SocksOutbound {
 	async fn handle_tcp(&self, ctx: FlowContext, mut stream: Box<dyn AbstractTcpStream>) -> eyre::Result<()> {
 		let target = ctx.target;
 		let span = tracing::debug_span!("socks5_tcp", target = %target, addr = %self.opts.addr);
@@ -73,7 +73,7 @@ impl Outbound for Socks5Action {
 async fn connect_socks5_tcp(
 	socks_addr: &str,
 	target_addr: &TargetAddr,
-	opts: &Socks5ActionOpts,
+	opts: &SocksOutboundOpts,
 ) -> eyre::Result<Socks5Stream<TcpStream>> {
 	let config = Socks5Config::default();
 
