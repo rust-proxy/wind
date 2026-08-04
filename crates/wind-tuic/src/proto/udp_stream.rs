@@ -7,10 +7,12 @@ use wind_core::{types::TargetAddr, udp::UdpPacket};
 
 type UdpPacketTx = MAsyncTx<mpmc::Array<UdpPacket>>;
 
-use crate::udp::{FragmentInfo, FragmentReassemblyBuffer, MAX_FRAGMENTS};
 use wind_quic::QuicConnection;
 
-use crate::proto::{Address, AddressCodec, ClientProtoExt as _, CmdCodec, CmdType, Command, Header, HeaderCodec};
+use crate::{
+	proto::{Address, AddressCodec, ClientProtoExt as _, CmdCodec, CmdType, Command, Header, HeaderCodec},
+	udp::{FragmentInfo, FragmentReassemblyBuffer, MAX_FRAGMENTS},
+};
 
 /// A TUIC UDP association over any [`QuicConnection`].
 ///
