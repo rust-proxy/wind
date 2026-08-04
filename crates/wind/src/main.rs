@@ -4,8 +4,8 @@ use clap::Parser as _;
 use tracing::{Level, info, warn};
 use wind_base::load_balance::{LoadBalanceOpts, LoadBalanceOutbound, LoadBalanceStrategy};
 use wind_core::{
-	AppContext,
-	dispatcher::{Dispatcher, OutboundAsAction, Router},
+	AppContext, Outbound,
+	dispatcher::{Dispatcher, Router},
 	inbound::AbstractInbound,
 };
 use wind_naive::NaiveOutbound;
@@ -144,7 +144,7 @@ async fn build_dispatcher(outbounds: Vec<OutboundRuntime>, ctx: Arc<AppContext>)
 	//  1. Build regular outbounds (tuic, naive) and stash them by tag.
 	//  2. Build load-balance outbounds, resolving child proxy tags from the map
 	//     built in phase 1.
-	let mut handlers: HashMap<String, Arc<dyn wind_core::dispatcher::OutboundAction>> = HashMap::new();
+	let mut handlers: HashMap<String, Arc<dyn Outbound>> = HashMap::new();
 	let mut lb_configs: Vec<(String, crate::conf::runtime::LoadBalanceRuntimeOpts)> = Vec::new();
 
 	for ob in outbounds {
@@ -152,12 +152,12 @@ async fn build_dispatcher(outbounds: Vec<OutboundRuntime>, ctx: Arc<AppContext>)
 		match ob.opts {
 			OutboundOpts::Tuic(opts) => {
 				let out = TuicOutbound::new(ctx.clone(), opts).await?;
-				handlers.insert(tag.clone(), Arc::new(OutboundAsAction { inner: out }));
+				handlers.insert(tag.clone(), Arc::new(out));
 				info!(target: "wind_boot", "outbound '{tag}' [tuic]");
 			}
 			OutboundOpts::Naive(opts) => {
 				let out = NaiveOutbound::new(opts).await?;
-				handlers.insert(tag.clone(), Arc::new(OutboundAsAction { inner: out }));
+				handlers.insert(tag.clone(), Arc::new(out));
 				info!(target: "wind_boot", "outbound '{tag}' [naive]");
 			}
 			OutboundOpts::LoadBalance(lb) => {
@@ -167,7 +167,7 @@ async fn build_dispatcher(outbounds: Vec<OutboundRuntime>, ctx: Arc<AppContext>)
 	}
 
 	for (tag, lb) in lb_configs {
-		let children: Vec<Arc<dyn wind_core::dispatcher::OutboundAction>> = {
+		let children: Vec<Arc<dyn Outbound>> = {
 			lb.proxy_tags
 				.iter()
 				.map(|t| {

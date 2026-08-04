@@ -5670,6 +5670,7 @@ dependencies = [
 name = "wind-naive"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "cronet-rs",
  "eyre",
@@ -5761,6 +5762,7 @@ name = "wind-tuic"
 version = "0.2.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "aws-lc-rs",
  "bytes",
  "color-eyre",

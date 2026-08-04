@@ -14,7 +14,7 @@ pub mod types;
 
 pub use active::ActiveConnections;
 pub use app::{App, Plugin};
-pub use dispatcher::{AclRouter, Dispatcher, OutboundAction, RouteAction, Router};
+pub use dispatcher::{AclRouter, Dispatcher, RouteAction, Router};
 pub use flow::FlowContext;
 pub use hooks::{
 	ConnInfo, ConnectDecision, ConnectionHooks, InboundHooks, Protocol, StaticTuicAuth, StaticUserPass, StatsCollector,

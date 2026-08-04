@@ -12,7 +12,7 @@
 //!   veto ([`ConnectDecision`]) for per-user limits.
 //!
 //! All traits are object-safe (`#[async_trait]` + `Arc<dyn _>`), mirroring
-//! [`OutboundAction`](crate::OutboundAction). They are bundled in
+//! [`Outbound`](crate::Outbound). They are bundled in
 //! [`InboundHooks`], which is threaded into each inbound via its opts struct
 //! and defaults to all-`None` (no behavior change).
 

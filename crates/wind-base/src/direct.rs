@@ -12,7 +12,7 @@ use tokio::{
 };
 use tracing::Instrument;
 use wind_core::{
-	FlowContext, OutboundAction,
+	FlowContext, Outbound,
 	resolve::Resolver,
 	tcp::{AbstractTcpStream, TcpKeepalive},
 	types::TargetAddr,
@@ -71,7 +71,7 @@ impl DirectOutbound {
 }
 
 #[async_trait]
-impl OutboundAction for DirectOutbound {
+impl Outbound for DirectOutbound {
 	async fn handle_tcp(&self, ctx: FlowContext, mut stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 		let target = ctx.target;
 		let span = tracing::debug_span!("direct_tcp", target = %target);

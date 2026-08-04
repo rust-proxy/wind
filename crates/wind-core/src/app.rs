@@ -16,7 +16,7 @@ use bytesize::ByteSize;
 use tracing::{error, info, warn};
 
 use crate::{
-	AbstractInbound, AppContext, Dispatcher, FlowContext, OutboundAction, RouteAction, Router,
+	AbstractInbound, AppContext, Dispatcher, FlowContext, Outbound, RouteAction, Router,
 	hooks::{
 		ConnectionHooks, FanOutConnectionHooks, InboundHooks, StatsCollector, TrafficSink, TuicAuthenticator,
 		UserPassAuthenticator,
@@ -78,7 +78,7 @@ pub trait Plugin {
 /// [`App::run`].
 pub struct App {
 	ctx: Arc<AppContext>,
-	outbounds: HashMap<String, Arc<dyn OutboundAction>>,
+	outbounds: HashMap<String, Arc<dyn Outbound>>,
 	router: Option<Arc<dyn DynRouter>>,
 	tuic_auth: Option<Arc<dyn TuicAuthenticator>>,
 	userpass_auth: Option<Arc<dyn UserPassAuthenticator>>,
@@ -120,7 +120,7 @@ impl App {
 		plugin.build(self).await
 	}
 
-	pub fn add_outbound(mut self, name: impl Into<String>, handler: Arc<dyn OutboundAction>) -> Self {
+	pub fn add_outbound(mut self, name: impl Into<String>, handler: Arc<dyn Outbound>) -> Self {
 		self.outbounds.insert(name.into(), handler);
 		self
 	}

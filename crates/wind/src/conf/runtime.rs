@@ -46,7 +46,7 @@ pub struct OutboundRuntime {
 
 /// Runtime options for a load-balance outbound.
 ///
-/// Child proxy resolution (tag → `Arc<dyn OutboundAction>`) is deferred
+/// Child proxy resolution (tag → `Arc<dyn Outbound>`) is deferred
 /// to `build_dispatcher` so that it can construct normal outbounds first
 /// and then resolve the tags for load-balance groups.
 pub struct LoadBalanceRuntimeOpts {

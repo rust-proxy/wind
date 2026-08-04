@@ -133,7 +133,7 @@ pub fn generate_tuic_test_cert() -> (Vec<CertificateDer<'static>>, PrivateKeyDer
 mod tests {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 	use uuid::Uuid;
-	use wind_core::{AbstractInbound, AbstractOutbound, hooks::Protocol, rule::NetworkType};
+	use wind_core::{AbstractInbound, Outbound, hooks::Protocol, rule::NetworkType};
 	use wind_tuic::quinn::{
 		inbound::{TuicInbound, TuicInboundOpts},
 		outbound::{ReconnectConfig, TuicOutbound, TuicOutboundOpts},
@@ -312,7 +312,7 @@ mod tests {
 				rx: rx_at_client,
 			};
 			let c = client.clone();
-			let handle = tokio::spawn(async move { c.handle_udp(test_udp_ctx(), stream, None::<TuicOutbound>).await });
+			let handle = tokio::spawn(async move { c.handle_udp(test_udp_ctx(), stream).await });
 
 			// Let the association get created, then close the local side.
 			tokio::time::sleep(Duration::from_millis(100)).await;
@@ -440,7 +440,7 @@ mod tests {
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
 
 		tokio::spawn(async move {
-			let _ = client.handle_tcp(test_ctx(&target), remote, None::<TuicOutbound>).await;
+			let _ = client.handle_tcp(test_ctx(&target), Box::new(remote)).await;
 		});
 
 		let msg = b"hello wind-tuic";
@@ -476,7 +476,7 @@ mod tests {
 		let (mut local, remote) = tokio::io::duplex(65536);
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
 		tokio::spawn(async move {
-			let _ = client.handle_tcp(test_ctx(&target), remote, None::<TuicOutbound>).await;
+			let _ = client.handle_tcp(test_ctx(&target), Box::new(remote)).await;
 		});
 
 		let payload: Vec<u8> = (0u8..=255).cycle().take(32 * 1024).collect();
@@ -556,9 +556,7 @@ mod tests {
 		let client_for_udp = client.clone();
 		tokio::spawn(
 			async move {
-				let _ = client_for_udp
-					.handle_udp(test_udp_ctx(), stream_for_client, None::<TuicOutbound>)
-					.await;
+				let _ = client_for_udp.handle_udp(test_udp_ctx(), stream_for_client).await;
 			}
 			.in_current_span(),
 		);
@@ -716,7 +714,7 @@ mod tests {
 		let target = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_port);
 		let c = client.clone();
 		tokio::spawn(async move {
-			let _ = c.handle_tcp(test_ctx(&target), remote, None::<TuicOutbound>).await;
+			let _ = c.handle_tcp(test_ctx(&target), Box::new(remote)).await;
 		});
 		local.write_all(msg).await?;
 		let mut buf = vec![0u8; msg.len()];
@@ -999,7 +997,7 @@ mod tests {
 			let client = client.clone();
 			tokio::spawn(
 				async move {
-					let _ = client.handle_tcp(test_ctx(&target), remote, None::<TuicOutbound>).await;
+					let _ = client.handle_tcp(test_ctx(&target), Box::new(remote)).await;
 				}
 				.in_current_span(),
 			);
@@ -1031,7 +1029,7 @@ mod tests {
 		.await;
 		let (_l2, r2) = tokio::io::duplex(1024);
 		let t2 = TargetAddr::IPv4(std::net::Ipv4Addr::LOCALHOST, echo_addr.port());
-		let _ = c2.handle_tcp(test_ctx(&t2), r2, None::<TuicOutbound>).await;
+		let _ = c2.handle_tcp(test_ctx(&t2), Box::new(r2)).await;
 		tokio::time::sleep(Duration::from_millis(400)).await;
 		assert!(
 			limiter.rejected.load(Ordering::SeqCst) >= 1,

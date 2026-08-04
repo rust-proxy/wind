@@ -2,27 +2,27 @@
 //!
 //! The dispatcher receives every inbound connection from an [`InboundCallback`]
 //! implementation, evaluates routing rules via a user-supplied [`Router`], and
-//! hands the connection off to the matching [`OutboundAction`] handler.
+//! hands the connection off to the matching [`Outbound`] handler.
 //!
 //! # Design
 //!
 //! * [`Router`] – an **async** trait that inspects the destination and returns
 //!   a [`RouteAction`].  Implementations live in the application crate (e.g.
 //!   `tuic-server`) where ACL rules and outbound configs are known.
-//! * [`OutboundAction`] – an **object-safe** trait representing a concrete
-//!   outbound handler (direct, socks5, …).  Handlers are keyed by name string.
+//! * [`Outbound`] – an **object-safe** trait representing a concrete outbound
+//!   handler (direct, socks5, …).  Handlers are keyed by name string.
 //! * [`Dispatcher`] – wraps a router and a map of named handlers, and
 //!   implements [`InboundCallback`] so it can be passed directly to
 //!   `inbound.listen()`.
 
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
-use async_trait::async_trait;
 use tracing::Instrument;
 
 use crate::{
 	InboundCallback,
 	flow::FlowContext,
+	outbound::Outbound,
 	rule::{MatchContext, Rule},
 	tcp::AbstractTcpStream,
 	udp::UdpStream,
@@ -56,38 +56,20 @@ pub trait Router: Send + Sync + 'static {
 	fn route(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send;
 }
 
-/// Object-safe outbound handler.
-///
-/// Each concrete outbound strategy (direct connect, SOCKS5 proxy, …)
-/// implements this trait.  The stream types are erased via trait objects so
-/// handlers can be stored in a `HashMap`.
-#[async_trait]
-pub trait OutboundAction: Send + Sync + 'static {
-	/// Handle an inbound TCP stream.
-	///
-	/// The stream is boxed and `'static` so it can be stored or sent across
-	/// tasks.  All concrete `AbstractTcpStream` implementations (owned
-	/// `TcpStream`, `Socks5Stream<TcpStream>`, …) satisfy this bound.
-	async fn handle_tcp(&self, ctx: FlowContext, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()>;
-
-	/// Handle an inbound UDP session.
-	async fn handle_udp(&self, ctx: FlowContext, stream: UdpStream) -> eyre::Result<()>;
-}
-
-/// Routes inbound connections to named outbound handlers.
+/// Routes inbound connections to named [`Outbound`] handlers.
 ///
 /// # Construction
 ///
 /// ```ignore
 /// let mut dispatcher = Dispatcher::new(my_router);
-/// dispatcher.add_handler("default", Arc::new(DirectOutbound::new()));
-/// dispatcher.add_handler("via_socks5", Arc::new(Socks5Outbound::new("127.0.0.1:1080")));
+/// dispatcher.add_handler("default", Arc::new(DirectOutbound::new(/* ... */)));
+/// dispatcher.add_handler("socks5", Arc::new(Socks5Action::new(/* ... */)));
 /// ```
 ///
 /// Then pass `dispatcher` (or `dispatcher.clone()`) to `inbound.listen()`.
 pub struct Dispatcher<R: Router> {
 	router: Arc<R>,
-	handlers: Arc<HashMap<String, Arc<dyn OutboundAction>>>,
+	handlers: Arc<HashMap<String, Arc<dyn Outbound>>>,
 }
 
 impl<R: Router> Dispatcher<R> {
@@ -104,13 +86,13 @@ impl<R: Router> Dispatcher<R> {
 	/// Call this before passing the dispatcher to an inbound.  The name
 	/// `"default"` is used as the fallback when the router returns a name that
 	/// is not otherwise registered.
-	pub fn add_handler(&mut self, name: impl Into<String>, handler: Arc<dyn OutboundAction>) {
+	pub fn add_handler(&mut self, name: impl Into<String>, handler: Arc<dyn Outbound>) {
 		Arc::make_mut(&mut self.handlers).insert(name.into(), handler);
 	}
 
 	/// Look up a handler by name, falling back to `"default"` if the exact
 	/// name is not registered.
-	fn resolve_handler(&self, name: &str) -> Option<Arc<dyn OutboundAction>> {
+	fn resolve_handler(&self, name: &str) -> Option<Arc<dyn Outbound>> {
 		self.handlers.get(name).or_else(|| self.handlers.get("default")).cloned()
 	}
 }
@@ -308,59 +290,13 @@ fn rule_target_to_action(target: &str, rule: &Rule) -> RouteAction {
 	}
 }
 
-use crate::AbstractOutbound;
-
-/// Placeholder type used for the `via` parameter when no outbound chaining
-/// is desired.
-///
-/// Calling `handle_tcp` / `handle_udp` on this type will **panic**.
-/// It must never be used — it only exists to fill the generic `via`
-/// parameter of [`AbstractOutbound`].
-pub struct NoChain;
-
-impl AbstractOutbound for NoChain {
-	async fn handle_tcp(
-		&self,
-		_ctx: FlowContext,
-		_stream: impl crate::tcp::AbstractTcpStream,
-		_via: Option<impl AbstractOutbound + Sized + Send>,
-	) -> eyre::Result<()> {
-		unreachable!("NoChain::handle_tcp should never be called")
-	}
-
-	async fn handle_udp(
-		&self,
-		_ctx: FlowContext,
-		_stream: crate::udp::UdpStream,
-		_via: Option<impl AbstractOutbound + Sized + Send>,
-	) -> eyre::Result<()> {
-		unreachable!("NoChain::handle_udp should never be called")
-	}
-}
-
-/// Adapter that wraps any [`AbstractOutbound`] implementation as an
-/// [`OutboundAction`] (object-safe, store-able in the dispatcher).
-///
-/// The `via` chain parameter is filled with [`NoChain`] (panics if called).
-pub struct OutboundAsAction<O> {
-	pub inner: O,
-}
-
-#[async_trait]
-impl<O: AbstractOutbound + Send + Sync + 'static> OutboundAction for OutboundAsAction<O> {
-	async fn handle_tcp(&self, ctx: FlowContext, stream: Box<dyn crate::tcp::AbstractTcpStream + 'static>) -> eyre::Result<()> {
-		self.inner.handle_tcp(ctx, stream, Option::<NoChain>::None).await
-	}
-
-	async fn handle_udp(&self, ctx: FlowContext, stream: crate::udp::UdpStream) -> eyre::Result<()> {
-		self.inner.handle_udp(ctx, stream, Option::<NoChain>::None).await
-	}
-}
 
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
 	use std::sync::atomic::{AtomicBool, Ordering};
+
+	use async_trait::async_trait;
 
 	use super::*;
 	use crate::{hooks::Protocol, rule::NetworkType, types::TargetAddr};
@@ -389,7 +325,7 @@ mod tests {
 		fc(&TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0), false)
 	}
 
-	/// A trivial `OutboundAction` that just records whether it was called.
+	/// A trivial `Outbound` that just records whether it was called.
 	struct MockHandler {
 		tcp_called: AtomicBool,
 		udp_called: AtomicBool,
@@ -405,7 +341,7 @@ mod tests {
 	}
 
 	#[async_trait]
-	impl OutboundAction for MockHandler {
+	impl Outbound for MockHandler {
 		async fn handle_tcp(&self, _ctx: FlowContext, _stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 			self.tcp_called.store(true, Ordering::Relaxed);
 			Ok(())

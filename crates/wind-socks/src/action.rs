@@ -5,7 +5,7 @@ use fast_socks5::client::{Config as Socks5Config, Socks5Stream};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tracing::Instrument;
 use wind_core::{
-	FlowContext, OutboundAction,
+	FlowContext, Outbound,
 	tcp::{AbstractTcpStream, TcpKeepalive},
 	types::TargetAddr,
 	udp::UdpStream,
@@ -30,7 +30,7 @@ pub struct Socks5ActionOpts {
 	pub tcp_keepalive: Option<TcpKeepalive>,
 }
 
-/// SOCKS5 outbound handler implementing the object-safe `OutboundAction` trait.
+/// SOCKS5 outbound handler implementing the object-safe [`Outbound`] trait.
 pub struct Socks5Action {
 	opts: Socks5ActionOpts,
 }
@@ -42,7 +42,7 @@ impl Socks5Action {
 }
 
 #[async_trait]
-impl OutboundAction for Socks5Action {
+impl Outbound for Socks5Action {
 	async fn handle_tcp(&self, ctx: FlowContext, mut stream: Box<dyn AbstractTcpStream>) -> eyre::Result<()> {
 		let target = ctx.target;
 		let span = tracing::debug_span!("socks5_tcp", target = %target, addr = %self.opts.addr);

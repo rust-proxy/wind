@@ -1,6 +1,6 @@
 //! End-to-end tests for the direct UDP relay's dual-stack behaviour.
 //!
-//! These drive the public `OutboundAction::handle_udp` entrypoint exactly as
+//! These drive the public `Outbound::handle_udp` entrypoint exactly as
 //! the TUIC/SOCKS inbounds do — feeding `UdpPacket`s in through the association
 //! channel and reading the replies back out — against real loopback UDP echo
 //! servers.
@@ -17,7 +17,7 @@ use bytes::Bytes;
 use tokio::{net::UdpSocket, sync::mpsc, time::timeout};
 use wind_base::direct::{DirectOutbound, DirectOutboundOpts};
 use wind_core::{
-	FlowContext, OutboundAction, StackPrefer, SystemResolver,
+	FlowContext, Outbound, StackPrefer, SystemResolver,
 	hooks::Protocol,
 	rule::NetworkType,
 	types::TargetAddr,
