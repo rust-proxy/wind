@@ -7,6 +7,9 @@ use eyre;
 use tokio::sync::{Mutex, Notify};
 use wind_core::{OutboundAction, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream};
 
+/// Boxed future that produces the initialised [`OutboundAction`] handler.
+type OutboundFactory = Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn OutboundAction>>> + Send>>;
+
 /// Wraps a future that produces an [`OutboundAction`] and only executes it
 /// once, on the first call to [`handle_tcp`] or [`handle_udp`].  Subsequent
 /// calls delegate to the already-initialised handler.
@@ -24,7 +27,7 @@ pub struct LazyOutbound {
 
 enum LazyState {
 	/// Factory has not yet been called.
-	Uninit(Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn OutboundAction>>> + Send>>),
+	Uninit(OutboundFactory),
 	/// One caller is currently running the factory; others must wait.
 	Initializing,
 	/// The handler is ready.
@@ -36,7 +39,7 @@ enum LazyState {
 impl LazyOutbound {
 	/// Wrap `factory` — an async closure that builds the real outbound —
 	/// so that it runs at most once, on first use.
-	pub fn new(factory: Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn OutboundAction>>> + Send>>) -> Self {
+	pub fn new(factory: OutboundFactory) -> Self {
 		Self {
 			state: Mutex::new(LazyState::Uninit(factory)),
 			ready: Notify::new(),

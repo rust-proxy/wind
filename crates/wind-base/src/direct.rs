@@ -205,7 +205,6 @@ async fn connect_direct_tcp_socket2(
 
 	sock.set_nonblocking(true)?;
 	// socket2::Socket::connect is blocking; run on the blocking pool.
-	let addr = addr;
 	let sock = tokio::task::spawn_blocking(move || -> std::io::Result<socket2::Socket> {
 		sock.connect(&addr.into())?;
 		Ok(sock)
@@ -276,7 +275,6 @@ async fn connect_direct_tcp_with_tfo(addr: SocketAddr, opts: &DirectOutboundOpts
 
 	sock.set_nonblocking(true)?;
 	// socket2::Socket::connect is blocking; run on the blocking pool.
-	let addr = addr;
 	let sock = tokio::task::spawn_blocking(move || -> std::io::Result<socket2::Socket> {
 		sock.connect(&addr.into())?;
 		Ok(sock)
