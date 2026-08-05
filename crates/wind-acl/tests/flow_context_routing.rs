@@ -13,12 +13,8 @@ use std::{
 };
 
 use wind_acl::AclEngine;
-use wind_core::{
-	FlowContext, RouteAction, Router,
-	hooks::Protocol,
-	rule::{InboundType, NetworkType},
-	types::TargetAddr,
-};
+use wind_core::{FlowContext, RouteAction, Router, hooks::Protocol, types::TargetAddr};
+use wind_rule::{InboundType, NetworkType};
 
 fn build(rules: &[&str]) -> AclEngine {
 	AclEngine::builder("default")

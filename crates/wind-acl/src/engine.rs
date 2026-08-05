@@ -12,13 +12,12 @@
 use std::{future::Future, sync::Arc};
 
 use tracing::Instrument as _;
-use wind_base::resolve::resolve_target;
 use wind_core::{
 	FlowContext, RouteAction, Router, is_private_ip,
-	resolve::Resolver,
-	rule::{MatchContext, Rule, RuleType},
+	resolve::{Resolver, resolve_target},
 };
 use wind_geodata::GeoData;
+use wind_rule::{MatchContext, Rule, RuleType};
 
 use crate::{
 	Ruleset, compile,
@@ -175,7 +174,7 @@ impl AclEngineBuilder {
 		Ok(self.apernet_acl(&rules))
 	}
 
-	/// Add already-lowered [`wind_core::rule::Rule`]s directly, in the given
+	/// Add already-lowered [`wind_rule::Rule`]s directly, in the given
 	/// order. Useful for hosts that convert their own config (e.g. a legacy ACL
 	/// table plus explicit rules) to wind rules before handing them off. These
 	/// are evaluated after apernet rules and before Clash rules.

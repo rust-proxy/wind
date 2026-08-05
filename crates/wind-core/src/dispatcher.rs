@@ -19,14 +19,7 @@ use std::{collections::HashMap, future::Future, sync::Arc};
 
 use tracing::Instrument;
 
-use crate::{
-	InboundCallback,
-	flow::FlowContext,
-	outbound::Outbound,
-	rule::{MatchContext, Rule},
-	tcp::AbstractTcpStream,
-	udp::UdpStream,
-};
+use crate::{InboundCallback, flow::FlowContext, outbound::Outbound, tcp::AbstractTcpStream, udp::UdpStream};
 
 /// Decision returned by a [`Router`].
 #[derive(Debug, Clone)]
@@ -200,98 +193,6 @@ impl<R: Router> Dispatcher<R> {
 	}
 }
 
-/// A built-in [`Router`] that evaluates a list of [`Rule`]s in order.
-///
-/// The first matching rule determines the outbound.  If no rule matches, the
-/// configured default outbound is used.
-///
-/// New code should prefer `wind_acl::AclEngine`, which compiles the same
-/// rules to the `wind-acl` IR and additionally supports loopback/private
-/// guards.
-///
-/// Rule targets are mapped to [`RouteAction`] as follows:
-///
-/// * `"reject"` / `"block"` / `"deny"` (case-insensitive) →
-///   [`RouteAction::Reject`]
-/// * anything else → [`RouteAction::Forward`] with the target name
-///
-/// # Example
-///
-/// ```ignore
-/// use wind_core::{Dispatcher, dispatcher::AclRouter};
-/// use wind_core::rule::Rule;
-///
-/// let rules: Vec<Rule> = Rule::parse_rules(r#"
-///     DOMAIN-SUFFIX,ads.example.com,reject
-///     DOMAIN-SUFFIX,google.com,proxy
-///     IP-CIDR,10.0.0.0/8,direct
-///     MATCH,proxy
-/// "#).into_iter().filter_map(Result::ok).collect();
-///
-/// let router = AclRouter::new(rules, "direct");
-/// let mut dispatcher = Dispatcher::new(router);
-/// // dispatcher.add_handler("direct", ...);
-/// // dispatcher.add_handler("proxy", ...);
-/// ```
-pub struct AclRouter {
-	rules: Vec<Rule>,
-	default_outbound: String,
-}
-
-impl AclRouter {
-	/// Create a router with the given ordered rules and a fallback outbound
-	/// name used when no rule matches.
-	pub fn new(rules: Vec<Rule>, default_outbound: impl Into<String>) -> Self {
-		Self {
-			rules,
-			default_outbound: default_outbound.into(),
-		}
-	}
-}
-
-impl Router for AclRouter {
-	fn route(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send {
-		let span = tracing::trace_span!("acl_route", target = %ctx.target, proto = if ctx.is_tcp() { "tcp" } else { "udp" });
-		async move { self.eval_rules(ctx).instrument(span).await }
-	}
-}
-
-impl AclRouter {
-	async fn eval_rules(&self, ctx: &FlowContext) -> eyre::Result<RouteAction> {
-		// Lower the connection context once; every rule shares it.
-		let mut match_ctx = MatchContext::default();
-		ctx.apply_to_match_context(&mut match_ctx);
-
-		for rule in &self.rules {
-			if rule.matches(&match_ctx) {
-				tracing::debug!(rule = %rule, "matched");
-				return Ok(rule_target_to_action(&rule.target, rule));
-			}
-		}
-
-		tracing::debug!(outbound = %self.default_outbound, "no rule matched, using default");
-		Ok(RouteAction::Forward(self.default_outbound.clone()))
-	}
-}
-
-/// Map a rule target string to a [`RouteAction`].
-///
-/// The reject/block/deny keywords are matched case-insensitively (so
-/// `REJECT`, `Reject`, `reject` all work). Everything else is treated as an
-/// outbound name and forwarded verbatim — handler lookups in
-/// `Dispatcher::resolve_handler` are case-SENSITIVE, so we must NOT lower-case
-/// the name. Previously the match arm rebound `name` to the lowercased string
-/// and forwarded that, so an outbound registered as `"Proxy_Out"` would
-/// silently fall through to the `"default"` handler.
-fn rule_target_to_action(target: &str, rule: &Rule) -> RouteAction {
-	let lower = target.to_ascii_lowercase();
-	match lower.as_str() {
-		"reject" | "block" | "deny" => RouteAction::Reject(format!("rejected by rule: {}", rule)),
-		_ => RouteAction::Forward(target.to_string()),
-	}
-}
-
-
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
@@ -302,8 +203,22 @@ mod tests {
 	use super::*;
 	use crate::{hooks::Protocol, rule::NetworkType, types::TargetAddr};
 
-	fn parse_rules(text: &str) -> Vec<Rule> {
-		Rule::parse_rules(text).into_iter().filter_map(Result::ok).collect()
+	/// A [`Router`] stub that always returns a fixed action.
+	struct StubRouter {
+		action: RouteAction,
+	}
+
+	impl StubRouter {
+		fn new(action: RouteAction) -> Self {
+			Self { action }
+		}
+	}
+
+	impl Router for StubRouter {
+		fn route(&self, _ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send {
+			let action = self.action.clone();
+			async move { Ok(action) }
+		}
 	}
 
 	/// Build a minimal [`FlowContext`] for routing tests.
@@ -355,157 +270,11 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn acl_router_domain_suffix_match() {
-		let router = AclRouter::new(parse_rules("DOMAIN-SUFFIX,google.com,proxy"), "direct");
-
-		let target = TargetAddr::Domain("www.google.com".into(), 443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_domain_exact_no_match() {
-		let router = AclRouter::new(parse_rules("DOMAIN,example.com,proxy"), "direct");
-
-		let target = TargetAddr::Domain("other.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_ip_cidr_match() {
-		let router = AclRouter::new(parse_rules("IP-CIDR,192.168.0.0/16,lan"), "default");
-
-		let target = TargetAddr::IPv4("192.168.1.100".parse().unwrap(), 8080);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "lan"));
-
-		let target = TargetAddr::IPv4("10.0.0.1".parse().unwrap(), 8080);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "default"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_reject_action() {
-		let router = AclRouter::new(parse_rules("DOMAIN-KEYWORD,ads,reject"), "direct");
-
-		let target = TargetAddr::Domain("ads.example.com".into(), 443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Reject(_)));
-	}
-
-	#[tokio::test]
-	async fn acl_router_block_and_deny_also_reject() {
-		let rules = parse_rules(
-			r#"
-			DOMAIN,block.com,block
-			DOMAIN,deny.com,deny
-			"#,
-		);
-		let router = AclRouter::new(rules, "direct");
-
-		let action = router
-			.route(&fc(&TargetAddr::Domain("block.com".into(), 80), true))
-			.await
-			.unwrap();
-		assert!(matches!(action, RouteAction::Reject(_)));
-
-		let action = router
-			.route(&fc(&TargetAddr::Domain("deny.com".into(), 80), true))
-			.await
-			.unwrap();
-		assert!(matches!(action, RouteAction::Reject(_)));
-	}
-
-	#[tokio::test]
-	async fn acl_router_network_type_filter() {
-		let rules = parse_rules(
-			r#"
-			NETWORK,tcp,proxy
-			NETWORK,udp,direct
-			"#,
-		);
-		let router = AclRouter::new(rules, "fallback");
-
-		let target = TargetAddr::Domain("any.com".into(), 443);
-
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
-
-		let action = router.route(&fc(&target, false)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_dst_port_match() {
-		let router = AclRouter::new(parse_rules("DST-PORT,443,proxy"), "direct");
-
-		let target = TargetAddr::Domain("example.com".into(), 443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
-
-		let target = TargetAddr::Domain("example.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_first_match_wins() {
-		let rules = parse_rules(
-			r#"
-			DOMAIN-SUFFIX,google.com,first
-			DOMAIN-SUFFIX,google.com,second
-			MATCH,last
-			"#,
-		);
-		let router = AclRouter::new(rules, "default");
-
-		let target = TargetAddr::Domain("www.google.com".into(), 443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "first"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_match_all_catchall() {
-		let rules = parse_rules(
-			r#"
-			DOMAIN,specific.com,specific
-			MATCH,catchall
-			"#,
-		);
-		let router = AclRouter::new(rules, "default");
-
-		let target = TargetAddr::Domain("random.org".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "catchall"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_ipv6_target() {
-		let router = AclRouter::new(parse_rules("IP-CIDR6,fc00::/7,local"), "default");
-
-		let target = TargetAddr::IPv6("fd12::1".parse().unwrap(), 443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "local"));
-
-		let target = TargetAddr::IPv6("2001:db8::1".parse().unwrap(), 443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "default"));
-	}
-
-	#[tokio::test]
 	async fn dispatcher_routes_tcp_to_correct_handler() {
-		let rules = parse_rules(
-			r#"
-			DOMAIN-SUFFIX,proxy.me,proxy_out
-			MATCH,default
-			"#,
-		);
-
 		let proxy_handler = Arc::new(MockHandler::new());
 		let default_handler = Arc::new(MockHandler::new());
 
-		let mut dispatcher = Dispatcher::new(AclRouter::new(rules, "default"));
+		let mut dispatcher = Dispatcher::new(StubRouter::new(RouteAction::Forward("proxy_out".into())));
 		dispatcher.add_handler("proxy_out", proxy_handler.clone());
 		dispatcher.add_handler("default", default_handler.clone());
 
@@ -520,11 +289,9 @@ mod tests {
 
 	#[tokio::test]
 	async fn dispatcher_routes_udp_to_correct_handler() {
-		let rules = parse_rules("MATCH,relay");
-
 		let handler = Arc::new(MockHandler::new());
 
-		let mut dispatcher = Dispatcher::new(AclRouter::new(rules, "default"));
+		let mut dispatcher = Dispatcher::new(StubRouter::new(RouteAction::Forward("relay".into())));
 		dispatcher.add_handler("relay", handler.clone());
 
 		let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -549,9 +316,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn dispatcher_rejects_connection() {
-		let rules = parse_rules("DOMAIN,blocked.com,reject");
-
-		let mut dispatcher = Dispatcher::new(AclRouter::new(rules, "default"));
+		let mut dispatcher = Dispatcher::new(StubRouter::new(RouteAction::Reject("blocked by test".into())));
 		dispatcher.add_handler("default", Arc::new(MockHandler::new()));
 
 		let (client, _server) = tokio::io::duplex(1024);
@@ -564,10 +329,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn dispatcher_fallback_to_default_handler() {
-		let rules = parse_rules("DOMAIN,special.com,special_out");
-
 		let default_handler = Arc::new(MockHandler::new());
-		let mut dispatcher = Dispatcher::new(AclRouter::new(rules, "default"));
+		let mut dispatcher = Dispatcher::new(StubRouter::new(RouteAction::Forward("special_out".into())));
 		dispatcher.add_handler("default", default_handler.clone());
 
 		let (client, _server) = tokio::io::duplex(1024);
@@ -580,10 +343,8 @@ mod tests {
 	#[tokio::test]
 	async fn dispatcher_unknown_handler_falls_back_to_default() {
 		// Router returns a name that isn't registered — should fall back to "default"
-		let rules = parse_rules("MATCH,nonexistent_handler");
-
 		let default_handler = Arc::new(MockHandler::new());
-		let mut dispatcher = Dispatcher::new(AclRouter::new(rules, "default"));
+		let mut dispatcher = Dispatcher::new(StubRouter::new(RouteAction::Forward("nonexistent_handler".into())));
 		dispatcher.add_handler("default", default_handler.clone());
 
 		let (client, _server) = tokio::io::duplex(1024);
@@ -596,145 +357,12 @@ mod tests {
 	#[tokio::test]
 	async fn dispatcher_no_handler_returns_error() {
 		// No handlers registered at all — should error
-		let rules = parse_rules("MATCH,missing");
-		let dispatcher = Dispatcher::new(AclRouter::new(rules, "default"));
+		let dispatcher = Dispatcher::new(StubRouter::new(RouteAction::Forward("missing".into())));
 
 		let (client, _server) = tokio::io::duplex(1024);
 		let result = dispatcher
 			.handle_tcpstream(fc(&TargetAddr::Domain("a.com".into(), 80), true), client)
 			.await;
 		assert!(result.is_err());
-	}
-
-	#[tokio::test]
-	async fn acl_router_dst_port_range() {
-		let router = AclRouter::new(parse_rules("DST-PORT,8000-9000,proxy"), "direct");
-
-		let target = TargetAddr::Domain("example.com".into(), 8080);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
-
-		let target = TargetAddr::Domain("example.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_and_compound() {
-		let rules = parse_rules("AND,((DOMAIN-SUFFIX,example.com),(DST-PORT,443)),secure_proxy");
-		let router = AclRouter::new(rules, "direct");
-
-		// Both match → secure_proxy
-		let target = TargetAddr::Domain("www.example.com".into(), 443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "secure_proxy"));
-
-		// Domain matches but port doesn't → direct
-		let target = TargetAddr::Domain("www.example.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
-
-		// Port matches but domain doesn't → direct
-		let target = TargetAddr::Domain("other.org".into(), 443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_or_compound() {
-		let rules = parse_rules("OR,((DOMAIN,a.com),(DOMAIN,b.com)),proxy");
-		let router = AclRouter::new(rules, "direct");
-
-		let target = TargetAddr::Domain("a.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
-
-		let target = TargetAddr::Domain("b.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
-
-		let target = TargetAddr::Domain("c.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_not_compound() {
-		let rules = parse_rules("NOT,((DOMAIN-SUFFIX,internal.corp)),proxy");
-		let router = AclRouter::new(rules, "direct");
-
-		// Doesn't match suffix → NOT succeeds → proxy
-		let target = TargetAddr::Domain("external.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "proxy"));
-
-		// Matches suffix → NOT fails → direct
-		let target = TargetAddr::Domain("app.internal.corp".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_src_ip_cidr_no_match_without_context() {
-		let router = AclRouter::new(parse_rules("SRC-IP-CIDR,192.168.0.0/16,local"), "default");
-
-		let target = TargetAddr::Domain("example.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		// SRC-IP-CIDR can't match because AclRouter doesn't have src_ip context
-		assert!(matches!(action, RouteAction::Forward(name) if name == "default"));
-	}
-
-	#[tokio::test]
-	async fn acl_router_domain_and_port_combination() {
-		let rules = parse_rules(
-			r#"
-			AND,((DOMAIN-SUFFIX,api.example.com),(DST-PORT,8443)),api_proxy
-			DOMAIN-SUFFIX,example.com,web_proxy
-			MATCH,direct
-			"#,
-		);
-		let router = AclRouter::new(rules, "direct");
-
-		// api.example.com:8443 → api_proxy (first rule)
-		let target = TargetAddr::Domain("api.example.com".into(), 8443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "api_proxy"));
-
-		// api.example.com:443 → web_proxy (second rule)
-		let target = TargetAddr::Domain("api.example.com".into(), 443);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "web_proxy"));
-
-		// other.org:80 → direct (MATCH)
-		let target = TargetAddr::Domain("other.org".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "direct"));
-	}
-
-	/// Outbound names registered with mixed case must survive routing —
-	/// previously the `name => RouteAction::Forward(name.to_string())` arm
-	/// bound to the lowercased string and silently routed `Proxy_Out` to
-	/// `proxy_out`, which `Dispatcher::resolve_handler` failed to find.
-	#[tokio::test]
-	async fn router_forwards_with_original_case() {
-		let router = AclRouter::new(parse_rules("DOMAIN-SUFFIX,example.com,Proxy_Out"), "default");
-		let target = TargetAddr::Domain("foo.example.com".into(), 80);
-		let action = router.route(&fc(&target, true)).await.unwrap();
-		assert!(matches!(action, RouteAction::Forward(name) if name == "Proxy_Out"));
-	}
-
-	/// Reject keywords are still recognised case-insensitively across all
-	/// three spellings.
-	#[tokio::test]
-	async fn router_reject_keywords_case_insensitive() {
-		for kw in ["REJECT", "Reject", "reject", "BLOCK", "Block", "deny", "Deny", "DENY"] {
-			let r = AclRouter::new(parse_rules(&format!("DOMAIN-SUFFIX,blocked.com,{kw}")), "default");
-			let target = TargetAddr::Domain("a.blocked.com".into(), 443);
-			let action = r.route(&fc(&target, true)).await.unwrap();
-			assert!(
-				matches!(action, RouteAction::Reject(_)),
-				"keyword {kw:?} must map to RouteAction::Reject"
-			);
-		}
 	}
 }

@@ -8,7 +8,8 @@ use std::{
 };
 
 use wind_acl::AclEngine;
-use wind_core::{FlowContext, RouteAction, Router, hooks::Protocol, rule::NetworkType, types::TargetAddr};
+use wind_core::{FlowContext, RouteAction, Router, hooks::Protocol, types::TargetAddr};
+use wind_rule::NetworkType;
 
 fn ipv4(addr: &str, port: u16) -> TargetAddr {
 	TargetAddr::IPv4(addr.parse::<Ipv4Addr>().unwrap(), port)

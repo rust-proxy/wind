@@ -23,8 +23,9 @@ use std::{
 use async_trait::async_trait;
 use dashmap::DashMap;
 use uuid::Uuid;
+use wind_acl::AclEngine;
 use wind_core::{
-	AclRouter, App, ConnInfo, ConnectDecision, ConnectionHooks, FlowContext, Outbound, TrafficSink, TuicAuthenticator, UserId,
+	App, ConnInfo, ConnectDecision, ConnectionHooks, FlowContext, Outbound, TrafficSink, TuicAuthenticator, UserId,
 	UserTraffic, tcp::AbstractTcpStream, udp::UdpStream,
 };
 
@@ -103,8 +104,8 @@ fn main() {
 	let mut users = HashMap::new();
 	users.insert(Uuid::nil(), Arc::from(b"super-secret".as_slice()));
 
-	let app = App::<AclRouter>::new()
-		.set_router(AclRouter::new(Vec::new(), "direct"))
+	let app = App::<AclEngine>::new()
+		.set_router(AclEngine::builder("direct").build().unwrap())
 		.add_outbound("direct", Arc::new(NoopOutbound))
 		.set_tuic_authenticator(Arc::new(MyAuth { users })) // feature 1
 		.set_traffic_sink(Arc::new(LoggingSink)) // feature 2

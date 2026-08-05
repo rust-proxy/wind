@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use geosite_rs::{Cidr, Domain, GeoIp, GeoIpList, GeoSite, GeoSiteList, encode_geoip, encode_geosite};
 use wind_acl::AclEngine;
-use wind_core::{FlowContext, RouteAction, Router, hooks::Protocol, rule::NetworkType, types::TargetAddr};
+use wind_core::{FlowContext, RouteAction, Router, hooks::Protocol, types::TargetAddr};
 use wind_geodata::GeoData;
+use wind_rule::NetworkType;
 
 /// Minimal [`FlowContext`] for a plain TCP connection with no client metadata.
 fn fc(target: &TargetAddr) -> FlowContext {
