@@ -5,64 +5,29 @@
 //! [`Plugin`]s, then [`App::run`] wires a [`Dispatcher`], spawns every inbound
 //! plus the traffic-flush task, and drives graceful shutdown.
 //!
+//! The `App` is generic over the concrete [`Router`] type so the router is
+//! dispatched statically (no vtable). Application crates typically wrap their
+//! router in an `enum` (with a hand-written `Router` impl) so a single App type
+//! can switch between routing policies without boxing.
+//!
 //! Inbounds are supplied as factory closures so the finalized [`InboundHooks`]
 //! bundle can be threaded into each one's opts at `run` time — this keeps the
 //! builder decoupled from the concrete protocol crates (no circular deps).
 
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use bytesize::ByteSize;
 use tracing::{error, info, warn};
 
 use crate::{
-	AbstractInbound, AppContext, Dispatcher, FlowContext, Outbound, RouteAction, Router,
+	AbstractInbound, AppContext, Dispatcher, Outbound, Router,
 	hooks::{
 		ConnectionHooks, FanOutConnectionHooks, InboundHooks, StatsCollector, TrafficSink, TuicAuthenticator,
 		UserPassAuthenticator,
 	},
 };
 
-/// Object-safe form of [`Router`] so the App can store a `dyn` router.
-#[async_trait]
-pub trait DynRouter: Send + Sync + 'static {
-	async fn route_dyn(&self, ctx: FlowContext) -> eyre::Result<RouteAction>;
-}
-
-#[async_trait]
-impl<R: Router> DynRouter for R {
-	async fn route_dyn(&self, ctx: FlowContext) -> eyre::Result<RouteAction> {
-		self.route(&ctx).await
-	}
-}
-
-/// Adapts an `Arc<dyn DynRouter>` back into a concrete [`Router`], so the App's
-/// dispatcher type is the single concrete `Dispatcher<ArcRouter>`.
-#[derive(Clone)]
-pub struct ArcRouter(Arc<dyn DynRouter>);
-
-impl Router for ArcRouter {
-	fn route(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send {
-		let inner = self.0.clone();
-		let ctx = ctx.clone();
-		async move { inner.route_dyn(ctx).await }
-	}
-}
-
-/// Object-safe form of [`AbstractInbound`] bound to the App's dispatcher type.
-#[async_trait]
-pub trait DynInbound: Send + Sync {
-	async fn listen_dyn(&self, cb: Dispatcher<ArcRouter>) -> eyre::Result<()>;
-}
-
-#[async_trait]
-impl<T: AbstractInbound + Send + Sync> DynInbound for T {
-	async fn listen_dyn(&self, cb: Dispatcher<ArcRouter>) -> eyre::Result<()> {
-		self.listen(&cb).await
-	}
-}
-
-type InboundFactory = Box<dyn FnOnce(InboundHooks, Arc<AppContext>) -> Box<dyn DynInbound> + Send>;
+type InboundFactory<R> = Box<dyn FnOnce(InboundHooks, Arc<AppContext>) -> Box<dyn AbstractInbound<R>> + Send>;
 
 /// A composable unit of configuration, applied to the [`App`] via
 /// [`App::add_plugin`].
@@ -70,31 +35,31 @@ type InboundFactory = Box<dyn FnOnce(InboundHooks, Arc<AppContext>) -> Box<dyn D
 /// The `build` method is async so plugins can perform I/O (DNS, QUIC
 /// handshakes, etc.) during construction.  It is called once, immediately
 /// inside [`App::add_plugin`].
-pub trait Plugin {
-	fn build(self, app: App) -> impl Future<Output = eyre::Result<App>> + Send;
+pub trait Plugin<R: Router> {
+	fn build(self, app: App<R>) -> impl Future<Output = eyre::Result<App<R>>> + Send;
 }
 
 /// The runtime builder. Construct with [`App::new`], register everything, then
 /// [`App::run`].
-pub struct App {
+pub struct App<R: Router> {
 	ctx: Arc<AppContext>,
 	outbounds: HashMap<String, Arc<dyn Outbound>>,
-	router: Option<Arc<dyn DynRouter>>,
+	router: Option<R>,
 	tuic_auth: Option<Arc<dyn TuicAuthenticator>>,
 	userpass_auth: Option<Arc<dyn UserPassAuthenticator>>,
 	conn_hooks: Vec<Arc<dyn ConnectionHooks>>,
 	traffic_sink: Option<Arc<dyn TrafficSink>>,
 	flush_interval: Duration,
-	inbounds: Vec<InboundFactory>,
+	inbounds: Vec<InboundFactory<R>>,
 }
 
-impl Default for App {
+impl<R: Router> Default for App<R> {
 	fn default() -> Self {
 		Self::new()
 	}
 }
 
-impl App {
+impl<R: Router> App<R> {
 	pub fn new() -> Self {
 		Self {
 			ctx: Arc::new(AppContext::default()),
@@ -116,7 +81,7 @@ impl App {
 		&self.ctx
 	}
 
-	pub async fn add_plugin(self, plugin: impl Plugin) -> eyre::Result<Self> {
+	pub async fn add_plugin(self, plugin: impl Plugin<R>) -> eyre::Result<Self> {
 		plugin.build(self).await
 	}
 
@@ -125,8 +90,8 @@ impl App {
 		self
 	}
 
-	pub fn set_router(mut self, router: impl Router) -> Self {
-		self.router = Some(Arc::new(router) as Arc<dyn DynRouter>);
+	pub fn set_router(mut self, router: R) -> Self {
+		self.router = Some(router);
 		self
 	}
 
@@ -158,56 +123,62 @@ impl App {
 		self
 	}
 
-	/// Register an inbound via a factory that receives the finalized hooks
-	/// bundle and the shared context.
 	pub fn add_inbound_with<I, F>(mut self, factory: F) -> Self
 	where
-		I: AbstractInbound + Send + Sync + 'static,
+		I: AbstractInbound<R> + Send + Sync + 'static,
 		F: FnOnce(InboundHooks, Arc<AppContext>) -> I + Send + 'static,
 	{
 		self.inbounds.push(Box::new(move |hooks, ctx| {
-			Box::new(factory(hooks, ctx)) as Box<dyn DynInbound>
+			Box::new(factory(hooks, ctx)) as Box<dyn AbstractInbound<R>>
 		}));
 		self
 	}
 
-	/// Finalize the hooks bundle from the registered pieces.
-	fn build_hooks(&self, stats: Option<Arc<StatsCollector>>) -> InboundHooks {
-		let connection = match self.conn_hooks.len() {
-			0 => None,
-			1 => Some(self.conn_hooks[0].clone()),
-			_ => Some(Arc::new(FanOutConnectionHooks(self.conn_hooks.clone())) as Arc<dyn ConnectionHooks>),
-		};
-		InboundHooks {
-			tuic_auth: self.tuic_auth.clone(),
-			userpass_auth: self.userpass_auth.clone(),
-			connection,
-			stats,
-			sample_interval: self.flush_interval,
-		}
-	}
-
-	/// Build the dispatcher, spawn the flush task and every inbound, then run
-	/// until Ctrl-C (or the context token is cancelled), draining in-flight
-	/// connection handlers on the way out.
+	/// Build the dispatcher, spawn the flush task and every inbound, then
+	/// run until Ctrl-C (or the context token is cancelled), draining
+	/// in-flight connection handlers on the way out.
 	pub async fn run(self) -> eyre::Result<()> {
-		let router = self.router.clone().ok_or_else(|| eyre::eyre!("App::run: no router set"))?;
+		let Self {
+			ctx,
+			outbounds,
+			router,
+			tuic_auth,
+			userpass_auth,
+			conn_hooks,
+			traffic_sink,
+			flush_interval,
+			inbounds,
+		} = self;
+		let router = router.ok_or_else(|| eyre::eyre!("App::run: no router set"))?;
 
 		// Stats are enabled iff a sink was registered.
-		let stats = self.traffic_sink.as_ref().map(|_| Arc::new(StatsCollector::new()));
-		let hooks = self.build_hooks(stats.clone());
+		let stats = traffic_sink.as_ref().map(|_| Arc::new(StatsCollector::new()));
 
-		let mut dispatcher = Dispatcher::new(ArcRouter(router));
-		for (name, handler) in &self.outbounds {
+		// Finalize the hooks bundle from the registered pieces.
+		let connection = match conn_hooks.len() {
+			0 => None,
+			1 => Some(conn_hooks[0].clone()),
+			_ => Some(Arc::new(FanOutConnectionHooks(conn_hooks)) as Arc<dyn ConnectionHooks>),
+		};
+		let hooks = InboundHooks {
+			tuic_auth,
+			userpass_auth,
+			connection,
+			stats: stats.clone(),
+			sample_interval: flush_interval,
+		};
+
+		let mut dispatcher = Dispatcher::new(router);
+		for (name, handler) in &outbounds {
 			dispatcher.add_handler(name.clone(), handler.clone());
 		}
 
 		// Periodic traffic flush (drains the collector → sink, restore on error,
 		// final flush on shutdown).
-		if let (Some(stats), Some(sink)) = (stats.clone(), self.traffic_sink.clone()) {
-			let token = self.ctx.token.clone();
-			let interval = self.flush_interval;
-			self.ctx.tasks.spawn(async move {
+		if let (Some(stats), Some(sink)) = (stats.clone(), traffic_sink.clone()) {
+			let token = ctx.token.clone();
+			let interval = flush_interval;
+			ctx.tasks.spawn(async move {
 				let mut tick = tokio::time::interval(interval);
 				tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 				loop {
@@ -223,11 +194,11 @@ impl App {
 		}
 
 		// Spawn each inbound, materializing it with the finalized hooks bundle.
-		for factory in self.inbounds {
-			let inbound = factory(hooks.clone(), self.ctx.clone());
+		for factory in inbounds {
+			let inbound = factory(hooks.clone(), ctx.clone());
 			let dispatcher = dispatcher.clone();
-			self.ctx.tasks.spawn(async move {
-				if let Err(e) = inbound.listen_dyn(dispatcher).await {
+			ctx.tasks.spawn(async move {
+				if let Err(e) = inbound.listen(&dispatcher).await {
 					error!("inbound listen error: {e:?}");
 				}
 			});
@@ -239,18 +210,15 @@ impl App {
 			_ = crate::shutdown_signal() => {
 				info!("shutdown signal received, stopping");
 			}
-			_ = self.ctx.token.cancelled() => {
+			_ = ctx.token.cancelled() => {
 				info!("shutdown signalled, stopping");
 			}
 		}
 
-		self.ctx.token.cancel();
-		self.ctx.tasks.close();
-		if tokio::time::timeout(Duration::from_secs(10), self.ctx.tasks.wait())
-			.await
-			.is_err()
-		{
-			warn!("shutdown drain timed out after 10s; some tasks may not have finished");
+		ctx.token.cancel();
+		ctx.tasks.close();
+		if tokio::time::timeout(Duration::from_secs(10), ctx.tasks.wait()).await.is_err() {
+			warn!("timed out waiting for tasks to drain; forcing runtime drop");
 		}
 		Ok(())
 	}

@@ -15,7 +15,7 @@
 //!   implements [`InboundCallback`] so it can be passed directly to
 //!   `inbound.listen()`.
 
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use tracing::Instrument;
 
@@ -27,12 +27,6 @@ use crate::{
 	tcp::AbstractTcpStream,
 	udp::UdpStream,
 };
-
-/// Boxed future alias used throughout this module.
-///
-/// Both `Send` and `Sync` are required so the future satisfies the
-/// `FutResult` alias used by `InboundCallback`.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Decision returned by a [`Router`].
 #[derive(Debug, Clone)]
@@ -107,15 +101,22 @@ impl<R: Router> Clone for Dispatcher<R> {
 }
 
 impl<R: Router> InboundCallback for Dispatcher<R> {
-	async fn handle_tcpstream(&self, ctx: FlowContext, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
+	fn handle_tcpstream(
+		&self,
+		ctx: FlowContext,
+		stream: impl AbstractTcpStream + 'static,
+	) -> impl Future<Output = eyre::Result<()>> + Send {
 		let span = tracing::debug_span!("dispatch_tcp", target = %ctx.target);
-		self.dispatch_tcp(ctx, stream).instrument(span).await
+		async move { self.dispatch_tcp(ctx, stream).instrument(span).await }
 	}
 
-	async fn handle_udpstream(&self, ctx: FlowContext, udp_stream: UdpStream) -> eyre::Result<()> {
-		self.dispatch_udp(ctx, udp_stream)
-			.instrument(tracing::debug_span!("dispatch_udp"))
-			.await
+	#[allow(clippy::manual_async_fn)]
+	fn handle_udpstream(&self, ctx: FlowContext, udp_stream: UdpStream) -> impl Future<Output = eyre::Result<()>> + Send {
+		async move {
+			self.dispatch_udp(ctx, udp_stream)
+				.instrument(tracing::debug_span!("dispatch_udp"))
+				.await
+		}
 	}
 }
 
@@ -249,9 +250,9 @@ impl AclRouter {
 }
 
 impl Router for AclRouter {
-	async fn route(&self, ctx: &FlowContext) -> eyre::Result<RouteAction> {
+	fn route(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send {
 		let span = tracing::trace_span!("acl_route", target = %ctx.target, proto = if ctx.is_tcp() { "tcp" } else { "udp" });
-		self.eval_rules(ctx).instrument(span).await
+		async move { self.eval_rules(ctx).instrument(span).await }
 	}
 }
 

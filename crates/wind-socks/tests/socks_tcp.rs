@@ -9,6 +9,7 @@
 
 use std::{
 	net::{Ipv4Addr, SocketAddr},
+	sync::Arc,
 	time::Duration,
 };
 
@@ -17,22 +18,34 @@ use tokio::{
 	net::{TcpListener, TcpStream},
 };
 use tokio_util::sync::CancellationToken;
-use wind_core::{AbstractInbound, FlowContext, InboundCallback, tcp::AbstractTcpStream, udp::UdpStream};
+use wind_core::{
+	AbstractInbound, Dispatcher, FlowContext, Outbound, RouteAction, Router, tcp::AbstractTcpStream, udp::UdpStream,
+};
 use wind_socks::inbound::{AuthMode, SocksInbound, SocksInboundOpt};
 
-/// Inbound callback that relays an accepted SOCKS5 TCP stream to its real
-/// target and copies bytes bidirectionally.
-#[derive(Clone)]
-struct TcpRelayCallback;
+/// Router that forwards everything to the `"default"` outbound handler.
+struct ForwardRouter;
 
-impl InboundCallback for TcpRelayCallback {
-	async fn handle_tcpstream(&self, ctx: FlowContext, mut stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
+impl Router for ForwardRouter {
+	#[allow(clippy::manual_async_fn)]
+	fn route(&self, _ctx: &FlowContext) -> impl std::future::Future<Output = eyre::Result<RouteAction>> + Send {
+		async { Ok(RouteAction::Forward("default".to_string())) }
+	}
+}
+
+/// Outbound handler that relays an accepted SOCKS5 TCP stream to its real
+/// target and copies bytes bidirectionally.
+struct RelayOutbound;
+
+#[async_trait::async_trait]
+impl Outbound for RelayOutbound {
+	async fn handle_tcp(&self, ctx: FlowContext, mut stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 		let mut upstream = TcpStream::connect(ctx.target.to_string()).await?;
 		tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
 		Ok(())
 	}
 
-	async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
+	async fn handle_udp(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
 		Ok(())
 	}
 }
@@ -79,9 +92,10 @@ async fn spawn_socks(auth: AuthMode) -> (SocketAddr, CancellationToken) {
 	};
 	let cancel = CancellationToken::new();
 	let inbound = SocksInbound::new(opts, cancel.clone());
+	let mut dispatcher = Dispatcher::new(ForwardRouter);
+	dispatcher.add_handler("default", Arc::new(RelayOutbound));
 	tokio::spawn(async move {
-		let cb = TcpRelayCallback;
-		let _ = inbound.listen(&cb).await;
+		let _ = inbound.listen(&dispatcher).await;
 	});
 
 	tokio::time::sleep(Duration::from_millis(200)).await;

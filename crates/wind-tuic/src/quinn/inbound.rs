@@ -9,6 +9,7 @@
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use eyre::Context;
 use quinn::{Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime, TransportConfig, VarInt};
 use rustls::{
@@ -18,7 +19,7 @@ use rustls::{
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 use uuid::Uuid;
-use wind_core::{AbstractInbound, AppContext, InboundCallback, InboundHooks};
+use wind_core::{AbstractInbound, AppContext, Dispatcher, InboundCallback, InboundHooks, Router};
 use wind_quic::quinn::QuinnConnection;
 
 use crate::quinn::CongestionControl;
@@ -286,8 +287,9 @@ impl TuicInbound {
 	}
 }
 
-impl AbstractInbound for TuicInbound {
-	async fn listen(&self, cb: &impl InboundCallback) -> eyre::Result<()> {
+#[async_trait]
+impl<R: Router> AbstractInbound<R> for TuicInbound {
+	async fn listen(&self, cb: &Dispatcher<R>) -> eyre::Result<()> {
 		let config = self.create_server_config()?;
 
 		let socket = std::net::UdpSocket::bind(self.opts.listen_addr)
@@ -357,7 +359,7 @@ impl AbstractInbound for TuicInbound {
 /// Complete the quinn handshake (incl. optional 0-RTT) for one incoming
 /// connection, then drive it through the backend-agnostic server core.
 #[allow(clippy::too_many_arguments)]
-async fn handle_connection<C: InboundCallback>(
+async fn handle_connection<C: InboundCallback + Clone>(
 	incoming: quinn::Incoming,
 	users: Arc<HashMap<Uuid, String>>,
 	auth_timeout: Duration,

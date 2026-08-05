@@ -322,7 +322,7 @@ pub async fn serve_connection<C, CB>(
 	inbound_tag: Arc<str>,
 ) where
 	C: QuicConnection,
-	CB: InboundCallback,
+	CB: InboundCallback + Clone,
 {
 	let conn_info = ConnInfo {
 		remote_addr,
@@ -633,7 +633,7 @@ async fn sample_once<C: QuicConnection>(
 	}
 }
 
-async fn handle_uni_stream<C: QuicConnection, CB: InboundCallback>(
+async fn handle_uni_stream<C: QuicConnection, CB: InboundCallback + Clone>(
 	ctx: Arc<InboundCtx<C>>,
 	mut recv: impl AsyncRead + Unpin + Send + 'static,
 	callback: CB,
@@ -726,7 +726,7 @@ async fn handle_uni_stream<C: QuicConnection, CB: InboundCallback>(
 	Ok(())
 }
 
-async fn handle_bi_stream<C: QuicConnection, CB: InboundCallback>(
+async fn handle_bi_stream<C: QuicConnection, CB: InboundCallback + Clone>(
 	connection: Arc<InboundCtx<C>>,
 	send: C::SendStream,
 	mut recv: impl AsyncRead + Unpin + Send + 'static,
@@ -786,7 +786,7 @@ async fn handle_bi_stream<C: QuicConnection, CB: InboundCallback>(
 	Ok(())
 }
 
-async fn handle_datagram<C: QuicConnection, CB: InboundCallback>(
+async fn handle_datagram<C: QuicConnection, CB: InboundCallback + Clone>(
 	connection: Arc<InboundCtx<C>>,
 	data: bytes::Bytes,
 	callback: CB,
@@ -932,7 +932,7 @@ async fn handle_auth<C: QuicConnection>(connection: &InboundCtx<C>, uuid: Uuid, 
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_udp_packet<C: QuicConnection, CB: InboundCallback>(
+async fn handle_udp_packet<C: QuicConnection, CB: InboundCallback + Clone>(
 	ctx: &Arc<InboundCtx<C>>,
 	assoc_id: u16,
 	pkt_id: u16,
@@ -970,7 +970,7 @@ async fn handle_udp_packet<C: QuicConnection, CB: InboundCallback>(
 }
 
 /// Get an existing UDP session for `assoc_id` or create a new one.
-async fn get_or_create_session<C: QuicConnection, CB: InboundCallback>(
+async fn get_or_create_session<C: QuicConnection, CB: InboundCallback + Clone>(
 	ctx: &Arc<InboundCtx<C>>,
 	assoc_id: u16,
 	callback: &CB,
@@ -1340,21 +1340,29 @@ mod tests {
 	}
 
 	impl InboundCallback for HangingUdpCallback {
-		async fn handle_tcpstream(
+		#[allow(clippy::manual_async_fn)]
+		fn handle_tcpstream(
 			&self,
 			_ctx: FlowContext,
 			_stream: impl wind_core::tcp::AbstractTcpStream + 'static,
-		) -> eyre::Result<()> {
-			Ok(())
+		) -> impl std::future::Future<Output = eyre::Result<()>> + Send {
+			async { Ok(()) }
 		}
 
-		async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: CoreUdpStream) -> eyre::Result<()> {
+		fn handle_udpstream(
+			&self,
+			_ctx: FlowContext,
+			_udp_stream: CoreUdpStream,
+		) -> impl std::future::Future<Output = eyre::Result<()>> + Send {
 			let _guard = NotifyOnDrop {
 				dropped: self.dropped.clone(),
 				was_dropped: self.was_dropped.clone(),
 			};
 			self.started.notify_waiters();
-			future::pending().await
+			async move {
+				let _g = _guard;
+				future::pending().await
+			}
 		}
 	}
 

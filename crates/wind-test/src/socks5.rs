@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 #[cfg(test)]
 use std::{sync::Arc, time::Duration};
 
+#[cfg(test)]
+use async_trait::async_trait;
 use eyre::Context;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
@@ -434,7 +436,7 @@ struct TestConfig {
 async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> eyre::Result<()> {
 	use std::collections::HashMap;
 
-	use wind_core::{FlowContext, InboundCallback, inbound::AbstractInbound, tcp::AbstractTcpStream};
+	use wind_core::{Dispatcher, FlowContext, Outbound, RouteAction, Router, inbound::AbstractInbound, tcp::AbstractTcpStream};
 
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
 	let cert_der = cert.cert.der().to_vec();
@@ -460,19 +462,25 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 		..Default::default()
 	};
 
-	#[derive(Clone)]
-	struct TestManager {
-		socks_inbound: Arc<wind_socks::inbound::SocksInbound>,
-		tuic_inbound: Arc<wind_tuic::quinn::inbound::TuicInbound>,
+	struct TestManager;
+
+	struct TestRouter;
+
+	impl Router for TestRouter {
+		#[allow(clippy::manual_async_fn)]
+		fn route(&self, _ctx: &FlowContext) -> impl std::future::Future<Output = eyre::Result<RouteAction>> + Send {
+			async { Ok(RouteAction::Forward("default".to_string())) }
+		}
 	}
 
-	impl InboundCallback for TestManager {
-		async fn handle_tcpstream(&self, ctx: FlowContext, stream: impl AbstractTcpStream) -> eyre::Result<()> {
+	#[async_trait]
+	impl Outbound for TestManager {
+		async fn handle_tcp(&self, ctx: FlowContext, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 			handle_tcp_direct(ctx, stream).await?;
 			Ok(())
 		}
 
-		async fn handle_udpstream(&self, ctx: FlowContext, stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
+		async fn handle_udp(&self, ctx: FlowContext, stream: wind_core::udp::UdpStream) -> eyre::Result<()> {
 			handle_udp_direct(ctx, stream).await?;
 			Ok(())
 		}
@@ -561,20 +569,18 @@ async fn run_test_proxy(ctx: Arc<wind_core::AppContext>, config: TestConfig) -> 
 		ctx.token.child_token(),
 	));
 
-	let manager = Arc::new(TestManager {
-		socks_inbound: socks_inbound.clone(),
-		tuic_inbound: tuic_inbound.clone(),
-	});
+	let mut dispatcher = Dispatcher::new(TestRouter);
+	dispatcher.add_handler("default", Arc::new(TestManager) as Arc<dyn Outbound>);
 
-	let manager_for_tuic = manager.clone();
+	let dispatcher_for_tuic = dispatcher.clone();
 	ctx.tasks.spawn(async move {
-		manager_for_tuic.tuic_inbound.listen(manager_for_tuic.as_ref()).await?;
+		tuic_inbound.listen(&dispatcher_for_tuic).await?;
 		eyre::Ok(())
 	});
 
-	let manager_for_socks = manager.clone();
+	let dispatcher_for_socks = dispatcher.clone();
 	ctx.tasks.spawn(async move {
-		manager_for_socks.socks_inbound.listen(manager_for_socks.as_ref()).await?;
+		socks_inbound.listen(&dispatcher_for_socks).await?;
 		eyre::Ok(())
 	});
 

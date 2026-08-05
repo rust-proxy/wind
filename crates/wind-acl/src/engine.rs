@@ -9,7 +9,7 @@
 //! [`Ruleset::route`] — so its decisions are identical to evaluating the rules
 //! first-match-wins, with apernet-derived rules taking precedence over Clash.
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use tracing::Instrument as _;
 use wind_base::resolve::resolve_target;
@@ -124,9 +124,9 @@ impl AclEngine {
 }
 
 impl Router for AclEngine {
-	async fn route(&self, ctx: &FlowContext) -> eyre::Result<RouteAction> {
+	fn route(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send {
 		let span = tracing::debug_span!("acl_route", target = %ctx.target, proto = if ctx.is_tcp() { "tcp" } else { "udp" });
-		self.do_route(ctx).instrument(span).await
+		async move { self.do_route(ctx).instrument(span).await }
 	}
 }
 

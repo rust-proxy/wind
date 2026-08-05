@@ -7,35 +7,38 @@
 use std::{collections::HashMap, time::Duration};
 use std::{net::SocketAddr, sync::Arc};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::net::UdpSocket;
 use tracing::{Instrument as _, warn};
 #[cfg(test)]
 use wind_core::AppContext;
+#[cfg(test)]
+use wind_core::{Dispatcher, RouteAction, Router};
 use wind_core::{
-	FlowContext, InboundCallback,
+	FlowContext, Outbound,
 	tcp::AbstractTcpStream,
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
 };
 
-/// A simple [`InboundCallback`] that relays TCP connections directly to their
+/// A simple [`Outbound`] that relays TCP connections directly to their
 /// targets and relays UDP packets to real targets via a bound UDP socket.
 ///
 /// Suitable for use in integration tests that exercise TUIC server behaviour.
-#[derive(Clone)]
 pub struct DirectCallback;
 
-impl InboundCallback for DirectCallback {
-	async fn handle_tcpstream(&self, ctx: FlowContext, mut stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
+#[async_trait]
+impl Outbound for DirectCallback {
+	async fn handle_tcp(&self, ctx: FlowContext, mut stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 		let addr = ctx.target.to_string();
 		let mut target = tokio::net::TcpStream::connect(&addr).await?;
 		tokio::io::copy_bidirectional(&mut stream, &mut target).await?;
 		Ok(())
 	}
 
-	async fn handle_udpstream(&self, _ctx: FlowContext, stream: UdpStream) -> eyre::Result<()> {
+	async fn handle_udp(&self, _ctx: FlowContext, stream: UdpStream) -> eyre::Result<()> {
 		let UdpStream { tx, mut rx } = stream;
 		let relay_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
@@ -119,6 +122,26 @@ impl InboundCallback for DirectCallback {
 		recv_handle.await?;
 		Ok(())
 	}
+}
+
+/// Router that forwards everything to the `"default"` outbound handler.
+#[cfg(test)]
+struct DirectRouter;
+
+#[cfg(test)]
+impl Router for DirectRouter {
+	#[allow(clippy::manual_async_fn)]
+	fn route(&self, _ctx: &FlowContext) -> impl std::future::Future<Output = eyre::Result<RouteAction>> + Send {
+		async { Ok(RouteAction::Forward("default".to_string())) }
+	}
+}
+
+/// Build a dispatcher wired to a [`DirectCallback`] outbound.
+#[cfg(test)]
+fn direct_dispatcher() -> Dispatcher<DirectRouter> {
+	let mut d = Dispatcher::new(DirectRouter);
+	d.add_handler("default", Arc::new(DirectCallback));
+	d
 }
 
 /// Generate a self-signed TLS certificate suitable for TUIC testing.
@@ -224,8 +247,8 @@ mod tests {
 		};
 
 		let server = TuicInbound::new(ctx.clone(), opts);
-		let callback = Arc::new(DirectCallback);
-		let listen = tokio::spawn(async move { server.listen(callback.as_ref()).await }.in_current_span());
+		let dispatcher = direct_dispatcher();
+		let listen = tokio::spawn(async move { server.listen(&dispatcher).await }.in_current_span());
 
 		// Allow the server time to bind and begin accepting
 		tokio::time::sleep(Duration::from_millis(300)).await;
@@ -695,8 +718,8 @@ mod tests {
 			..Default::default()
 		};
 		let server = TuicInbound::new(ctx.clone(), opts);
-		let callback = Arc::new(DirectCallback);
-		let handle = tokio::spawn(async move { server.listen(callback.as_ref()).await }.in_current_span());
+		let dispatcher = direct_dispatcher();
+		let handle = tokio::spawn(async move { server.listen(&dispatcher).await }.in_current_span());
 		tokio::time::sleep(Duration::from_millis(300)).await;
 		(ctx, handle)
 	}
@@ -954,8 +977,8 @@ mod tests {
 			..Default::default()
 		};
 		let server = TuicInbound::new(ctx.clone(), opts);
-		let cb = Arc::new(DirectCallback);
-		let listen = tokio::spawn(async move { server.listen(cb.as_ref()).await }.in_current_span());
+		let dispatcher = direct_dispatcher();
+		let listen = tokio::spawn(async move { server.listen(&dispatcher).await }.in_current_span());
 		tokio::time::sleep(Duration::from_millis(300)).await;
 
 		let connect = |reconnect: ReconnectConfig| async move {

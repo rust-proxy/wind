@@ -8,11 +8,13 @@
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, info};
 use uuid::Uuid;
 use wind_core::{
-	InboundHooks,
+	InboundHooks, Router,
+	dispatcher::Dispatcher,
 	inbound::{AbstractInbound, InboundCallback},
 };
 use wind_quic::{
@@ -100,8 +102,9 @@ impl TuicheInbound {
 	}
 }
 
-impl AbstractInbound for TuicheInbound {
-	async fn listen(&self, cb: &impl InboundCallback) -> eyre::Result<()> {
+#[async_trait]
+impl<R: Router> AbstractInbound<R> for TuicheInbound {
+	async fn listen(&self, cb: &Dispatcher<R>) -> eyre::Result<()> {
 		info!("Starting wind-tuic (quiche) inbound on {}", self.listen_addr);
 
 		let tls = ServerTlsConfig::from_pem_paths(self.cert_path.clone(), self.private_key_path.clone());

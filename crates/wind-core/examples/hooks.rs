@@ -103,7 +103,7 @@ fn main() {
 	let mut users = HashMap::new();
 	users.insert(Uuid::nil(), Arc::from(b"super-secret".as_slice()));
 
-	let app = App::new()
+	let app = App::<AclRouter>::new()
 		.set_router(AclRouter::new(Vec::new(), "direct"))
 		.add_outbound("direct", Arc::new(NoopOutbound))
 		.set_tuic_authenticator(Arc::new(MyAuth { users })) // feature 1

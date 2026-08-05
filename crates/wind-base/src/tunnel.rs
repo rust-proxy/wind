@@ -14,17 +14,20 @@ use std::{
 	},
 };
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, warn};
 use wind_core::{
-	AbstractInbound, FlowContext, InboundCallback, Protocol as WProtocol,
+	AbstractInbound, Dispatcher, FlowContext, InboundCallback, Protocol as WProtocol, Router,
 	rule::NetworkType,
 	types::TargetAddr,
 	udp::{UdpPacket, UdpStream},
 };
+#[cfg(test)]
+use wind_core::{Outbound, RouteAction};
 
 static NEXT_ASSOC_ID: AtomicU16 = AtomicU16::new(0);
 
@@ -50,8 +53,9 @@ impl TunnelTcpInbound {
 	}
 }
 
-impl AbstractInbound for TunnelTcpInbound {
-	async fn listen(&self, cb: &impl InboundCallback) -> eyre::Result<()> {
+#[async_trait]
+impl<R: Router> AbstractInbound<R> for TunnelTcpInbound {
+	async fn listen(&self, cb: &Dispatcher<R>) -> eyre::Result<()> {
 		let listener = create_tcp_listener(self.listen)?;
 		info!(
 			"[tunnel-tcp] listening on {listen} -> {remote:?}",
@@ -145,8 +149,9 @@ impl TunnelUdpInbound {
 	}
 }
 
-impl AbstractInbound for TunnelUdpInbound {
-	async fn listen(&self, cb: &impl InboundCallback) -> eyre::Result<()> {
+#[async_trait]
+impl<R: Router> AbstractInbound<R> for TunnelUdpInbound {
+	async fn listen(&self, cb: &Dispatcher<R>) -> eyre::Result<()> {
 		info!(
 			"[tunnel-udp] listening on {listen} -> {remote:?} timeout={timeout:?}",
 			listen = self.socket.local_addr()?,
@@ -274,6 +279,7 @@ fn create_tcp_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
 mod tests {
 	use std::time::Duration;
 
+	use async_trait::async_trait;
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 	use super::*;
@@ -292,72 +298,100 @@ mod tests {
 		a
 	}
 
-	/// Callback that echoes TCP data back (for testing basic relay).
-	#[derive(Clone)]
-	struct EchoCallback;
+	/// Router that forwards everything to the `"default"` outbound handler.
+	struct ForwardRouter;
 
-	impl InboundCallback for EchoCallback {
-		async fn handle_tcpstream(
-			&self,
-			_ctx: FlowContext,
-			mut stream: impl wind_core::tcp::AbstractTcpStream,
-		) -> eyre::Result<()> {
-			let mut buf = vec![0u8; 1024];
-			let n = stream.read(&mut buf).await?;
-			stream.write_all(&buf[..n]).await?;
-			stream.shutdown().await?;
-			Ok(())
-		}
-
-		async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
-			Ok(())
+	impl Router for ForwardRouter {
+		#[allow(clippy::manual_async_fn)]
+		fn route(&self, _ctx: &FlowContext) -> impl std::future::Future<Output = eyre::Result<RouteAction>> + Send {
+			async { Ok(RouteAction::Forward("default".to_string())) }
 		}
 	}
 
-	/// Callback that records the target address for assertion.
-	#[derive(Clone)]
-	struct RecordCallback {
-		targets: Arc<std::sync::Mutex<Vec<TargetAddr>>>,
+	/// Outbound handler variants mirroring the old test callbacks.
+	enum TestHandler {
+		/// Echo TCP data back.
+		Echo,
+		/// Record the target address for assertion.
+		Record(Arc<std::sync::Mutex<Vec<TargetAddr>>>),
+		/// Reject every connection.
+		Reject,
+		/// Echo the first UDP packet payload back.
+		UdpEcho,
+		/// Count handle_udp calls.
+		Count(Arc<std::sync::atomic::AtomicUsize>),
+		/// Never read from the UdpStream (queue fills).
+		Stall,
 	}
 
-	impl InboundCallback for RecordCallback {
-		async fn handle_tcpstream(
+	#[async_trait]
+	impl Outbound for TestHandler {
+		async fn handle_tcp(
 			&self,
 			ctx: FlowContext,
-			mut stream: impl wind_core::tcp::AbstractTcpStream,
+			mut stream: Box<dyn wind_core::tcp::AbstractTcpStream + 'static>,
 		) -> eyre::Result<()> {
-			self.targets.lock().unwrap().push(ctx.target);
-			// drain the stream so the peer sees EOF
-			let mut buf = [0u8; 64];
-			let _ = stream.read(&mut buf).await;
-			stream.shutdown().await?;
+			match self {
+				TestHandler::Echo => {
+					let mut buf = vec![0u8; 1024];
+					let n = stream.read(&mut buf).await?;
+					stream.write_all(&buf[..n]).await?;
+					stream.shutdown().await?;
+				}
+				TestHandler::Record(targets) => {
+					targets.lock().unwrap().push(ctx.target);
+					// drain the stream so the peer sees EOF
+					let mut buf = [0u8; 64];
+					let _ = stream.read(&mut buf).await;
+					stream.shutdown().await?;
+				}
+				TestHandler::Reject => return Err(eyre::eyre!("rejected")),
+				TestHandler::UdpEcho | TestHandler::Count(_) | TestHandler::Stall => {}
+			}
 			Ok(())
 		}
 
-		async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
+		async fn handle_udp(&self, _ctx: FlowContext, udp_stream: UdpStream) -> eyre::Result<()> {
+			match self {
+				TestHandler::Reject => return Err(eyre::eyre!("rejected")),
+				TestHandler::UdpEcho => {
+					let UdpStream { tx, mut rx } = udp_stream;
+					while let Some(pkt) = rx.recv().await {
+						// Echo the payload back with source=target so the reply bridge
+						// sends it to the original client.
+						let reply = UdpPacket {
+							payload: pkt.payload,
+							target: pkt.target,
+							source: None,
+						};
+						if tx.send(reply).await.is_err() {
+							break;
+						}
+					}
+				}
+				TestHandler::Count(count) => {
+					count.fetch_add(1, Ordering::Relaxed);
+					// Keep the session alive briefly, then drop.
+					let UdpStream { tx: _tx, mut rx } = udp_stream;
+					// Drain one packet then close → session ends.
+					let _ = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+				}
+				TestHandler::Stall => {
+					// Never read → queue stays full.
+					std::future::pending::<()>().await;
+				}
+				TestHandler::Echo | TestHandler::Record(_) => {}
+			}
 			Ok(())
 		}
 	}
 
-	/// Callback that rejects every connection (for testing reject paths).
-	#[derive(Clone)]
-	struct RejectCallback;
-
-	impl InboundCallback for RejectCallback {
-		async fn handle_tcpstream(
-			&self,
-			_ctx: FlowContext,
-			_stream: impl wind_core::tcp::AbstractTcpStream,
-		) -> eyre::Result<()> {
-			Err(eyre::eyre!("rejected"))
-		}
-
-		async fn handle_udpstream(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
-			Err(eyre::eyre!("rejected"))
-		}
+	/// Build a dispatcher wired to the given test handler.
+	fn dispatcher(handler: TestHandler) -> Dispatcher<ForwardRouter> {
+		let mut d = Dispatcher::new(ForwardRouter);
+		d.add_handler("default", Arc::new(handler));
+		d
 	}
-
-	// ── Helpers for tests ───────────────────────────────────────────────────
 
 	async fn connect_with_retry(addr: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -380,7 +414,7 @@ mod tests {
 		let addr = free_tcp_addr();
 		let inbound = TunnelTcpInbound::new(addr, ("example.com".into(), 80), cancel);
 
-		let _join = tokio::spawn(async move { inbound.listen(&RejectCallback).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Reject)).await });
 
 		let stream = connect_with_retry(addr).await;
 		assert!(stream.is_ok(), "must be able to connect to tunnel tcp listener");
@@ -391,14 +425,12 @@ mod tests {
 		let cancel = CancellationToken::new();
 		let addr = free_tcp_addr();
 		let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
-		let cb = RecordCallback {
-			targets: targets.clone(),
-		};
+		let targets_for_handler = targets.clone();
 		let inbound = TunnelTcpInbound::new(addr, ("google.com".into(), 443), cancel);
 
-		let _join = tokio::spawn(async move { inbound.listen(&cb).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Record(targets_for_handler))).await });
 		let mut stream = connect_with_retry(addr).await.unwrap();
-		// Write something so the callback can read/drain.
+		// Write something so the handler can read/drain.
 		stream.write_all(b"hello").await.unwrap();
 		stream.shutdown().await.unwrap();
 
@@ -415,7 +447,7 @@ mod tests {
 		let addr = free_tcp_addr();
 		let inbound = TunnelTcpInbound::new(addr, ("example.com".into(), 80), cancel);
 
-		let _join = tokio::spawn(async move { inbound.listen(&EchoCallback).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Echo)).await });
 		let mut stream = connect_with_retry(addr).await.unwrap();
 		stream.write_all(b"ping").await.unwrap();
 		stream.shutdown().await.unwrap();
@@ -430,12 +462,10 @@ mod tests {
 		let cancel = CancellationToken::new();
 		let addr = free_tcp_addr();
 		let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
-		let cb = RecordCallback {
-			targets: targets.clone(),
-		};
+		let targets_for_handler = targets.clone();
 		let inbound = TunnelTcpInbound::new(addr, ("multi.test".into(), 8080), cancel);
 
-		let _join = tokio::spawn(async move { inbound.listen(&cb).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Record(targets_for_handler))).await });
 		for _ in 0..5 {
 			let mut stream = connect_with_retry(addr).await.unwrap();
 			stream.write_all(b"x").await.unwrap();
@@ -455,7 +485,7 @@ mod tests {
 		let cancel = CancellationToken::new();
 		let inbound = TunnelTcpInbound::new(free_tcp_addr(), ("127.0.0.1".into(), 9), cancel.clone());
 
-		let _join = tokio::spawn(async move { inbound.listen(&RejectCallback).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Reject)).await });
 
 		tokio::time::sleep(Duration::from_millis(100)).await;
 		cancel.cancel();
@@ -477,7 +507,7 @@ mod tests {
 		drop(listener);
 
 		let inbound = TunnelTcpInbound::new(addr, ("ipv6.test".into(), 443), cancel);
-		let _join = tokio::spawn(async move { inbound.listen(&RejectCallback).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Reject)).await });
 
 		let stream = connect_with_retry(addr).await;
 		assert!(stream.is_ok(), "must connect on IPv6 loopback");
@@ -491,46 +521,14 @@ mod tests {
 		let addr = free_udp_addr();
 		let inbound = TunnelUdpInbound::new(addr, ("example.com".into(), 53), Duration::from_secs(60), cancel).unwrap();
 
-		let _join = tokio::spawn(async move { inbound.listen(&RejectCallback).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Reject)).await });
 		tokio::time::sleep(Duration::from_millis(50)).await;
 
-		// Send a UDP packet → should reach the tunnel (callback rejects, but
+		// Send a UDP packet → should reach the tunnel (handler rejects, but
 		// we just want to confirm the socket is listening).
 		let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let _result = client.send_to(b"test", addr).await;
 		assert!(_result.is_ok());
-	}
-
-	/// Callback that echoes the first UDP packet payload back to the sender
-	/// via the UdpStream reply channel.
-	#[derive(Clone)]
-	struct UdpEchoCallback;
-
-	impl InboundCallback for UdpEchoCallback {
-		async fn handle_tcpstream(
-			&self,
-			_ctx: FlowContext,
-			_stream: impl wind_core::tcp::AbstractTcpStream,
-		) -> eyre::Result<()> {
-			Ok(())
-		}
-
-		async fn handle_udpstream(&self, _ctx: FlowContext, udp_stream: UdpStream) -> eyre::Result<()> {
-			let UdpStream { tx, mut rx } = udp_stream;
-			while let Some(pkt) = rx.recv().await {
-				// Echo the payload back with source=target so the reply bridge
-				// sends it to the original client.
-				let reply = UdpPacket {
-					payload: pkt.payload,
-					target: pkt.target,
-					source: None,
-				};
-				if tx.send(reply).await.is_err() {
-					break;
-				}
-			}
-			Ok(())
-		}
 	}
 
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -539,7 +537,7 @@ mod tests {
 		let addr = free_udp_addr();
 		let inbound = TunnelUdpInbound::new(addr, ("echo.test".into(), 53), Duration::from_secs(60), cancel).unwrap();
 
-		let _join = tokio::spawn(async move { inbound.listen(&UdpEchoCallback).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::UdpEcho)).await });
 		tokio::time::sleep(Duration::from_millis(50)).await;
 
 		let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -561,7 +559,7 @@ mod tests {
 		let addr = free_udp_addr();
 		let inbound = TunnelUdpInbound::new(addr, ("multi.test".into(), 53), Duration::from_secs(60), cancel).unwrap();
 
-		let _join = tokio::spawn(async move { inbound.listen(&UdpEchoCallback).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::UdpEcho)).await });
 		tokio::time::sleep(Duration::from_millis(50)).await;
 
 		// Two clients from different source ports → two separate sessions.
@@ -596,7 +594,7 @@ mod tests {
 		)
 		.unwrap();
 
-		let _join = tokio::spawn(async move { inbound.listen(&RejectCallback).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Reject)).await });
 
 		tokio::time::sleep(Duration::from_millis(100)).await;
 		cancel.cancel();
@@ -614,35 +612,8 @@ mod tests {
 		let cancel = CancellationToken::new();
 		let addr = free_udp_addr();
 
-		/// Callback that counts how many handle_udpstream calls were made.
-		#[derive(Clone)]
-		struct CountCallback {
-			count: Arc<std::sync::atomic::AtomicUsize>,
-		}
-
-		impl InboundCallback for CountCallback {
-			async fn handle_tcpstream(
-				&self,
-				_ctx: FlowContext,
-				_stream: impl wind_core::tcp::AbstractTcpStream,
-			) -> eyre::Result<()> {
-				Ok(())
-			}
-
-			async fn handle_udpstream(&self, _ctx: FlowContext, stream: UdpStream) -> eyre::Result<()> {
-				self.count.fetch_add(1, Ordering::Relaxed);
-				// Keep the session alive briefly, then drop.
-				let UdpStream { tx: _tx, mut rx } = stream;
-				// Drain one packet then close → session ends.
-				let _ = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
-				Ok(())
-			}
-		}
-
-		let cb = CountCallback {
-			count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-		};
-		let count = cb.count.clone();
+		let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let count_for_handler = count.clone();
 		let inbound = TunnelUdpInbound::new(
 			addr,
 			("expire.test".into(), 53),
@@ -651,10 +622,10 @@ mod tests {
 		)
 		.unwrap();
 
-		let _join = tokio::spawn(async move { inbound.listen(&cb).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Count(count_for_handler))).await });
 		tokio::time::sleep(Duration::from_millis(50)).await;
 
-		// First client: sends packet, callback processes it, session stays.
+		// First client: sends packet, handler processes it, session stays.
 		let c1 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		c1.send_to(b"p1", addr).await.unwrap();
 
@@ -678,38 +649,19 @@ mod tests {
 		let cancel = CancellationToken::new();
 		let addr = free_udp_addr();
 
-		/// Callback that never reads from the UdpStream → queue fills up.
-		#[derive(Clone)]
-		struct StallCallback;
-		impl InboundCallback for StallCallback {
-			async fn handle_tcpstream(
-				&self,
-				_ctx: FlowContext,
-				_stream: impl wind_core::tcp::AbstractTcpStream,
-			) -> eyre::Result<()> {
-				Ok(())
-			}
-
-			async fn handle_udpstream(&self, _ctx: FlowContext, _stream: UdpStream) -> eyre::Result<()> {
-				// Never read → queue stays full.
-				std::future::pending::<()>().await;
-				Ok(())
-			}
-		}
-
 		let inbound = TunnelUdpInbound::new(addr, ("stall.test".into(), 53), Duration::from_secs(60), cancel).unwrap();
 
-		let _join = tokio::spawn(async move { inbound.listen(&StallCallback).await });
+		let _join = tokio::spawn(async move { inbound.listen(&dispatcher(TestHandler::Stall)).await });
 		tokio::time::sleep(Duration::from_millis(50)).await;
 
 		let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		// Send 100 packets > 64 queue size → some get dropped.
-		for i in 0..100 {
-			let payload = format!("pkt-{i}");
-			let _ = client.send_to(payload.as_bytes(), addr).await;
+		for _ in 0..100 {
+			let _ = client.send_to(b"x", addr).await;
 		}
 
-		// Should not panic or deadlock.
+		// The stall handler never drains the stream; the test passes if the
+		// send loop above didn't panic or deadlock.
 		tokio::time::sleep(Duration::from_millis(100)).await;
 
 		// Join handle still alive (listening, stalled).

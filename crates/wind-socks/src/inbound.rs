@@ -3,6 +3,7 @@ use std::{
 	sync::Arc,
 };
 
+use async_trait::async_trait;
 use fast_socks5::{ReplyError, Socks5Command, server::Socks5ServerProtocol, util::target_addr::TargetAddr as SocksTargetAddr};
 use snafu::ResultExt;
 use tokio::{
@@ -12,7 +13,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, error, info, warn};
 use wind_core::{
-	AbstractInbound, ConnInfo, ConnectDecision, FlowContext, InboundCallback, InboundHooks, Protocol, StatsCollector, UserId,
+	AbstractInbound, ConnInfo, ConnectDecision, Dispatcher, FlowContext, InboundCallback, InboundHooks, Protocol, Router,
+	StatsCollector, UserId,
 	hooks::{CountingStream, next_conn_id},
 	rule::{InboundType, NetworkType},
 	types::TargetAddr,
@@ -55,8 +57,9 @@ pub struct SocksInbound {
 	cancel: CancellationToken,
 }
 
-impl AbstractInbound for SocksInbound {
-	async fn listen(&self, cb: &impl InboundCallback) -> eyre::Result<()> {
+#[async_trait]
+impl<R: Router> AbstractInbound<R> for SocksInbound {
+	async fn listen(&self, cb: &Dispatcher<R>) -> eyre::Result<()> {
 		let listener = TcpListener::bind(self.opts.listen_addr).await?;
 		// Track per-connection tasks so shutdown can wait for them instead of
 		// leaving in-flight sessions to be killed by runtime teardown. Each task
@@ -116,11 +119,11 @@ impl SocksInbound {
 	}
 }
 
-async fn handle_income(
+async fn handle_income<C: InboundCallback>(
 	opts: Arc<SocksInboundOpt>,
 	stream: TcpStream,
 	client_addr: SocketAddr,
-	cb: impl InboundCallback,
+	cb: C,
 	cancel: CancellationToken,
 ) -> Result<(), Error> {
 	let conn_info = ConnInfo {
@@ -147,11 +150,11 @@ async fn handle_income(
 	result
 }
 
-async fn serve_socks(
+async fn serve_socks<C: InboundCallback>(
 	opts: &Arc<SocksInboundOpt>,
 	stream: TcpStream,
 	client_addr: SocketAddr,
-	cb: &impl InboundCallback,
+	cb: &C,
 	cancel: &CancellationToken,
 	user: &mut Option<UserId>,
 ) -> Result<(), Error> {
