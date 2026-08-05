@@ -2,7 +2,10 @@ use clap::Parser as _;
 use tracing::{Level, info};
 use wind_core::App;
 
-use crate::{cli::Cli, conf::persistent::PersistentConfig};
+use crate::{
+	cli::Cli,
+	conf::{persistent::PersistentConfig, resolved::ResolvedConfig},
+};
 mod cli;
 mod conf;
 mod log;
@@ -67,13 +70,18 @@ async fn main() -> eyre::Result<()> {
 	let persistent_config = PersistentConfig::load(cli.config, cli.config_dir)?;
 	info!(target: "wind_main", "Configuration loaded successfully");
 
-	let runtime_config = conf::runtime::Config::from_persist(persistent_config);
+	// Resolve the persisted form into a fully-typed runtime config: this
+	// parses socket addresses / strategies / congestion-control names and
+	// validates tags, load-balance references and dependency cycles, so the
+	// plugin never sees half-resolved strings.
+	let resolved_config = ResolvedConfig::try_from(persistent_config)?;
+	info!(target: "wind_main", "Configuration resolved successfully");
 
 	// Assemble the wind App: outbounds, router, and inbounds are wired by the
 	// plugin; `App::run` owns the dispatcher, task tracking, traffic flush and
 	// graceful shutdown/drain.
 	let app = App::<plugin::WindRouter>::new()
-		.add_plugin(plugin::WindPlugin::new(runtime_config))
+		.add_plugin(plugin::WindPlugin::new(resolved_config))
 		.await?;
 	app.run().await?;
 
