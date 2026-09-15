@@ -40,12 +40,14 @@ quinn = [
     "dep:rustls-platform-verifier",
 ]
 aws-lc-rs = [
+    "wind-quic/aws-lc-rs",
     "rustls/aws-lc-rs",
     "quinn/rustls-aws-lc-rs",
     "dep:aws-lc-rs",
     "aws-lc-rs?/prebuilt-nasm"
 ]
 ring = [
+    "wind-quic/ring",
     "rustls/ring",
     "quinn/rustls-ring"
 ]
