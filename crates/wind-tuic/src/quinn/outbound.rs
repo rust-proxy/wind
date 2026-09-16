@@ -1,5 +1,7 @@
 use std::{
+	future::Future,
 	net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+	pin::Pin,
 	sync::{Arc, atomic::AtomicU16},
 	time::Duration,
 };
@@ -39,9 +41,25 @@ const MAX_PACKET_FRAME: usize = 10 + 259 + u16::MAX as usize;
 /// interface before quinn takes ownership of the socket.
 pub type UdpSocketFactory = Arc<dyn Fn(SocketAddr) -> std::io::Result<std::net::UdpSocket> + Send + Sync + 'static>;
 
+/// Resolves the server's current socket address before a reconnect attempt.
+///
+/// Supplied by a consumer that owns DNS resolution (e.g. clash-rs) so a
+/// domain-configured peer follows DNS rotation, failover, or record changes
+/// instead of pinning the address resolved when the outbound was built. It is
+/// only consulted on reconnect; the initial connection uses `peer_addr`. The
+/// error is only logged, so it is intentionally dependency-free.
+pub type PeerResolver =
+	Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<SocketAddr, String>> + Send>> + Send + Sync + 'static>;
+
 #[derive(Clone)]
 pub struct TuicOutboundOpts {
 	pub peer_addr: SocketAddr,
+	/// Optional resolver consulted before each reconnect attempt so a
+	/// domain-configured peer can follow DNS changes / address rotation.
+	///
+	/// When `None` (or when it returns an error), the last known peer address
+	/// is reused. The initial connection always uses `peer_addr`.
+	pub peer_resolver: Option<PeerResolver>,
 	pub sni: String,
 	pub auth: (Uuid, Arc<[u8]>),
 	pub zero_rtt_handshake: bool,
@@ -187,22 +205,9 @@ impl TuicOutbound {
 		// endpoint bound to 0.0.0.0 cannot dial an IPv6 peer -- `connect`
 		// returns `InvalidRemoteAddress` -- so an IPv6 server (`[::1]:8444`)
 		// was unreachable when we always bound IPv4.
-		let socket = match &opts.socket_factory {
-			Some(factory) => {
-				factory(peer_addr).map_err(|e| eyre::eyre!("Failed to create UDP socket for {}: {}", peer_addr, e))?
-			}
-			None => {
-				let socket_addr = if peer_addr.is_ipv6() {
-					SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
-				} else {
-					SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
-				};
-				UdpSocket::bind(&socket_addr)
-					.await
-					.map_err(|e| eyre::eyre!("Failed to bind socket to {}: {}", socket_addr, e))?
-					.into_std()?
-			}
-		};
+		let socket = bind_endpoint_socket(peer_addr, opts.socket_factory.as_ref())
+			.await
+			.map_err(|e| eyre::eyre!("Failed to create UDP socket for {}: {}", peer_addr, e))?;
 
 		let endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(TokioRuntime))?;
 		endpoint.set_default_client_config(client_config);
@@ -234,6 +239,8 @@ impl TuicOutbound {
 		let auth = self.opts.auth.clone();
 		let heartbeat = self.opts.heartbeat;
 		let reconnect = self.opts.reconnect.clone();
+		let peer_resolver = self.opts.peer_resolver.clone();
+		let socket_factory = self.opts.socket_factory.clone();
 		let ctx = self.ctx.clone();
 		let udp_session = self.udp_session.clone();
 
@@ -286,7 +293,18 @@ impl TuicOutbound {
 				// it.
 				conn.close(0, b"reconnecting");
 
-				match reconnect_loop(&endpoint, peer_addr, &sni, &auth, &reconnect, &shutdown).await {
+				match reconnect_loop(
+					&endpoint,
+					peer_addr,
+					peer_resolver.as_ref(),
+					&sni,
+					&auth,
+					socket_factory.as_ref(),
+					&reconnect,
+					&shutdown,
+				)
+				.await
+				{
 					Some(new_conn) => {
 						connection_cell.store(Arc::new(new_conn));
 						info!(target: "tuic_out", "Reconnected to {}", peer_addr);
@@ -324,6 +342,33 @@ enum SessionEnd {
 	Lost,
 }
 
+/// Bind the local UDP socket the QUIC endpoint uses to reach `peer`.
+///
+/// Prefers the caller's [`UdpSocketFactory`] so platform socket options
+/// (interface binding, Linux `SO_MARK`) are applied. Otherwise binds an
+/// ephemeral socket on the unspecified address matching the peer's family:
+/// a quinn endpoint bound to `0.0.0.0` cannot dial an IPv6 peer.
+async fn bind_endpoint_socket(peer: SocketAddr, factory: Option<&UdpSocketFactory>) -> std::io::Result<std::net::UdpSocket> {
+	match factory {
+		Some(factory) => factory(peer),
+		None => {
+			let socket_addr = if peer.is_ipv6() {
+				SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+			} else {
+				SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+			};
+			Ok(UdpSocket::bind(socket_addr).await?.into_std()?)
+		}
+	}
+}
+
+/// Whether `peer`'s address family differs from the endpoint's local socket,
+/// meaning the endpoint must be rebound before dialing `peer` (quinn rejects
+/// an IPv6 peer on an IPv4 socket).
+fn peer_family_differs(local: SocketAddr, peer: SocketAddr) -> bool {
+	local.is_ipv6() != peer.is_ipv6()
+}
+
 /// Open a fresh QUIC connection on `endpoint` and complete the TUIC auth
 /// handshake. Shared by initial connect ([`TuicOutbound::new`]) and reconnect.
 async fn connect_and_auth(
@@ -350,27 +395,66 @@ fn next_backoff(current: Duration, max: Duration) -> Duration {
 
 /// Retry [`connect_and_auth`] with exponential backoff until it succeeds or
 /// `shutdown` fires. Returns `None` if cancelled before a connection is made.
+///
+/// When a [`PeerResolver`] is supplied it is consulted before every attempt so
+/// DNS rotation / failover is followed; a resolution error reuses the last
+/// known address. If the peer's address family no longer matches the
+/// endpoint's local socket, the endpoint is rebound (via the caller's socket
+/// factory when present) so the new family is reachable.
+#[allow(clippy::too_many_arguments)]
 async fn reconnect_loop(
 	endpoint: &quinn::Endpoint,
 	peer_addr: SocketAddr,
+	peer_resolver: Option<&PeerResolver>,
 	sni: &str,
 	auth: &(Uuid, Arc<[u8]>),
+	socket_factory: Option<&UdpSocketFactory>,
 	reconnect: &ReconnectConfig,
 	shutdown: &CancellationToken,
 ) -> Option<QuinnConnection> {
 	let mut backoff = reconnect.initial_backoff;
+	let mut current_peer = peer_addr;
 
 	loop {
+		if let Some(resolver) = peer_resolver {
+			match resolver().await {
+				Ok(addr) => current_peer = addr,
+				Err(e) => {
+					warn!(target: "tuic_out", "Peer re-resolution for {sni} failed: {e}; reusing {current_peer}");
+				}
+			}
+		}
+
+		// A peer that changed address family cannot be reached from the
+		// endpoint's current local socket (quinn rejects an IPv6 peer on an
+		// IPv4 socket). Rebind before dialing so the new family is reachable.
+		let family_changed = endpoint
+			.local_addr()
+			.map(|local| peer_family_differs(local, current_peer))
+			.unwrap_or(false);
+		if family_changed {
+			match bind_endpoint_socket(current_peer, socket_factory).await {
+				Ok(socket) => {
+					if let Err(e) = endpoint.rebind(socket) {
+						warn!(target: "tuic_out", "Failed to rebind endpoint socket for {current_peer}: {e}");
+					}
+				}
+				Err(e) => {
+					warn!(target: "tuic_out", "Failed to create endpoint socket for {current_peer}: {e}");
+				}
+			}
+		}
+
 		// Race the connect attempt against shutdown so a hung handshake (e.g.
 		// the server is still down) doesn't delay a graceful exit.
 		let attempt = tokio::select! {
 			_ = shutdown.cancelled() => return None,
-			r = connect_and_auth(endpoint, peer_addr, sni, auth) => r,
+			r = connect_and_auth(endpoint, current_peer, sni, auth) => r,
 		};
 		match attempt {
 			Ok(conn) => return Some(conn),
 			Err(e) => {
-				warn!(target: "tuic_out", "Reconnect to {} failed: {e}; retrying in {:?}", peer_addr, backoff);
+				warn!(target: "tuic_out", "Reconnect to {} failed: {e}; retrying in {:?}", current_peer, backoff);
 				tokio::select! {
 					_ = shutdown.cancelled() => return None,
 					_ = tokio::time::sleep(backoff) => {}
@@ -703,9 +787,9 @@ impl Outbound for TuicOutbound {
 
 #[cfg(test)]
 mod tests {
-	use std::time::Duration;
+	use std::{net::SocketAddr, time::Duration};
 
-	use super::{ReconnectConfig, next_backoff};
+	use super::{ReconnectConfig, next_backoff, peer_family_differs};
 
 	#[test]
 	fn next_backoff_doubles_until_capped() {
@@ -724,6 +808,16 @@ mod tests {
 		let huge = Duration::from_secs(u64::MAX / 2 + 1);
 		let max = Duration::from_secs(u64::MAX);
 		assert_eq!(next_backoff(huge, max), max);
+	}
+
+	#[test]
+	fn peer_family_differs_only_across_families() {
+		let v4: SocketAddr = "127.0.0.1:1".parse().unwrap();
+		let v6: SocketAddr = "[::1]:1".parse().unwrap();
+		assert!(!peer_family_differs(v4, v4));
+		assert!(!peer_family_differs(v6, v6));
+		assert!(peer_family_differs(v4, v6));
+		assert!(peer_family_differs(v6, v4));
 	}
 
 	#[test]

@@ -160,7 +160,7 @@ mod tests {
 	use wind_tuic::quinn::{
 		CongestionControl, UdpRelayMode,
 		inbound::{TuicInbound, TuicInboundOpts},
-		outbound::{ReconnectConfig, TuicOutbound, TuicOutboundOpts, UdpSocketFactory},
+		outbound::{PeerResolver, ReconnectConfig, TuicOutbound, TuicOutboundOpts, UdpSocketFactory},
 	};
 
 	use super::*;
@@ -261,15 +261,22 @@ mod tests {
 	/// Used by the graceful-shutdown tests, which need a client whose lifetime
 	/// is independent of the [`TuicTestSetup`] `Drop` guard.
 	async fn connect_client(addr: SocketAddr, uuid: Uuid) -> eyre::Result<Arc<TuicOutbound>> {
-		connect_client_with(addr, uuid, ReconnectConfig::default()).await
+		connect_client_with(addr, uuid, ReconnectConfig::default(), None).await
 	}
 
-	/// As [`connect_client`], but with an explicit reconnect policy — lets
-	/// tests disable reconnect or tune its backoff.
-	async fn connect_client_with(addr: SocketAddr, uuid: Uuid, reconnect: ReconnectConfig) -> eyre::Result<Arc<TuicOutbound>> {
+	/// As [`connect_client`], but with an explicit reconnect policy and an
+	/// optional peer resolver — lets tests disable reconnect, tune its backoff,
+	/// or verify that DNS re-resolution drives the reconnect target.
+	async fn connect_client_with(
+		addr: SocketAddr,
+		uuid: Uuid,
+		reconnect: ReconnectConfig,
+		peer_resolver: Option<PeerResolver>,
+	) -> eyre::Result<Arc<TuicOutbound>> {
 		let ctx = Arc::new(AppContext::default());
 		let opts = TuicOutboundOpts {
 			peer_addr: addr,
+			peer_resolver,
 			sni: "localhost".to_string(),
 			auth: (uuid, Arc::from(TEST_PASSWORD)),
 			zero_rtt_handshake: false,
@@ -305,6 +312,7 @@ mod tests {
 		let ctx = Arc::new(AppContext::default());
 		let opts = TuicOutboundOpts {
 			peer_addr: setup.server_addr,
+			peer_resolver: None,
 			sni: "localhost".to_string(),
 			auth: (setup.uuid, Arc::from(TEST_PASSWORD)),
 			zero_rtt_handshake: false,
@@ -358,6 +366,7 @@ mod tests {
 
 		let opts = TuicOutboundOpts {
 			peer_addr: setup.server_addr,
+			peer_resolver: None,
 			sni: "localhost".to_string(),
 			auth: (setup.uuid, Arc::from(TEST_PASSWORD)),
 			zero_rtt_handshake: false,
@@ -457,6 +466,7 @@ mod tests {
 		let ctx = Arc::new(AppContext::default());
 		let opts = TuicOutboundOpts {
 			peer_addr: setup.server_addr,
+			peer_resolver: None,
 			sni: "localhost".to_string(),
 			auth: (setup.uuid, Arc::from(b"wrong_password_123".as_slice())),
 			zero_rtt_handshake: false,
@@ -493,6 +503,7 @@ mod tests {
 		let ctx = Arc::new(AppContext::default());
 		let opts = TuicOutboundOpts {
 			peer_addr: setup.server_addr,
+			peer_resolver: None,
 			sni: "localhost".to_string(),
 			auth: (Uuid::new_v4(), Arc::from(TEST_PASSWORD)),
 			zero_rtt_handshake: false,
@@ -761,6 +772,7 @@ mod tests {
 		let ctx = Arc::new(AppContext::default());
 		let opts = TuicOutboundOpts {
 			peer_addr: setup.server_addr,
+			peer_resolver: None,
 			sni: "localhost".to_string(),
 			auth: (setup.uuid, Arc::from(TEST_PASSWORD)),
 			zero_rtt_handshake: false,
@@ -981,6 +993,71 @@ mod tests {
 		ctx2.token.cancel();
 	}
 
+	/// The supervisor must re-resolve the peer before reconnecting: the client
+	/// connects to server A, but its resolver points at server B, so once A
+	/// goes away the fresh connection lands on B. Without re-resolution the
+	/// reconnect keeps dialing the dead A and never recovers.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn test_client_re_resolves_peer_on_reconnect() {
+		use tokio::net::TcpListener;
+
+		let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let echo_port = echo.local_addr().unwrap().port();
+		tokio::spawn(async move {
+			while let Ok((mut s, _)) = echo.accept().await {
+				tokio::spawn(async move {
+					let (mut r, mut w) = s.split();
+					let _ = tokio::io::copy(&mut r, &mut w).await;
+				});
+			}
+		});
+
+		// Distinct loopback addresses for the initial server and the failover.
+		let probe_a = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		let addr_a = probe_a.local_addr().unwrap();
+		drop(probe_a);
+		let probe_b = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		let addr_b = probe_b.local_addr().unwrap();
+		drop(probe_b);
+
+		let uuid = Uuid::new_v4();
+
+		let (ctx_a, handle_a) = spawn_server_on(addr_a, uuid).await;
+		let (ctx_b, _handle_b) = spawn_server_on(addr_b, uuid).await;
+
+		// The resolver only returns the failover target; the initial connection
+		// still goes to `peer_addr` (server A).
+		let resolver: PeerResolver = Arc::new(move || Box::pin(async move { Ok(addr_b) }));
+		let client = connect_client_with(addr_a, uuid, ReconnectConfig::default(), Some(resolver))
+			.await
+			.expect("connect client");
+
+		let got = proxy_echo_once(&client, echo_port, b"before")
+			.await
+			.expect("initial proxied echo must succeed");
+		assert_eq!(got, b"before");
+
+		// Kill A. The supervisor notices the drop, re-resolves to B, and
+		// reconnects there.
+		ctx_a.token.cancel();
+		let _ = tokio::time::timeout(Duration::from_secs(5), handle_a).await;
+		tokio::time::sleep(Duration::from_millis(300)).await;
+
+		let mut reconnected = false;
+		for _ in 0..60 {
+			if let Ok(got) = proxy_echo_once(&client, echo_port, b"after").await
+				&& got == b"after"
+			{
+				reconnected = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(250)).await;
+		}
+		assert!(reconnected, "client did not re-resolve and reconnect to the failover server");
+
+		ctx_b.token.cancel();
+	}
+
 	/// Shutting the client down while its supervisor is stuck in the reconnect
 	/// backoff loop (server still down) must abandon reconnect and drain the
 	/// tracked tasks promptly, not hang.
@@ -1040,6 +1117,7 @@ mod tests {
 				enabled: false,
 				..Default::default()
 			},
+			None,
 		)
 		.await
 		.expect("connect client");
@@ -1166,6 +1244,7 @@ mod tests {
 			let cctx = Arc::new(AppContext::default());
 			let opts = TuicOutboundOpts {
 				peer_addr: server_addr,
+				peer_resolver: None,
 				sni: "localhost".to_string(),
 				auth: (uuid, Arc::from(TEST_PASSWORD)),
 				zero_rtt_handshake: false,
