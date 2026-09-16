@@ -591,6 +591,10 @@ impl Outbound for TuicOutbound {
 		// swaps the connection later, this session's streams die and the
 		// caller retries.
 		let connection = self.connection.load_full().as_ref().clone();
+		// Separate handle for the task: it lets the bridge observe the
+		// association's own connection closing (on reconnect or any loss) and
+		// end the session, while `connection` stays available for teardown.
+		let assoc_connection = connection.clone();
 		let (receive_tx, receive_rx) = crossfire::mpmc::bounded_async(256);
 		let tuic_stream = Arc::new(
 			crate::proto::UdpStream::new(connection.clone(), assoc_id, receive_tx)
@@ -611,6 +615,18 @@ impl Outbound for TuicOutbound {
 				tokio::select! {
 					_ = cancel_stream.cancelled() => {
 						info!(target: "tuic_out", "UDP stream sender for association {:#06x} cancelled", assoc_id);
+						break;
+					}
+
+					// The connection this association was created on is gone
+					// (reconnect, peer close, or idle timeout). Its streams can
+					// no longer carry traffic, so end the session: this drops
+					// `client_tx`/`client_rx` and, once teardown removes the
+					// `udp_session` entry, `receive_tx`, which closes the
+					// caller's stream and lets it recreate the association on
+					// the new connection instead of blackholing silently.
+					_ = assoc_connection.closed() => {
+						info!(target: "tuic_out", "Connection lost; ending UDP association {:#06x}", assoc_id);
 						break;
 					}
 
@@ -671,10 +687,12 @@ impl Outbound for TuicOutbound {
 
 		// Tear down: stop the bridge task if it is still running
 		// (global-shutdown path), release the association id, and tell the
-		// peer to dissociate.
+		// peer to dissociate. `Dissociate` goes on the association's own
+		// connection: after a reconnect the live connection never knew this
+		// assoc id, so loading the current one here would target the wrong
+		// peer state (or a reused id).
 		cancel.cancel();
 		self.udp_session.remove(&assoc_id).await;
-		let connection = self.connection.load_full();
 		if let Err(err) = connection.drop_udp(assoc_id).await {
 			info!(target: "tuic_out", "Error dropping UDP association {:#06x}: {}", assoc_id, err);
 		}
