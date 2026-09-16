@@ -283,6 +283,7 @@ fn resolve_outbound(oc: OutboundConfig) -> eyre::Result<ResolvedOutbound> {
 					stream_receive_window: None,
 					max_idle_time: None,
 					udp_relay_mode: TuicUdpRelayMode::Native,
+					socket_factory: None,
 				},
 			})
 		}

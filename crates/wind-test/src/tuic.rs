@@ -160,7 +160,7 @@ mod tests {
 	use wind_tuic::quinn::{
 		CongestionControl, UdpRelayMode,
 		inbound::{TuicInbound, TuicInboundOpts},
-		outbound::{ReconnectConfig, TuicOutbound, TuicOutboundOpts},
+		outbound::{ReconnectConfig, TuicOutbound, TuicOutboundOpts, UdpSocketFactory},
 	};
 
 	use super::*;
@@ -287,6 +287,7 @@ mod tests {
 			stream_receive_window: None,
 			max_idle_time: None,
 			udp_relay_mode: UdpRelayMode::Native,
+			socket_factory: None,
 		};
 		let client = Arc::new(TuicOutbound::new(ctx, opts).await?);
 		let poll_client = client.clone();
@@ -321,6 +322,7 @@ mod tests {
 			stream_receive_window: None,
 			max_idle_time: None,
 			udp_relay_mode: UdpRelayMode::Native,
+			socket_factory: None,
 		};
 		let client: std::sync::Arc<TuicOutbound> = std::sync::Arc::new(TuicOutbound::new(ctx.clone(), opts).await?);
 		let poll_client = client.clone();
@@ -332,6 +334,60 @@ mod tests {
 		);
 		tokio::time::sleep(Duration::from_millis(100)).await;
 		Ok(client)
+	}
+
+	/// The caller-supplied socket factory must drive the QUIC endpoint socket:
+	/// this is how a consumer applies Linux `SO_MARK` / interface binding. A
+	/// regression here would silently fall back to Wind's own unmarked socket.
+	#[tokio::test]
+	async fn socket_factory_supplies_the_endpoint_socket() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let setup = setup_tuic_server().await.expect("start TUIC server");
+		let ctx = Arc::new(AppContext::default());
+
+		let called = Arc::new(AtomicBool::new(false));
+		let factory_called = called.clone();
+		let socket_factory: UdpSocketFactory = Arc::new(move |peer: SocketAddr| {
+			factory_called.store(true, Ordering::SeqCst);
+			let bind_addr = if peer.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+			let socket = std::net::UdpSocket::bind(bind_addr)?;
+			socket.set_nonblocking(true)?;
+			Ok(socket)
+		});
+
+		let opts = TuicOutboundOpts {
+			peer_addr: setup.server_addr,
+			sni: "localhost".to_string(),
+			auth: (setup.uuid, Arc::from(TEST_PASSWORD)),
+			zero_rtt_handshake: false,
+			heartbeat: Duration::from_secs(5),
+			gc_interval: Duration::from_secs(5),
+			gc_lifetime: Duration::from_secs(30),
+			skip_cert_verify: true,
+			alpn: vec!["h3".to_string()],
+			reconnect: ReconnectConfig::default(),
+			client_config: None,
+			congestion_control: CongestionControl::Bbr,
+			max_concurrent_bi_streams: None,
+			max_concurrent_uni_streams: None,
+			send_window: None,
+			stream_receive_window: None,
+			max_idle_time: None,
+			udp_relay_mode: UdpRelayMode::Native,
+			socket_factory: Some(socket_factory),
+		};
+
+		let client = Arc::new(TuicOutbound::new(ctx, opts).await.expect("connect through factory socket"));
+		assert!(called.load(Ordering::SeqCst), "socket factory was not invoked");
+
+		let poll_client = client.clone();
+		tokio::spawn(
+			async move {
+				let _ = poll_client.start_poll().await;
+			}
+			.in_current_span(),
+		);
 	}
 
 	/// A UDP association must be torn down when its local stream closes:
@@ -418,6 +474,7 @@ mod tests {
 			stream_receive_window: None,
 			max_idle_time: None,
 			udp_relay_mode: UdpRelayMode::Native,
+			socket_factory: None,
 		};
 		let result: eyre::Result<TuicOutbound> = TuicOutbound::new(ctx, opts).await;
 		assert!(
@@ -453,6 +510,7 @@ mod tests {
 			stream_receive_window: None,
 			max_idle_time: None,
 			udp_relay_mode: UdpRelayMode::Native,
+			socket_factory: None,
 		};
 		let result: eyre::Result<TuicOutbound> = TuicOutbound::new(ctx, opts).await;
 		assert!(
@@ -720,6 +778,7 @@ mod tests {
 			stream_receive_window: None,
 			max_idle_time: None,
 			udp_relay_mode: UdpRelayMode::Quic,
+			socket_factory: None,
 		};
 		let client = Arc::new(TuicOutbound::new(ctx, opts).await.expect("connect tuic client"));
 		let poll_client = client.clone();
@@ -1124,6 +1183,7 @@ mod tests {
 				stream_receive_window: None,
 				max_idle_time: None,
 				udp_relay_mode: UdpRelayMode::Native,
+				socket_factory: None,
 			};
 			let c = Arc::new(TuicOutbound::new(cctx, opts).await.unwrap());
 			let pc = c.clone();

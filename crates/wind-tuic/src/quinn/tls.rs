@@ -139,6 +139,7 @@ mod tests {
 			stream_receive_window: None,
 			max_idle_time: None,
 			udp_relay_mode: crate::quinn::UdpRelayMode::Native,
+			socket_factory: None,
 		}
 	}
 

@@ -30,6 +30,15 @@ use crate::{
 /// header (2) + command (8) + longest address (259) + max payload (`u16`).
 const MAX_PACKET_FRAME: usize = 10 + 259 + u16::MAX as usize;
 
+/// Creates the local UDP socket the QUIC endpoint binds to.
+///
+/// Wind calls the factory with the peer address the endpoint will dial, so
+/// the caller can select the matching address family and skip interface
+/// binding for loopback peers. This lets a consumer apply platform socket
+/// options (for example Linux `SO_MARK` or bind-to-device) or bind a chosen
+/// interface before quinn takes ownership of the socket.
+pub type UdpSocketFactory = Arc<dyn Fn(SocketAddr) -> std::io::Result<std::net::UdpSocket> + Send + Sync + 'static>;
+
 #[derive(Clone)]
 pub struct TuicOutboundOpts {
 	pub peer_addr: SocketAddr,
@@ -64,6 +73,13 @@ pub struct TuicOutboundOpts {
 	pub max_idle_time: Option<Duration>,
 	/// How outgoing `Packet` commands are relayed (datagram vs uni stream).
 	pub udp_relay_mode: UdpRelayMode,
+	/// Optional factory for the local UDP socket used by the QUIC endpoint.
+	///
+	/// When `Some`, Wind hands the returned socket to quinn instead of binding
+	/// its own, letting the caller pre-apply platform socket options or bind a
+	/// specific interface. When `None`, Wind binds an ephemeral socket on the
+	/// unspecified address matching the peer's address family.
+	pub socket_factory: Option<UdpSocketFactory>,
 }
 
 /// Controls how the outbound supervisor re-establishes the QUIC connection
@@ -165,19 +181,28 @@ impl TuicOutbound {
 			client_config.transport_config(Arc::new(transport_config));
 			client_config
 		};
-		// Bind the local socket in the same address family as the peer. A quinn
+		// The caller may supply the socket (e.g. to set Linux `SO_MARK` or bind
+		// an interface) so policy routing and TUN setups keep working. Otherwise
+		// bind the local socket in the same address family as the peer: a quinn
 		// endpoint bound to 0.0.0.0 cannot dial an IPv6 peer -- `connect`
 		// returns `InvalidRemoteAddress` -- so an IPv6 server (`[::1]:8444`)
 		// was unreachable when we always bound IPv4.
-		let socket_addr = if peer_addr.is_ipv6() {
-			SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
-		} else {
-			SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+		let socket = match &opts.socket_factory {
+			Some(factory) => {
+				factory(peer_addr).map_err(|e| eyre::eyre!("Failed to create UDP socket for {}: {}", peer_addr, e))?
+			}
+			None => {
+				let socket_addr = if peer_addr.is_ipv6() {
+					SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+				} else {
+					SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+				};
+				UdpSocket::bind(&socket_addr)
+					.await
+					.map_err(|e| eyre::eyre!("Failed to bind socket to {}: {}", socket_addr, e))?
+					.into_std()?
+			}
 		};
-		let socket = UdpSocket::bind(&socket_addr)
-			.await
-			.map_err(|e| eyre::eyre!("Failed to bind socket to {}: {}", socket_addr, e))?
-			.into_std()?;
 
 		let endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(TokioRuntime))?;
 		endpoint.set_default_client_config(client_config);
