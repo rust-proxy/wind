@@ -587,6 +587,16 @@ Implementations MUST:
 - Implement rate limiting for authentication attempts.
 - Terminate connections after authentication failures.
 
+#### 9.1.1. 0-RTT and Authentication
+
+Session resumption may let a client send early data in its first flight (0-RTT). The Authenticate TOKEN, however, is derived from the TLS Keying Material Exporter, which is only defined once the TLS handshake completes (RFC 8446). A client therefore cannot compute the token before the handshake and cannot send the Authenticate command as early data.
+
+Implementations that enable 0-RTT (`zero_rtt_handshake` / `reduce-rtt`):
+- MAY establish the connection via 0-RTT resumption, but MUST wait for the handshake to complete before sending Authenticate.
+- MUST NOT attempt to export keying material before the handshake completes; backends such as rustls reject it, and sending a token that a rustls server cannot yet derive results in an authentication failure.
+- A server that accepts a connection at 0.5-RTT MUST wait for the handshake before validating the token.
+- MUST NOT rely on 0-RTT for replay protection; early data is inherently replayable.
+
 ### 9.2. Encryption
 
 All TUIC traffic is encrypted by the underlying TLS 1.3 layer provided by QUIC:

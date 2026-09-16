@@ -215,7 +215,7 @@ impl TuicOutbound {
 		// Establish and authenticate the initial connection. The reconnect
 		// supervisor reuses the same configured endpoint via
 		// `connect_and_auth`.
-		let connection = connect_and_auth(&endpoint, peer_addr, &server_name, &opts.auth).await?;
+		let connection = connect_and_auth(&endpoint, peer_addr, &server_name, &opts.auth, opts.zero_rtt_handshake).await?;
 
 		Ok(Self {
 			token: ctx.token.child_token(),
@@ -238,6 +238,7 @@ impl TuicOutbound {
 		let sni = self.sni.clone();
 		let auth = self.opts.auth.clone();
 		let heartbeat = self.opts.heartbeat;
+		let zero_rtt = self.opts.zero_rtt_handshake;
 		let reconnect = self.opts.reconnect.clone();
 		let peer_resolver = self.opts.peer_resolver.clone();
 		let socket_factory = self.opts.socket_factory.clone();
@@ -299,6 +300,7 @@ impl TuicOutbound {
 					peer_resolver.as_ref(),
 					&sni,
 					&auth,
+					zero_rtt,
 					socket_factory.as_ref(),
 					&reconnect,
 					&shutdown,
@@ -376,11 +378,33 @@ async fn connect_and_auth(
 	peer_addr: SocketAddr,
 	sni: &str,
 	auth: &(Uuid, Arc<[u8]>),
+	zero_rtt: bool,
 ) -> Result<QuinnConnection, Error> {
-	let raw = endpoint
+	let connecting = endpoint
 		.connect(peer_addr, sni)
-		.map_err(|e| eyre::eyre!("Failed to connect to {} ({}): {}", peer_addr, sni, e))?
-		.await?;
+		.map_err(|e| eyre::eyre!("Failed to connect to {} ({}): {}", peer_addr, sni, e))?;
+
+	// A resumed session lets quinn send 0-RTT early data. The TUIC auth token
+	// is derived from the TLS keying-material exporter, which rustls only
+	// exposes once the handshake completes, so the auth command itself cannot
+	// be early data: take the 0-RTT connection handle, wait for the handshake,
+	// then authenticate over 1-RTT. A server that rejects 0-RTT still completes
+	// the handshake, so the fallback is transparent.
+	let raw = if zero_rtt {
+		match connecting.into_0rtt() {
+			Ok(conn) => {
+				conn.authenticated().await?;
+				info!(target: "tuic_out", "0-RTT resumption accepted");
+				conn
+			}
+			// No cached session ticket (e.g. the very first connection) — fall
+			// back to a full 1-RTT handshake.
+			Err(connecting) => connecting.await?,
+		}
+	} else {
+		connecting.await?
+	};
+
 	// Wrap in the backend-agnostic handle so the shared client/proto code
 	// (auth, heartbeat, TCP/UDP relay) drives it.
 	let connection = QuinnConnection::new(raw);
@@ -408,6 +432,7 @@ async fn reconnect_loop(
 	peer_resolver: Option<&PeerResolver>,
 	sni: &str,
 	auth: &(Uuid, Arc<[u8]>),
+	zero_rtt: bool,
 	socket_factory: Option<&UdpSocketFactory>,
 	reconnect: &ReconnectConfig,
 	shutdown: &CancellationToken,
@@ -449,7 +474,7 @@ async fn reconnect_loop(
 		// the server is still down) doesn't delay a graceful exit.
 		let attempt = tokio::select! {
 			_ = shutdown.cancelled() => return None,
-			r = connect_and_auth(endpoint, current_peer, sni, auth) => r,
+			r = connect_and_auth(endpoint, current_peer, sni, auth, zero_rtt) => r,
 		};
 		match attempt {
 			Ok(conn) => return Some(conn),
