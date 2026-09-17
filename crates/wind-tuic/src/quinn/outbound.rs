@@ -200,11 +200,11 @@ impl TuicOutbound {
 			client_config
 		};
 		// The caller may supply the socket (e.g. to set Linux `SO_MARK` or bind
-		// an interface) so policy routing and TUN setups keep working. Otherwise
-		// bind the local socket in the same address family as the peer: a quinn
-		// endpoint bound to 0.0.0.0 cannot dial an IPv6 peer -- `connect`
-		// returns `InvalidRemoteAddress` -- so an IPv6 server (`[::1]:8444`)
-		// was unreachable when we always bound IPv4.
+		// an interface) so policy routing and TUN setups keep working.
+		// Otherwise bind the local socket in the same address family as the
+		// peer: a quinn endpoint bound to 0.0.0.0 cannot dial an IPv6 peer --
+		// `connect` returns `InvalidRemoteAddress` -- so an IPv6 server
+		// (`[::1]:8444`) was unreachable when we always bound IPv4.
 		let socket = bind_endpoint_socket(peer_addr, opts.socket_factory.as_ref())
 			.await
 			.map_err(|e| eyre::eyre!("Failed to create UDP socket for {}: {}", peer_addr, e))?;
