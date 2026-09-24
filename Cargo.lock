@@ -5965,6 +5965,7 @@ dependencies = [
  "serde",
  "snafu",
  "socket2 0.6.5",
+ "tempfile",
  "test-log",
  "thiserror 2.0.20",
  "tokio",
