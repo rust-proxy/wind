@@ -19,7 +19,10 @@ use std::{collections::HashMap, future::Future, sync::Arc};
 
 use tracing::Instrument;
 
-use crate::{AppContext, InboundCallback, flow::FlowContext, outbound::Outbound, tcp::AbstractTcpStream, udp::UdpStream};
+use crate::{
+	AppContext, InboundCallback, flow::FlowContext, outbound::Outbound, tcp::AbstractTcpStream, types::TargetAddr,
+	udp::UdpStream,
+};
 
 /// Decision returned by a [`Router`].
 #[derive(Debug, Clone)]
@@ -40,7 +43,30 @@ pub enum RouteAction {
 /// apply any other policy.
 pub trait Router: Send + Sync + 'static {
 	/// Classify a TCP or UDP connection from its full [`FlowContext`].
+	/// This returns only a verdict; use [`Self::route_with_target`] or
+	/// [`Dispatcher`] when forwarding to preserve resolved-address checks.
 	fn route(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send;
+
+	/// Classify a flow and return the exact target to hand to its outbound.
+	///
+	/// Policies that validate resolved addresses must override this method to
+	/// pin the checked address, while evaluating rules against the original
+	/// context. The default preserves the original target and existing routers.
+	/// Wrappers around another router must delegate this method as well as
+	/// [`Self::route`] to preserve that router's address checks.
+	fn route_with_target(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<(RouteAction, TargetAddr)>> + Send {
+		async move { Ok((self.route(ctx).await?, ctx.target.clone())) }
+	}
+
+	/// Validate and prepare a later packet's target in an existing UDP session.
+	///
+	/// The outbound remains the one selected for the first packet. An error
+	/// drops this packet without closing the session. Address-checking routers
+	/// and wrappers must override/delegate this alongside
+	/// [`Self::route_with_target`].
+	fn prepare_udp_target(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<TargetAddr>> + Send {
+		async move { Ok(ctx.target.clone()) }
+	}
 }
 
 /// Routes inbound connections to named [`Outbound`] handlers.
@@ -132,7 +158,7 @@ impl<R: Router> InboundCallback for Dispatcher<R> {
 
 impl<R: Router> Dispatcher<R> {
 	async fn dispatch_tcp(&self, ctx: FlowContext, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
-		let action = self.router.route(&ctx).await?;
+		let (action, target) = self.router.route_with_target(&ctx).await?;
 
 		match action {
 			RouteAction::Reject(reason) => {
@@ -146,7 +172,7 @@ impl<R: Router> Dispatcher<R> {
 					.resolve_handler(&name)
 					.ok_or_else(|| eyre::eyre!("no outbound handler registered for '{}' (and no 'default')", name))?;
 
-				handler.handle_tcp(ctx, Box::new(stream)).await
+				handler.handle_tcp(ctx.with_target(target), Box::new(stream)).await
 			}
 		}
 	}
@@ -159,13 +185,14 @@ impl<R: Router> Dispatcher<R> {
 		// destination — `IP-CIDR`, `DOMAIN-SUFFIX`, `DST-PORT` and friends
 		// were effectively no-ops on UDP traffic.
 		//
-		// Routing is done ONCE on the first packet; subsequent packets follow
-		// the same handler. SOCKS5-style sessions that target many remotes in
-		// one logical UDP session will all flow through the handler picked
-		// for the first packet — this matches Clash behaviour and is a
-		// strict improvement over the sentinel.
+		// Outbound selection is done ONCE on the first packet; subsequent
+		// packets follow the same handler. SOCKS5-style sessions that
+		// target many remotes in one logical UDP session will all flow
+		// through the handler picked for the first packet — this
+		// matches Clash behaviour and is a strict improvement over the
+		// sentinel.
 		let UdpStream { tx, mut rx } = udp_stream;
-		let Some(first) = rx.recv().await else {
+		let Some(mut first) = rx.recv().await else {
 			return Ok(()); // remote closed before sending anything
 		};
 
@@ -173,7 +200,7 @@ impl<R: Router> Dispatcher<R> {
 		// so the real target is stamped in here.
 		let ctx = ctx.with_target(first.target.clone());
 
-		let action = self.router.route(&ctx).await?;
+		let (action, target) = self.router.route_with_target(&ctx).await?;
 
 		match action {
 			RouteAction::Reject(reason) => {
@@ -182,6 +209,7 @@ impl<R: Router> Dispatcher<R> {
 			}
 			RouteAction::Forward(name) => {
 				tracing::debug!(outbound = %name, target = %first.target, "forwarding");
+				first.target = target.clone();
 
 				let handler = self
 					.resolve_handler(&name)
@@ -190,7 +218,7 @@ impl<R: Router> Dispatcher<R> {
 				// Rebuild the inbound side of the UdpStream so the handler
 				// sees the first packet too. A small proxy channel replays
 				// the first packet and then forwards everything else from the
-				// original receiver verbatim.
+				// original receiver after validating each packet's destination.
 				//
 				// The replayer is spawned on the dispatcher's [`AppContext`]
 				// so graceful shutdown awaits it: a detached task would keep
@@ -200,26 +228,51 @@ impl<R: Router> Dispatcher<R> {
 				// arm fires while the upstream is idle — so the drain cannot
 				// block on it indefinitely.
 				let (proxy_tx, proxy_rx) = tokio::sync::mpsc::channel(32);
+				let router = self.router.clone();
+				let packet_ctx = ctx.clone();
+				let token = self.context.token.clone();
 				self.context.tasks.spawn(async move {
-					if proxy_tx.send(first).await.is_err() {
+					let first_sent = tokio::select! {
+						sent = proxy_tx.send(first) => sent,
+						_ = token.cancelled() => return,
+					};
+					if first_sent.is_err() {
 						return;
 					}
 					loop {
 						let packet = tokio::select! {
 							packet = rx.recv() => packet,
 							_ = proxy_tx.closed() => None,
+							_ = token.cancelled() => None,
 						};
-						let Some(packet) = packet else {
+						let Some(mut packet) = packet else {
 							break;
 						};
-						if proxy_tx.send(packet).await.is_err() {
+						let current_ctx = packet_ctx.clone().with_target(packet.target.clone());
+						let target = tokio::select! {
+							target = router.prepare_udp_target(&current_ctx) => target,
+							_ = proxy_tx.closed() => break,
+							_ = token.cancelled() => break,
+						};
+						match target {
+							Ok(target) => packet.target = target,
+							Err(error) => {
+								tracing::debug!(%error, "dropping UDP packet rejected by target policy");
+								continue;
+							}
+						}
+						let sent = tokio::select! {
+							sent = proxy_tx.send(packet) => sent,
+							_ = token.cancelled() => break,
+						};
+						if sent.is_err() {
 							break;
 						}
 					}
 				});
 
 				let routed_stream = UdpStream { tx, rx: proxy_rx };
-				handler.handle_udp(ctx, routed_stream).await
+				handler.handle_udp(ctx.with_target(target), routed_stream).await
 			}
 		}
 	}

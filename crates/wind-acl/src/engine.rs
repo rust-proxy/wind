@@ -15,6 +15,7 @@ use tracing::Instrument as _;
 use wind_core::{
 	FlowContext, RouteAction, Router, is_private_ip,
 	resolve::{Resolver, resolve_target},
+	types::TargetAddr,
 };
 use wind_geodata::GeoData;
 use wind_rule::{MatchContext, Rule, RuleType};
@@ -30,8 +31,11 @@ use crate::{
 /// Loopback / private-range guards applied *before* rule evaluation.
 ///
 /// When any guard is enabled the engine resolves the destination to an IP and
-/// rejects connections to loopback / private space. Building an engine with a
-/// guard enabled but no resolver is an error.
+/// rejects connections to loopback / private space. The dispatcher passes the
+/// checked IP to the outbound, preventing later DNS lookups or IP-family
+/// preferences from selecting an unchecked address. UDP destinations are
+/// checked for every packet; outbound selection still follows the first packet.
+/// Building an engine with a guard enabled but no resolver is an error.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct GuardConfig {
@@ -112,23 +116,32 @@ impl AclEngine {
 		}
 	}
 
-	async fn do_route(&self, ctx: &FlowContext) -> eyre::Result<RouteAction> {
-		// 1. Guards — resolve the destination and drop loopback / private
-		//    space.
-		if self.guards.enabled() {
-			let resolver = self
-				.resolver
-				.as_ref()
-				.expect("guards enabled without a resolver (should be rejected at build time)");
-			let resolved = resolve_target(&ctx.target, resolver.as_ref()).await?;
-			if self.guards.drop_loopback && is_local_destination(resolved.ip()) {
-				tracing::debug!(resolved = %resolved, "dropping local-host connection");
-				return Ok(RouteAction::Reject(format!("local-host address rejected: {resolved}")));
-			}
-			if self.guards.drop_private && is_private_ip(&resolved.ip()) {
-				tracing::debug!(resolved = %resolved, "dropping private-range connection");
-				return Ok(RouteAction::Reject(format!("private address rejected: {resolved}")));
-			}
+	async fn guarded_target(&self, ctx: &FlowContext) -> eyre::Result<(TargetAddr, Option<String>)> {
+		if !self.guards.enabled() {
+			return Ok((ctx.target.clone(), None));
+		}
+		let resolver = self
+			.resolver
+			.as_ref()
+			.expect("guards enabled without a resolver (should be rejected at build time)");
+		let resolved = resolve_target(&ctx.target, resolver.as_ref()).await?;
+		if self.guards.drop_loopback && is_local_destination(resolved.ip()) {
+			tracing::debug!(resolved = %resolved, "dropping local-host connection");
+			return Ok((resolved.into(), Some(format!("local-host address rejected: {resolved}"))));
+		}
+		if self.guards.drop_private && is_private_ip(&resolved.ip()) {
+			tracing::debug!(resolved = %resolved, "dropping private-range connection");
+			return Ok((resolved.into(), Some(format!("private address rejected: {resolved}"))));
+		}
+		Ok((resolved.into(), None))
+	}
+
+	async fn do_route(&self, ctx: &FlowContext) -> eyre::Result<(RouteAction, TargetAddr)> {
+		// Resolve and check once; rules still see the original domain, while
+		// the outbound receives only the exact address that passed the guards.
+		let (target, rejected) = self.guarded_target(ctx).await?;
+		if let Some(reason) = rejected {
+			return Ok((RouteAction::Reject(reason), target));
 		}
 
 		// 2. Lower the per-connection context once; every rule shares it. The
@@ -149,14 +162,26 @@ impl AclEngine {
 
 		// 3. The IR evaluates first-match-wins and falls back to the default
 		// outbound policy. It is infallible.
-		Ok(self.ruleset.route(&match_ctx))
+		Ok((self.ruleset.route(&match_ctx), target))
 	}
 }
 
 impl Router for AclEngine {
-	fn route(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<RouteAction>> + Send {
+	async fn route(&self, ctx: &FlowContext) -> eyre::Result<RouteAction> {
+		self.route_with_target(ctx).await.map(|(action, _)| action)
+	}
+
+	fn route_with_target(&self, ctx: &FlowContext) -> impl Future<Output = eyre::Result<(RouteAction, TargetAddr)>> + Send {
 		let span = tracing::debug_span!("acl_route", target = %ctx.target, proto = if ctx.is_tcp() { "tcp" } else { "udp" });
 		async move { self.do_route(ctx).instrument(span).await }
+	}
+
+	async fn prepare_udp_target(&self, ctx: &FlowContext) -> eyre::Result<TargetAddr> {
+		let (target, rejected) = self.guarded_target(ctx).await?;
+		if let Some(reason) = rejected {
+			eyre::bail!("{reason}");
+		}
+		Ok(target)
 	}
 }
 

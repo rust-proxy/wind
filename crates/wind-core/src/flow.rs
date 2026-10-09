@@ -15,8 +15,9 @@
 //! * the wire [`protocol`](FlowContext::protocol) and
 //!   [`inbound_type`](FlowContext::inbound_type) (for `IN-TYPE`).
 //!
-//! Inbounds construct one per connection; the dispatcher and routers never
-//! rebuild it. [`FlowContext::apply_to_match_context`] lowers it into a
+//! Inbounds construct one per connection; the dispatcher may replace its
+//! destination with an address checked by the router before forwarding it.
+//! [`FlowContext::apply_to_match_context`] lowers it into a
 //! [`MatchContext`] for rule evaluation, so the target→context reconstruction
 //! that used to be duplicated in every router disappears.
 
@@ -34,9 +35,12 @@ use crate::{
 /// be moved into tasks and shared across await points.
 #[derive(Clone, Debug)]
 pub struct FlowContext {
-	/// Destination as reported by the inbound. For UDP this is the target of
-	/// the session's *first* packet (or an unspecified placeholder until the
-	/// dispatcher has seen one).
+	/// Destination as reported by the inbound during routing. The outbound
+	/// receives the target returned by
+	/// [`Router::route_with_target`](crate::Router::route_with_target),
+	/// which may pin a resolved address. For UDP this describes the session's
+	/// *first* packet (or an unspecified placeholder until the dispatcher has
+	/// seen one); later packet checks receive their individual destinations.
 	pub target: TargetAddr,
 	/// Transport type — replaces the historical `is_tcp: bool` parameter.
 	pub network: NetworkType,
