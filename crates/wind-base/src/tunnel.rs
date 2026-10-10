@@ -81,6 +81,16 @@ impl TunnelTcpInbound {
 		}
 	}
 
+	/// Bind immediately with the same socket options as `new` uses in `listen`.
+	/// This reserves the port and surfaces bind errors during application
+	/// setup.
+	pub fn bind(listen: SocketAddr, remote: (String, u16), cancel: CancellationToken) -> std::io::Result<Self> {
+		Ok(Self {
+			listener: tokio::sync::OnceCell::new_with(Some(create_tcp_listener(listen)?)),
+			..Self::new(listen, remote, cancel)
+		})
+	}
+
 	pub fn from_socket(socket: StdTcpListener, remote: TargetAddr, cancel: CancellationToken) -> std::io::Result<Self> {
 		socket.set_nonblocking(true)?;
 		let listen = socket.local_addr()?;
@@ -94,7 +104,7 @@ impl TunnelTcpInbound {
 	}
 
 	/// Return the bound address. The legacy constructor binds on `listen`;
-	/// use `from_socket` to reserve and inspect an ephemeral port beforehand.
+	/// use `bind` or `from_socket` to reserve and inspect a port beforehand.
 	pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
 		self.listener
 			.get()
