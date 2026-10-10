@@ -64,23 +64,61 @@ const MAX_UDP_TUNNEL_SESSIONS: usize = 4096;
 /// [`InboundCallback::handle_tcpstream`] with the configured remote target.
 pub struct TunnelTcpInbound {
 	listen: SocketAddr,
-	remote: (String, u16),
+	remote: TargetAddr,
+	tag: Arc<str>,
+	listener: tokio::sync::OnceCell<TcpListener>,
 	cancel: CancellationToken,
 }
 
 impl TunnelTcpInbound {
 	pub fn new(listen: SocketAddr, remote: (String, u16), cancel: CancellationToken) -> Self {
-		Self { listen, remote, cancel }
+		Self {
+			listen,
+			remote: tuple_target(remote),
+			tag: "tunnel".into(),
+			listener: tokio::sync::OnceCell::new(),
+			cancel,
+		}
+	}
+
+	pub fn from_socket(socket: StdTcpListener, remote: TargetAddr, cancel: CancellationToken) -> std::io::Result<Self> {
+		socket.set_nonblocking(true)?;
+		let listen = socket.local_addr()?;
+		Ok(Self {
+			listen,
+			remote,
+			tag: "tunnel".into(),
+			listener: tokio::sync::OnceCell::new_with(Some(TcpListener::from_std(socket)?)),
+			cancel,
+		})
+	}
+
+	/// Return the bound address. The legacy constructor binds on `listen`;
+	/// use `from_socket` to reserve and inspect an ephemeral port beforehand.
+	pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+		self.listener
+			.get()
+			.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "TCP tunnel is not bound yet"))?
+			.local_addr()
+	}
+
+	pub fn with_tag(mut self, tag: impl Into<Arc<str>>) -> Self {
+		self.tag = tag.into();
+		self
 	}
 }
 
 #[async_trait]
 impl<R: Router> AbstractInbound<R> for TunnelTcpInbound {
 	async fn listen(&self, cb: &Dispatcher<R>) -> eyre::Result<()> {
-		let listener = create_tcp_listener(self.listen)?;
+		let listener = self
+			.listener
+			.get_or_try_init(|| async { create_tcp_listener(self.listen) })
+			.await?;
+		let listen_addr = listener.local_addr()?;
 		info!(
 			"[tunnel-tcp] listening on {listen} -> {remote:?}",
-			listen = self.listen,
+			listen = listen_addr,
 			remote = self.remote
 		);
 
@@ -94,15 +132,15 @@ impl<R: Router> AbstractInbound<R> for TunnelTcpInbound {
 				res = listener.accept() => match res {
 					Ok((stream, peer)) => {
 						let cb = cb.clone();
-						let target = TargetAddr::Domain(self.remote.0.clone(), self.remote.1);
+						let target = self.remote.clone();
 						let ctx = FlowContext {
 							target,
 							network: NetworkType::Tcp,
 							source: Some(peer),
-							inbound_tag: "tunnel".into(),
+							inbound_tag: self.tag.clone(),
 							protocol: WProtocol::Tunnel,
 							user: None,
-							inbound_port: Some(self.listen.port()),
+							inbound_port: Some(listen_addr.port()),
 							inbound_type: None,
 						};
 						let conn_cancel = self.cancel.child_token();
@@ -151,7 +189,9 @@ struct UdpTunnelSession {
 /// addresses.
 pub struct TunnelUdpInbound {
 	socket: Arc<UdpSocket>,
-	remote: (String, u16),
+	remote: TargetAddr,
+	tag: Arc<str>,
+	peer: Option<SocketAddr>,
 	timeout: std::time::Duration,
 	/// Concurrent-session ceiling; see [`MAX_UDP_TUNNEL_SESSIONS`].
 	max_sessions: usize,
@@ -172,6 +212,16 @@ impl TunnelUdpInbound {
 		timeout: std::time::Duration,
 		cancel: CancellationToken,
 	) -> std::io::Result<Self> {
+		Self::from_socket(std::net::UdpSocket::bind(listen)?, tuple_target(remote), timeout, cancel)
+	}
+
+	/// A connected socket owns one persistent session restricted to its peer.
+	pub fn from_socket(
+		socket: std::net::UdpSocket,
+		remote: TargetAddr,
+		timeout: std::time::Duration,
+		cancel: CancellationToken,
+	) -> std::io::Result<Self> {
 		if timeout < MIN_UDP_TUNNEL_TIMEOUT {
 			return Err(std::io::Error::new(
 				std::io::ErrorKind::InvalidInput,
@@ -181,22 +231,78 @@ impl TunnelUdpInbound {
 				),
 			));
 		}
-		let socket = std::net::UdpSocket::bind(listen)?;
+		let peer = socket.peer_addr().ok();
 		socket.set_nonblocking(true)?;
 		let socket = UdpSocket::from_std(socket)?;
 		Ok(Self {
 			socket: Arc::new(socket),
 			remote,
+			tag: "tunnel".into(),
+			peer,
 			timeout,
 			max_sessions: MAX_UDP_TUNNEL_SESSIONS,
 			cancel,
 		})
+	}
+
+	pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+		self.socket.local_addr()
+	}
+
+	pub fn with_tag(mut self, tag: impl Into<Arc<str>>) -> Self {
+		self.tag = tag.into();
+		self
+	}
+
+	async fn listen_peer<R: Router>(&self, cb: &Dispatcher<R>, peer: SocketAddr) -> eyre::Result<()> {
+		let (to_out, from_local) = tokio::sync::mpsc::channel(64);
+		let (to_local, mut from_out) = tokio::sync::mpsc::channel::<UdpPacket>(64);
+		let ctx = FlowContext {
+			target: self.remote.clone(),
+			network: NetworkType::Udp,
+			source: Some(peer),
+			inbound_tag: self.tag.clone(),
+			protocol: WProtocol::Tunnel,
+			user: None,
+			inbound_port: Some(self.local_addr()?.port()),
+			inbound_type: None,
+		};
+		let receive = async {
+			let mut buffer = vec![0; 65536];
+			loop {
+				let size = self.socket.recv(&mut buffer).await?;
+				let packet = UdpPacket {
+					source: None,
+					target: self.remote.clone(),
+					payload: Bytes::copy_from_slice(&buffer[..size]),
+				};
+				match to_out.try_send(packet) {
+					Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+					Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return eyre::Ok(()),
+				}
+			}
+		};
+		let reply = async {
+			while let Some(packet) = from_out.recv().await {
+				self.socket.send(&packet.payload).await?;
+			}
+			eyre::Ok(())
+		};
+		tokio::select! {
+			_ = self.cancel.cancelled() => Ok(()),
+			result = cb.handle_udpstream(ctx, UdpStream { tx: to_local, rx: from_local }) => result,
+			result = receive => result,
+			result = reply => result,
+		}
 	}
 }
 
 #[async_trait]
 impl<R: Router> AbstractInbound<R> for TunnelUdpInbound {
 	async fn listen(&self, cb: &Dispatcher<R>) -> eyre::Result<()> {
+		if let Some(peer) = self.peer {
+			return self.listen_peer(cb, peer).await;
+		}
 		info!(
 			"[tunnel-udp] listening on {listen} -> {remote:?} timeout={timeout:?}",
 			listen = self.socket.local_addr()?,
@@ -206,6 +312,7 @@ impl<R: Router> AbstractInbound<R> for TunnelUdpInbound {
 
 		let mut buf = vec![0u8; 65535];
 		let mut sessions: HashMap<SocketAddr, UdpTunnelSession> = HashMap::new();
+		let mut tasks = tokio::task::JoinSet::new();
 		let mut gc_interval = tokio::time::interval(self.timeout / 4);
 		gc_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -215,10 +322,11 @@ impl<R: Router> AbstractInbound<R> for TunnelUdpInbound {
 					info!("[tunnel-udp] cancellation received, shutting down");
 					break;
 				}
+				_ = tasks.join_next(), if !tasks.is_empty() => {},
 				recv = self.socket.recv_from(&mut buf) => match recv {
 					Ok((n, src_addr)) => {
 						let pkt = Bytes::copy_from_slice(&buf[..n]);
-						let target = TargetAddr::Domain(self.remote.0.clone(), self.remote.1);
+						let target = self.remote.clone();
 
 						// The table key is an attacker-controlled source address,
 						// so the idle GC tick alone cannot bound it: refuse a new
@@ -243,10 +351,10 @@ impl<R: Router> AbstractInbound<R> for TunnelUdpInbound {
 							// the dispatcher stamps the first packet's real
 							// destination onto it before routing.
 							let ctx = FlowContext {
-								target: TargetAddr::Domain(self.remote.0.clone(), self.remote.1),
+								target: self.remote.clone(),
 								network: NetworkType::Udp,
 								source: Some(src_addr),
-								inbound_tag: "tunnel".into(),
+								inbound_tag: self.tag.clone(),
 								protocol: WProtocol::Tunnel,
 								user: None,
 								inbound_port: self.socket.local_addr().ok().map(|a| a.port()),
@@ -254,7 +362,7 @@ impl<R: Router> AbstractInbound<R> for TunnelUdpInbound {
 							};
 
 							// Reply bridge: packets from remote → local socket.
-							tokio::spawn(async move {
+							tasks.spawn(async move {
 								while let Some(reply_pkt) = rx_from_out.recv().await {
 									if let Err(err) = socket_for_reply.send_to(&reply_pkt.payload, src_addr).await {
 										warn!("[tunnel-udp] [{assoc_id:#06x}] reply send error: {err}");
@@ -264,7 +372,7 @@ impl<R: Router> AbstractInbound<R> for TunnelUdpInbound {
 
 							// Relay through dispatcher
 							let cb = cb.clone();
-							tokio::spawn(async move {
+							tasks.spawn(async move {
 								if let Err(e) = cb.handle_udpstream(ctx, udp_stream).await {
 									warn!("[tunnel-udp] [{assoc_id:#06x}] relay error: {e}");
 								}
@@ -340,6 +448,13 @@ fn create_tcp_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
 	socket.bind(&SockAddr::from(addr))?;
 	socket.listen(i32::MAX)?;
 	TcpListener::from_std(StdTcpListener::from(socket))
+}
+
+fn tuple_target((host, port): (String, u16)) -> TargetAddr {
+	match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+		Ok(ip) => SocketAddr::new(ip, port).into(),
+		Err(_) => TargetAddr::Domain(host, port),
+	}
 }
 
 #[cfg(test)]
@@ -474,6 +589,40 @@ mod tests {
 	}
 
 	// ── TCP tunnel tests ──────────────────────────────────────────────────
+
+	#[tokio::test]
+	async fn tcp_tunnel_reports_the_actual_ephemeral_port() -> eyre::Result<()> {
+		for prebound in [false, true] {
+			let cancel = CancellationToken::new();
+			let inbound = Arc::new(if prebound {
+				TunnelTcpInbound::from_socket(
+					StdTcpListener::bind("127.0.0.1:0")?,
+					TargetAddr::Domain("example.com".into(), 80),
+					cancel.clone(),
+				)?
+			} else {
+				let inbound = TunnelTcpInbound::new("127.0.0.1:0".parse()?, ("example.com".into(), 80), cancel.clone());
+				assert!(inbound.local_addr().is_err());
+				inbound
+			});
+			let listener = inbound.clone();
+			let task = tokio::spawn(async move { listener.listen(&dispatcher(TestHandler::Reject)).await });
+			let addr = tokio::time::timeout(Duration::from_secs(2), async {
+				loop {
+					if let Ok(addr) = inbound.local_addr() {
+						break addr;
+					}
+					tokio::task::yield_now().await;
+				}
+			})
+			.await?;
+			assert_ne!(addr.port(), 0);
+			let _stream = tokio::net::TcpStream::connect(addr).await?;
+			cancel.cancel();
+			tokio::time::timeout(Duration::from_secs(2), task).await???;
+		}
+		Ok(())
+	}
 
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn tcp_tunnel_binds_and_listens() {

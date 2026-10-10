@@ -62,7 +62,8 @@ pub struct App<R: Router> {
 	/// historic behavior of following [`App::set_flush_interval`].
 	sample_interval: Option<Duration>,
 	shutdown_timeout: Duration,
-	inbounds: Vec<InboundFactory<R>>,
+	inbounds: Vec<(Option<String>, InboundFactory<R>)>,
+	running_inbounds: Vec<crate::RunningInbound>,
 }
 
 impl<R: Router> Default for App<R> {
@@ -86,6 +87,7 @@ impl<R: Router> App<R> {
 			sample_interval: None,
 			shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
 			inbounds: Vec::new(),
+			running_inbounds: Vec::new(),
 		}
 	}
 
@@ -190,9 +192,30 @@ impl<R: Router> App<R> {
 		I: AbstractInbound<R> + Send + Sync + 'static,
 		F: FnOnce(InboundHooks, Arc<AppContext>) -> I + Send + 'static,
 	{
-		self.inbounds.push(Box::new(move |hooks, ctx| {
-			Box::new(factory(hooks, ctx)) as Box<dyn AbstractInbound<R>>
-		}));
+		self.inbounds.push((
+			None,
+			Box::new(move |hooks, ctx| Box::new(factory(hooks, ctx)) as Box<dyn AbstractInbound<R>>),
+		));
+		self
+	}
+
+	/// Bind this inbound to an exact outbound, without consulting the router.
+	pub fn add_inbound_with_outbound<I, F>(mut self, outbound: impl Into<String>, factory: F) -> Self
+	where
+		I: AbstractInbound<R>,
+		F: FnOnce(InboundHooks, Arc<AppContext>) -> I + Send + 'static,
+	{
+		self.inbounds.push((
+			Some(outbound.into()),
+			Box::new(move |hooks, ctx| Box::new(factory(hooks, ctx))),
+		));
+		self
+	}
+
+	/// Keep an early-started transport dependency alive through application
+	/// shutdown.
+	pub fn own_running_inbound(mut self, inbound: crate::RunningInbound) -> Self {
+		self.running_inbounds.push(inbound);
 		self
 	}
 
@@ -213,6 +236,7 @@ impl<R: Router> App<R> {
 			sample_interval,
 			shutdown_timeout,
 			inbounds,
+			running_inbounds: _running_inbounds,
 		} = self;
 		let router = router.ok_or_else(|| eyre::eyre!("App::run: no router set"))?;
 
@@ -245,6 +269,13 @@ impl<R: Router> App<R> {
 		for (name, handler) in &outbounds {
 			dispatcher.add_handler(name.clone(), handler.clone());
 		}
+		// Validate all explicit references before spawning any application
+		// task.
+		for (outbound, _) in &inbounds {
+			if let Some(name) = outbound {
+				dispatcher.with_outbound(name.clone())?;
+			}
+		}
 
 		// Periodic traffic flush (drains the collector → sink, restore on
 		// error, retried final flush on shutdown).
@@ -269,9 +300,12 @@ impl<R: Router> App<R> {
 		}
 
 		// Spawn each inbound, materializing it with the finalized hooks bundle.
-		for factory in inbounds {
+		for (outbound, factory) in inbounds {
 			let inbound = factory(hooks.clone(), ctx.clone());
-			let dispatcher = dispatcher.clone();
+			let dispatcher = match outbound {
+				Some(name) => dispatcher.with_outbound(name)?,
+				None => dispatcher.clone(),
+			};
 			ctx.tasks.spawn(async move {
 				if let Err(e) = inbound.listen(&dispatcher).await {
 					error!("inbound listen error: {e:?}");
@@ -471,6 +505,24 @@ mod tests {
 		async fn listen(&self, _cb: &Dispatcher<StubRouter>) -> eyre::Result<()> {
 			Ok(())
 		}
+	}
+
+	#[tokio::test]
+	async fn unknown_fixed_outbound_fails_before_materializing_any_inbound() {
+		let materialized = Arc::new(AtomicBool::new(false));
+		let observed = materialized.clone();
+		let app = App::new()
+			.set_router(StubRouter)
+			.add_inbound_with_outbound("missing", move |_, _| {
+				observed.store(true, Ordering::SeqCst);
+				CaptureInbound
+			});
+		let error = app
+			.run()
+			.await
+			.expect_err("an unknown fixed outbound must fail before startup");
+		assert!(error.to_string().contains("unknown fixed outbound"));
+		assert!(!materialized.load(Ordering::SeqCst));
 	}
 
 	/// Run an `App` in a spawned task, wait until its inbound factory ran (so

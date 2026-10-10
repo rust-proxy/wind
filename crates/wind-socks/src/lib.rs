@@ -8,6 +8,7 @@ pub mod action;
 pub mod ext;
 pub mod inbound;
 pub mod udp;
+pub mod udp_outbound;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

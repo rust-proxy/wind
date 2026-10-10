@@ -50,10 +50,12 @@ pub struct ResolvedConfig {
 /// One inbound protocol instance, with its tag extracted for logging/routing.
 pub struct ResolvedInbound {
 	pub tag: String,
+	pub outbound: Option<String>,
 	pub opts: ResolvedInboundOpts,
 }
 
 pub enum ResolvedInboundOpts {
+	Tunnel(crate::conf::persistent::TunnelInboundConfig),
 	Socks(SocksInboundOpt),
 }
 
@@ -61,15 +63,30 @@ pub enum ResolvedInboundOpts {
 /// because the runtime options types (e.g. [`TuicOutboundOpts`]) do not carry
 /// it themselves.
 pub enum ResolvedOutbound {
-	Tuic { tag: String, opts: TuicOutboundOpts },
-	Naive { tag: String, opts: NaiveOutboundOpts },
-	LoadBalance { tag: String, opts: ResolvedLoadBalance },
+	Socks {
+		tag: String,
+		opts: wind_socks::action::SocksOutboundOpts,
+		udp: wind_socks::udp_outbound::SocksUdpOptions,
+	},
+	Tuic {
+		tag: String,
+		opts: TuicOutboundOpts,
+	},
+	Naive {
+		tag: String,
+		opts: NaiveOutboundOpts,
+	},
+	LoadBalance {
+		tag: String,
+		opts: ResolvedLoadBalance,
+	},
 }
 
 impl ResolvedOutbound {
 	fn tag(&self) -> &str {
 		match self {
-			ResolvedOutbound::Tuic { tag, .. }
+			ResolvedOutbound::Socks { tag, .. }
+			| ResolvedOutbound::Tuic { tag, .. }
 			| ResolvedOutbound::Naive { tag, .. }
 			| ResolvedOutbound::LoadBalance { tag, .. } => tag,
 		}
@@ -103,6 +120,13 @@ impl TryFrom<PersistentConfig> for ResolvedConfig {
 	fn try_from(p: PersistentConfig) -> eyre::Result<Self> {
 		let inbounds = resolve_inbounds(p.inbounds)?;
 		let (outbounds, default_tag) = resolve_outbounds(p.outbounds)?;
+		for inbound in &inbounds {
+			if let Some(name) = &inbound.outbound
+				&& !outbounds.iter().any(|outbound| outbound.tag() == name)
+			{
+				eyre::bail!("inbound '{}' references unknown outbound '{name}'", inbound.tag);
+			}
+		}
 
 		Ok(Self {
 			inbounds,
@@ -117,15 +141,30 @@ fn resolve_inbounds(inbounds: Vec<InboundConfig>) -> eyre::Result<Vec<ResolvedIn
 	let mut resolved = Vec::with_capacity(inbounds.len());
 
 	for ib in inbounds {
-		// Single-variant today; a future inbound type must be resolved here
-		// too, and the compiler will force that by making this match
-		// non-exhaustive.
-		let InboundConfig::Socks(s) = ib;
+		let s = match ib {
+			InboundConfig::Socks(s) => s,
+			InboundConfig::Tunnel(t) => {
+				if !tags.insert(t.tag.clone()) {
+					eyre::bail!("duplicate inbound tag '{}'", t.tag);
+				}
+				validate_target(&t.remote_addr)?;
+				if matches!(t.network, crate::conf::persistent::TunnelNetwork::Udp) && t.timeout < Duration::from_nanos(4) {
+					eyre::bail!("tunnel UDP timeout must be at least 4ns");
+				}
+				resolved.push(ResolvedInbound {
+					tag: t.tag.clone(),
+					outbound: t.outbound.clone(),
+					opts: ResolvedInboundOpts::Tunnel(t),
+				});
+				continue;
+			}
+		};
 		if !tags.insert(s.tag.clone()) {
 			return Err(eyre::eyre!("duplicate inbound tag '{}'", s.tag));
 		}
 		resolved.push(ResolvedInbound {
 			tag: s.tag.clone(),
+			outbound: s.outbound,
 			opts: ResolvedInboundOpts::Socks(SocksInboundOpt {
 				listen_addr: s.listen_addr,
 				public_addr: s.public_addr,
@@ -247,6 +286,28 @@ fn order_outbounds(resolved: &[ResolvedOutbound], tag_index: &HashMap<String, us
 
 fn resolve_outbound(oc: OutboundConfig) -> eyre::Result<ResolvedOutbound> {
 	match oc {
+		OutboundConfig::Socks(s) => {
+			validate_target(&s.server_addr)?;
+			let udp = wind_socks::udp_outbound::SocksUdpOptions {
+				timeout: s.udp.timeout,
+				buffer_size: s.udp.buffer_size,
+				reconnect: s.udp.reconnect,
+				initial_backoff: s.udp.initial_backoff,
+				max_backoff: s.udp.max_backoff,
+			};
+			udp.validate()?;
+			let opts = wind_socks::action::SocksOutboundOpts {
+				addr: s.server_addr.to_string(),
+				username: s.username,
+				password: s.password,
+				allow_udp: Some(s.allow_udp),
+				stream_timeout: Duration::ZERO,
+				tcp_keepalive: None,
+			};
+			// Validate credentials before any application socket is opened.
+			wind_socks::action::SocksOutbound::new(opts.clone()).with_udp_options(udp.clone(), Default::default())?;
+			Ok(ResolvedOutbound::Socks { tag: s.tag, opts, udp })
+		}
 		OutboundConfig::Tuic(t) => {
 			let peer_addr = t.server_addr.parse::<SocketAddr>().map_err(|e| {
 				eyre::eyre!(
@@ -334,6 +395,24 @@ fn parse_strategy(s: &str) -> eyre::Result<LoadBalanceStrategy> {
 	}
 }
 
+
+fn validate_target(target: &wind_core::types::TargetAddr) -> eyre::Result<()> {
+	use wind_core::types::TargetAddr;
+	let port = match target {
+		TargetAddr::Domain(host, port) => {
+			if host.is_empty() || host.len() > 255 {
+				eyre::bail!("target domain must contain 1 to 255 bytes");
+			}
+			port
+		}
+		TargetAddr::IPv4(_, port) | TargetAddr::IPv6(_, port) => port,
+	};
+	if *port == 0 {
+		eyre::bail!("target port must be nonzero");
+	}
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use std::net::SocketAddr;
@@ -347,6 +426,7 @@ mod tests {
 
 	fn socks(tag: &str) -> InboundConfig {
 		InboundConfig::Socks(SocksInboundConfig {
+			outbound: None,
 			tag: tag.into(),
 			listen_addr: "127.0.0.1:6666".parse().unwrap(),
 			public_addr: None,
@@ -419,6 +499,68 @@ mod tests {
 
 	fn outbound_tags(spec: &ResolvedConfig) -> Vec<&str> {
 		spec.outbounds.iter().map(ResolvedOutbound::tag).collect()
+	}
+
+	const CHAIN: &str = r#"
+inbounds:
+  - type: socks
+    tag: local
+    listen_addr: 127.0.0.1:0
+    outbound: upstream
+  - type: tunnel
+    tag: transport
+    listen_addr: 127.0.0.1:0
+    remote_addr: relay.invalid:443
+    network: udp
+    outbound: upstream
+outbounds:
+  - type: socks
+    tag: upstream
+    server_addr: proxy.invalid:1080
+    allow_udp: true
+"#;
+
+	#[test]
+	fn chain_config_roundtrips_and_preserves_remote_domain() -> eyre::Result<()> {
+		let config: PersistentConfig = serde_yaml::from_str(CHAIN)?;
+		let config: PersistentConfig = toml::from_str(&toml::to_string(&config)?)?;
+		let config: PersistentConfig = serde_yaml::from_str(&serde_yaml::to_string(&config)?)?;
+		let resolved = resolve(config)?;
+		assert_eq!(resolved.inbounds[0].outbound.as_deref(), Some("upstream"));
+		let ResolvedInboundOpts::Tunnel(tunnel) = &resolved.inbounds[1].opts else {
+			eyre::bail!("missing tunnel");
+		};
+		assert_eq!(
+			tunnel.remote_addr,
+			wind_core::types::TargetAddr::Domain("relay.invalid".into(), 443)
+		);
+		assert_eq!(tunnel.timeout, Duration::from_secs(60));
+		let ResolvedOutbound::Socks { udp, .. } = &resolved.outbounds[0] else {
+			eyre::bail!("missing SOCKS");
+		};
+		assert!(!udp.reconnect);
+		assert_eq!(udp.timeout, Duration::from_secs(8));
+		Ok(())
+	}
+
+	#[test]
+	fn chain_config_rejects_missing_references_bad_targets_and_unknown_fields() {
+		for invalid in [
+			CHAIN.replace("outbound: upstream", "outbound: missing"),
+			CHAIN.replace("tag: transport", "tag: local"),
+			CHAIN.replace("relay.invalid:443", "relay.invalid:0"),
+			CHAIN.replace("network: udp", "network: udp\n    timeout: 0s"),
+			CHAIN.replace("network: udp", "network: invalid"),
+			CHAIN.replace("network: udp", "netwrok: udp"),
+			CHAIN.replace("allow_udp: true", "allow_udp: true\n    udp: { unknown: true }"),
+		] {
+			assert!(
+				serde_yaml::from_str::<PersistentConfig>(&invalid)
+					.map_err(eyre::Report::from)
+					.and_then(resolve)
+					.is_err()
+			);
+		}
 	}
 
 	#[test]

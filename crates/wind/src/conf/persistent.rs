@@ -48,6 +48,7 @@ impl Default for PersistentConfig {
 	fn default() -> Self {
 		Self {
 			inbounds: vec![InboundConfig::Socks(SocksInboundConfig {
+				outbound: None,
 				tag: "socks-in".into(),
 				listen_addr: "127.0.0.1:6666".parse().unwrap(),
 				public_addr: None,
@@ -78,6 +79,8 @@ impl Default for PersistentConfig {
 pub enum InboundConfig {
 	#[serde(rename = "socks")]
 	Socks(SocksInboundConfig),
+	#[serde(rename = "tunnel")]
+	Tunnel(TunnelInboundConfig),
 	// Future: Tuic(TuicInboundConfig), etc.
 }
 
@@ -90,6 +93,8 @@ impl Default for InboundConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SocksInboundConfig {
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub outbound: Option<String>,
 	/// Arbitrary name for this inbound (for logging / routing).
 	pub tag: String,
 
@@ -111,6 +116,7 @@ pub struct SocksInboundConfig {
 impl Default for SocksInboundConfig {
 	fn default() -> Self {
 		Self {
+			outbound: None,
 			tag: "socks-in".into(),
 			listen_addr: "127.0.0.1:6666".parse().unwrap(),
 			public_addr: None,
@@ -135,6 +141,8 @@ pub enum AuthConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum OutboundConfig {
+	#[serde(rename = "socks")]
+	Socks(SocksOutboundConfig),
 	#[serde(rename = "tuic")]
 	Tuic(TuicOutboundConfig),
 
@@ -362,6 +370,72 @@ impl PersistentConfig {
 
 		figment = figment.merge(Env::prefixed("WIND_"));
 		Ok(figment.extract()?)
+	}
+}
+
+/// Fixed-destination TCP or UDP listener.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelInboundConfig {
+	pub tag: String,
+	pub listen_addr: SocketAddr,
+	pub remote_addr: wind_core::types::TargetAddr,
+	pub network: TunnelNetwork,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub outbound: Option<String>,
+	#[serde(default = "default_tunnel_timeout", with = "humantime_serde")]
+	pub timeout: std::time::Duration,
+}
+
+fn default_tunnel_timeout() -> std::time::Duration {
+	std::time::Duration::from_secs(60)
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelNetwork {
+	Tcp,
+	Udp,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SocksOutboundConfig {
+	pub tag: String,
+	pub server_addr: wind_core::types::TargetAddr,
+	#[serde(default)]
+	pub username: Option<String>,
+	#[serde(default)]
+	pub password: Option<String>,
+	#[serde(default)]
+	pub allow_udp: bool,
+	#[serde(default)]
+	pub udp: SocksUdpConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SocksUdpConfig {
+	#[serde(with = "humantime_serde")]
+	pub timeout: std::time::Duration,
+	pub buffer_size: usize,
+	pub reconnect: bool,
+	#[serde(with = "humantime_serde")]
+	pub initial_backoff: std::time::Duration,
+	#[serde(with = "humantime_serde")]
+	pub max_backoff: std::time::Duration,
+}
+
+impl Default for SocksUdpConfig {
+	fn default() -> Self {
+		let defaults = wind_socks::udp_outbound::SocksUdpOptions::default();
+		Self {
+			timeout: defaults.timeout,
+			buffer_size: defaults.buffer_size,
+			reconnect: defaults.reconnect,
+			initial_backoff: defaults.initial_backoff,
+			max_backoff: defaults.max_backoff,
+		}
 	}
 }
 

@@ -21,12 +21,7 @@ pub struct SocksOutboundOpts {
 	pub password: Option<String>,
 	/// Whether UDP sessions may be handed to this outbound at all.
 	///
-	/// UDP-over-SOCKS5 (UDP ASSOCIATE, RFC 1928 §7) is **not implemented**, so
-	/// a UDP session is refused with an explicit error either way — this flag
-	/// only selects which refusal the caller sees (`false`/unset: the operator
-	/// disabled UDP for this outbound; `true`: UDP was permitted but the
-	/// transport is unavailable).  It is kept so the configuration surface
-	/// stays compatible.
+	/// UDP ASSOCIATE is enabled only when explicitly set to true.
 	pub allow_udp: Option<bool>,
 	/// Half-close idle timeout for the TCP relay.  Once one side sends FIN,
 	/// the relay is reaped after this much inactivity.  Set to
@@ -40,11 +35,29 @@ pub struct SocksOutboundOpts {
 /// SOCKS5 outbound handler implementing the object-safe [`Outbound`] trait.
 pub struct SocksOutbound {
 	opts: SocksOutboundOpts,
+	udp: crate::udp_outbound::SocksUdpOptions,
+	cancel: tokio_util::sync::CancellationToken,
 }
 
 impl SocksOutbound {
 	pub fn new(opts: SocksOutboundOpts) -> Self {
-		Self { opts }
+		Self {
+			opts,
+			udp: Default::default(),
+			cancel: tokio_util::sync::CancellationToken::new(),
+		}
+	}
+
+	pub fn with_udp_options(
+		mut self,
+		udp: crate::udp_outbound::SocksUdpOptions,
+		cancel: tokio_util::sync::CancellationToken,
+	) -> eyre::Result<Self> {
+		udp.validate()?;
+		crate::udp_outbound::authentication(&self.opts)?;
+		self.udp = udp;
+		self.cancel = cancel;
+		Ok(self)
 	}
 }
 
@@ -66,27 +79,11 @@ impl Outbound for SocksOutbound {
 		.await
 	}
 
-	/// Refuse the UDP session with an explicit error.
-	///
-	/// This outbound cannot carry UDP: UDP-over-SOCKS5 (UDP ASSOCIATE, RFC 1928
-	/// §7) is not implemented, and the datagrams are not sent directly either.
-	/// Both branches used to return `Ok(())`, which made the dispatcher and the
-	/// inbound report success while every datagram was dropped — a black hole
-	/// that was invisible at every log level.  Returning an error instead lets
-	/// the caller surface it (the SOCKS5 inbound logs a failed
-	/// `handle_udpstream` at `error`) so the operator can see the misroute.
-	async fn handle_udp(&self, _ctx: FlowContext, _udp_stream: UdpStream) -> eyre::Result<()> {
+	async fn handle_udp(&self, _ctx: FlowContext, stream: UdpStream) -> eyre::Result<()> {
 		if !self.opts.allow_udp.unwrap_or(false) {
-			return Err(eyre::eyre!(
-				"socks5 outbound '{}' refuses the UDP session: UDP is disabled for this outbound (allow_udp is false or unset)",
-				self.opts.addr
-			));
+			return Err(eyre::eyre!("SOCKS5 UDP is disabled (allow_udp is false or unset)"));
 		}
-		Err(eyre::eyre!(
-			"socks5 outbound '{}' cannot carry the UDP session: UDP-over-SOCKS5 is not implemented; route UDP traffic through \
-			 an outbound that supports it",
-			self.opts.addr
-		))
+		crate::udp_outbound::run(&self.opts, &self.udp, &self.cancel, stream).await
 	}
 }
 
@@ -216,20 +213,6 @@ mod tests {
 		}
 	}
 
-	/// The outbound cannot carry UDP at all, so even with `allow_udp == true`
-	/// the session must fail loudly instead of resolving to `Ok(())` (which
-	/// reported success while dropping every datagram).
-	#[tokio::test]
-	async fn udp_session_is_refused_with_an_explicit_error_when_udp_is_allowed() {
-		let err = outbound(Some(true))
-			.handle_udp(udp_ctx(), udp_session_without_data())
-			.await
-			.expect_err("UDP-over-SOCKS5 is unimplemented, so this must not report success");
-		let msg = err.to_string();
-		assert!(msg.contains("UDP-over-SOCKS5"), "unexpected error: {msg}");
-		assert!(msg.contains("127.0.0.1:1080"), "the error must name the outbound: {msg}");
-	}
-
 	/// An operator-disabled UDP path is intentional, but it must still be
 	/// reported: `Ok(())` made the refusal indistinguishable from a delivered
 	/// datagram.
@@ -254,7 +237,7 @@ mod tests {
 	#[tokio::test]
 	async fn dispatcher_reports_the_refused_udp_session_instead_of_success() {
 		let mut dispatcher = Dispatcher::new(ForwardSocks5);
-		dispatcher.add_handler("socks5", Arc::new(outbound(Some(true))));
+		dispatcher.add_handler("socks5", Arc::new(outbound(Some(false))));
 
 		let (tx, _peer_receiver) = mpsc::channel::<UdpPacket>(4);
 		let (first_tx, rx) = mpsc::channel::<UdpPacket>(1);
@@ -270,6 +253,6 @@ mod tests {
 			.handle_udpstream(udp_ctx(), UdpStream { tx, rx })
 			.await
 			.expect_err("the dispatcher must not turn a refused UDP session into success");
-		assert!(err.to_string().contains("UDP-over-SOCKS5"), "unexpected error: {err}");
+		assert!(err.to_string().contains("allow_udp"), "unexpected error: {err}");
 	}
 }

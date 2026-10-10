@@ -303,10 +303,31 @@ pub async fn connect_with_session(
 	transport: &TransportConfig,
 	session: Option<Vec<u8>>,
 ) -> Result<QuicheConnection, QuicError> {
-	let bind_addr = client_bind_addr(peer);
-	let udp = UdpSocket::bind(bind_addr)
-		.await
-		.map_err(|e| QuicError::Endpoint(format!("bind client {bind_addr}: {e}")))?;
+	connect_with_session_and_socket(peer, tls_cfg, transport, session, None).await
+}
+
+/// Optional caller-owned UDP socket factory, also used for reconnects.
+pub type UdpSocketFactory = Arc<dyn Fn(SocketAddr) -> std::io::Result<std::net::UdpSocket> + Send + Sync + 'static>;
+
+pub async fn connect_with_session_and_socket(
+	peer: SocketAddr,
+	tls_cfg: &ClientTlsConfig,
+	transport: &TransportConfig,
+	session: Option<Vec<u8>>,
+	factory: Option<&UdpSocketFactory>,
+) -> Result<QuicheConnection, QuicError> {
+	let udp = if let Some(factory) = factory {
+		let socket = factory(peer).map_err(|e| QuicError::Endpoint(format!("client socket: {e}")))?;
+		socket
+			.set_nonblocking(true)
+			.map_err(|e| QuicError::Endpoint(format!("nonblocking client socket: {e}")))?;
+		UdpSocket::from_std(socket).map_err(|e| QuicError::Endpoint(format!("client socket: {e}")))?
+	} else {
+		let bind_addr = client_bind_addr(peer);
+		UdpSocket::bind(bind_addr)
+			.await
+			.map_err(|e| QuicError::Endpoint(format!("bind client {bind_addr}: {e}")))?
+	};
 	udp.connect(peer)
 		.await
 		.map_err(|e| QuicError::Endpoint(format!("connect socket {peer}: {e}")))?;

@@ -8,11 +8,7 @@
 //! protocol logic (auth, heartbeat, TCP/UDP relay) is shared with the quinn
 //! backend.
 //!
-//! Unlike the quinn [`TuicOutbound`](crate::quinn::outbound::TuicOutbound), the
-//! quiche client connection is dialed through
-//! [`wind_quic::quiche::connect_with_session`], which owns its own UDP socket
-//! (there is no caller-supplied socket factory or peer resolver), and the
-//! local socket is IPv4 — an IPv6 peer is not reachable today.
+//! A caller may supply a UDP socket factory for initial setup and reconnects.
 
 use std::{
 	net::SocketAddr,
@@ -34,9 +30,10 @@ use uuid::Uuid;
 use wind_core::{
 	AppContext, FlowContext, Outbound, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream as CoreUdpStream,
 };
+pub use wind_quic::quiche::UdpSocketFactory;
 use wind_quic::{
 	ClientTlsConfig, QuicConnection as _,
-	quiche::{QuicheConnection, QuicheRecv, QuicheSend, connect_with_session},
+	quiche::{QuicheConnection, QuicheRecv, QuicheSend, connect_with_session_and_socket},
 };
 
 use crate::{
@@ -115,6 +112,7 @@ pub struct TuicheOutboundOpts {
 /// Outbound manager for a single TUIC client connection.
 pub struct TuicheOutbound {
 	ctx: Arc<AppContext>,
+	socket_factory: Option<UdpSocketFactory>,
 	opts: TuicheOutboundOpts,
 	/// Root token for this outbound. Cancelling it (e.g. on drop) stops the
 	/// poll supervisor and every per-session accept loop.
@@ -141,6 +139,14 @@ impl TuicheOutbound {
 	/// [`start_poll`](Self::start_poll) to start the heartbeat and
 	/// incoming-stream supervisor.
 	pub async fn new(ctx: Arc<AppContext>, opts: TuicheOutboundOpts) -> Result<Self, Error> {
+		Self::new_with_socket_factory(ctx, opts, None).await
+	}
+
+	pub async fn new_with_socket_factory(
+		ctx: Arc<AppContext>,
+		opts: TuicheOutboundOpts,
+		socket_factory: Option<UdpSocketFactory>,
+	) -> Result<Self, Error> {
 		if opts.heartbeat.is_zero() {
 			return Err(eyre::eyre!("TUIC heartbeat interval must be positive"));
 		}
@@ -156,10 +162,11 @@ impl TuicheOutbound {
 
 		let token = ctx.token.child_token();
 		let session: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-		let connection = establish(&opts, None).await?;
+		let connection = establish(&opts, None, socket_factory.as_ref()).await?;
 
 		let outbound = Self {
 			ctx,
+			socket_factory,
 			opts,
 			token,
 			connection: Arc::new(ArcSwap::from_pointee(connection)),
@@ -198,6 +205,7 @@ impl TuicheOutbound {
 		let session = self.session.clone();
 		let ctx = self.ctx.clone();
 		let opts = self.opts.clone();
+		let socket_factory = self.socket_factory.clone();
 		let udp_session = self.udp_session.clone();
 
 		let supervisor = async move {
@@ -241,7 +249,7 @@ impl TuicheOutbound {
 
 				conn.close(0, b"reconnecting");
 
-				match reconnect_loop(&opts, &session, &shutdown).await {
+				match reconnect_loop(&opts, &session, &shutdown, socket_factory.as_ref()).await {
 					Some(new_conn) => {
 						if opts.connection.enable_0rtt {
 							spawn_ticket_capture(&ctx, new_conn.clone(), session.clone(), shutdown.child_token());
@@ -304,7 +312,11 @@ enum SessionEnd {
 /// optional `session` ticket attempts TLS resumption (and 0-RTT when both
 /// sides enable it); a rejected/absent ticket transparently falls back to a
 /// full 1-RTT handshake.
-async fn establish(opts: &TuicheOutboundOpts, session: Option<Vec<u8>>) -> Result<QuicheConnection, Error> {
+async fn establish(
+	opts: &TuicheOutboundOpts,
+	session: Option<Vec<u8>>,
+	factory: Option<&UdpSocketFactory>,
+) -> Result<QuicheConnection, Error> {
 	let tls = ClientTlsConfig {
 		server_name: opts.sni.clone(),
 		verify_certificate: opts.verify_certificate,
@@ -317,7 +329,7 @@ async fn establish(opts: &TuicheOutboundOpts, session: Option<Vec<u8>>) -> Resul
 	};
 	let transport = opts.connection.to_transport();
 
-	let conn = connect_with_session(opts.peer_addr, &tls, &transport, session).await?;
+	let conn = connect_with_session_and_socket(opts.peer_addr, &tls, &transport, session, factory).await?;
 	conn.send_auth(&opts.auth.0, &opts.auth.1).await?;
 	Ok(conn)
 }
@@ -380,6 +392,7 @@ async fn reconnect_loop(
 	opts: &TuicheOutboundOpts,
 	session: &Arc<Mutex<Option<Vec<u8>>>>,
 	shutdown: &CancellationToken,
+	factory: Option<&UdpSocketFactory>,
 ) -> Option<QuicheConnection> {
 	let mut backoff = opts.reconnect.initial_backoff;
 
@@ -392,7 +405,7 @@ async fn reconnect_loop(
 
 		let attempt = tokio::select! {
 			_ = shutdown.cancelled() => return None,
-			r = establish(opts, cached) => r,
+			r = establish(opts, cached, factory) => r,
 		};
 
 		match attempt {

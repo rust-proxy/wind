@@ -83,6 +83,7 @@ pub trait Router: Send + Sync + 'static {
 pub struct Dispatcher<R: Router> {
 	router: Arc<R>,
 	handlers: Arc<HashMap<String, Arc<dyn Outbound>>>,
+	fixed_outbound: Option<String>,
 	/// Owner of the dispatcher's internal tasks. Without one, dispatcher-local
 	/// helper tasks are detached (see [`Dispatcher::context`]).
 	context: Arc<AppContext>,
@@ -94,6 +95,7 @@ impl<R: Router> Dispatcher<R> {
 		Self {
 			router: Arc::new(router),
 			handlers: Arc::new(HashMap::new()),
+			fixed_outbound: None,
 			context: Arc::new(AppContext::default()),
 		}
 	}
@@ -119,10 +121,32 @@ impl<R: Router> Dispatcher<R> {
 		Arc::make_mut(&mut self.handlers).insert(name.into(), handler);
 	}
 
+	/// Derive an inbound-specific dispatcher that bypasses the router.
+	/// Explicit bindings never use the default-handler fallback.
+	pub fn with_outbound(&self, name: impl Into<String>) -> eyre::Result<Self> {
+		let name = name.into();
+		if !self.handlers.contains_key(&name) {
+			return Err(eyre::eyre!("unknown fixed outbound '{name}'"));
+		}
+		let mut dispatcher = self.clone();
+		dispatcher.fixed_outbound = Some(name);
+		Ok(dispatcher)
+	}
+
+	async fn route(&self, ctx: &FlowContext) -> eyre::Result<(RouteAction, TargetAddr)> {
+		match &self.fixed_outbound {
+			Some(name) => Ok((RouteAction::Forward(name.clone()), ctx.target.clone())),
+			None => self.router.route_with_target(ctx).await,
+		}
+	}
+
 	/// Look up a handler by name, falling back to `"default"` if the exact
 	/// name is not registered.
 	fn resolve_handler(&self, name: &str) -> Option<Arc<dyn Outbound>> {
-		self.handlers.get(name).or_else(|| self.handlers.get("default")).cloned()
+		self.handlers
+			.get(name)
+			.or_else(|| self.fixed_outbound.is_none().then(|| self.handlers.get("default")).flatten())
+			.cloned()
 	}
 }
 
@@ -131,6 +155,7 @@ impl<R: Router> Clone for Dispatcher<R> {
 		Self {
 			router: self.router.clone(),
 			handlers: self.handlers.clone(),
+			fixed_outbound: self.fixed_outbound.clone(),
 			context: self.context.clone(),
 		}
 	}
@@ -158,7 +183,7 @@ impl<R: Router> InboundCallback for Dispatcher<R> {
 
 impl<R: Router> Dispatcher<R> {
 	async fn dispatch_tcp(&self, ctx: FlowContext, stream: impl AbstractTcpStream + 'static) -> eyre::Result<()> {
-		let (action, target) = self.router.route_with_target(&ctx).await?;
+		let (action, target) = self.route(&ctx).await?;
 
 		match action {
 			RouteAction::Reject(reason) => {
@@ -200,7 +225,7 @@ impl<R: Router> Dispatcher<R> {
 		// so the real target is stamped in here.
 		let ctx = ctx.with_target(first.target.clone());
 
-		let (action, target) = self.router.route_with_target(&ctx).await?;
+		let (action, target) = self.route(&ctx).await?;
 
 		match action {
 			RouteAction::Reject(reason) => {
@@ -229,6 +254,7 @@ impl<R: Router> Dispatcher<R> {
 				// block on it indefinitely.
 				let (proxy_tx, proxy_rx) = tokio::sync::mpsc::channel(32);
 				let router = self.router.clone();
+				let fixed = self.fixed_outbound.is_some();
 				let packet_ctx = ctx.clone();
 				let token = self.context.token.clone();
 				self.context.tasks.spawn(async move {
@@ -250,7 +276,9 @@ impl<R: Router> Dispatcher<R> {
 						};
 						let current_ctx = packet_ctx.clone().with_target(packet.target.clone());
 						let target = tokio::select! {
-							target = router.prepare_udp_target(&current_ctx) => target,
+							target = async {
+								if fixed { Ok(current_ctx.target.clone()) } else { router.prepare_udp_target(&current_ctx).await }
+							} => target,
 							_ = proxy_tx.closed() => break,
 							_ = token.cancelled() => break,
 						};
@@ -353,6 +381,36 @@ mod tests {
 			self.udp_called.store(true, Ordering::Relaxed);
 			Ok(())
 		}
+	}
+
+	#[tokio::test]
+	async fn fixed_outbound_bypasses_router_without_default_fallback() -> eyre::Result<()> {
+		let selected = Arc::new(MockHandler::new());
+		let fallback = Arc::new(MockHandler::new());
+		let mut dispatcher = Dispatcher::new(StubRouter::new(RouteAction::Reject("router must be bypassed".into())));
+		dispatcher.add_handler("selected", selected.clone());
+		dispatcher.add_handler("default", fallback.clone());
+		assert!(dispatcher.with_outbound("missing").is_err());
+		let fixed = dispatcher.with_outbound("selected")?;
+		let target = TargetAddr::Domain("remote.invalid".into(), 443);
+		let (stream, _peer) = tokio::io::duplex(8);
+		fixed.handle_tcpstream(fc(&target, true), stream).await?;
+		let (tx, _rx) = tokio::sync::mpsc::channel(1);
+		let (send, rx) = tokio::sync::mpsc::channel(1);
+		send.send(crate::udp::UdpPacket {
+			source: None,
+			target,
+			payload: bytes::Bytes::new(),
+		})
+		.await?;
+		fixed.handle_udpstream(fc_udp(), UdpStream { tx, rx }).await?;
+		assert!(selected.tcp_called.load(Ordering::Relaxed));
+		assert!(selected.udp_called.load(Ordering::Relaxed));
+		assert!(!fallback.tcp_called.load(Ordering::Relaxed));
+		assert!(!fallback.udp_called.load(Ordering::Relaxed));
+		let (stream, _peer) = tokio::io::duplex(8);
+		assert!(dispatcher.handle_tcpstream(fc_udp(), stream).await.is_err());
+		Ok(())
 	}
 
 	#[tokio::test]
