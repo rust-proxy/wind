@@ -150,8 +150,25 @@ async fn handle_challenge(State(challenges): State<ChallengeMap>, AxumPath(token
 		.into_response()
 }
 
-/// Completes all pending HTTP-01 challenges for an order using a single
-/// short-lived axum server on port 80.
+/// Own the challenge listener until completion or cancellation of the order.
+fn spawn_challenge_server(
+	listener: TcpListener,
+	challenges: ChallengeMap,
+	shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> tokio_util::task::AbortOnDropHandle<std::io::Result<()>> {
+	let app = Router::new()
+		.route("/.well-known/acme-challenge/{token}", get(handle_challenge))
+		.with_state(challenges);
+	tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+		axum::serve(listener, app)
+			.with_graceful_shutdown(async move {
+				let _ = shutdown_rx.await;
+			})
+			.await
+	}))
+}
+
+/// Completes pending HTTP-01 challenges using a short-lived server on port 80.
 async fn complete_http01_challenges(order: &mut Order) -> Result<()> {
 	let challenges: ChallengeMap = Arc::new(RwLock::new(HashMap::new()));
 	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -167,19 +184,8 @@ async fn complete_http01_challenges(order: &mut Order) -> Result<()> {
 		)?,
 	};
 
-	let app = Router::new()
-		.route("/.well-known/acme-challenge/{token}", get(handle_challenge))
-		.with_state(challenges.clone());
-
 	info!("HTTP-01 challenge server listening on :80");
-
-	let server_handle = tokio::spawn(async move {
-		axum::serve(listener, app)
-			.with_graceful_shutdown(async move {
-				let _ = shutdown_rx.await;
-			})
-			.await
-	});
+	let server_handle = spawn_challenge_server(listener, challenges.clone(), shutdown_rx);
 
 	let mut authorizations = order.authorizations();
 	while let Some(result) = authorizations.next().await {
@@ -205,7 +211,8 @@ async fn complete_http01_challenges(order: &mut Order) -> Result<()> {
 	let status = order.poll_ready(&RetryPolicy::default()).await?;
 
 	let _ = shutdown_tx.send(());
-	let _ = server_handle.await;
+	// Slow HTTP peers must not keep a completed renewal alive indefinitely.
+	let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle).await;
 
 	if status != OrderStatus::Ready {
 		eyre::bail!("ACME order invalid or failed: {:?}", status);
@@ -323,6 +330,26 @@ pub async fn ensure_acme_cert(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn dropping_challenge_task_releases_listener() -> Result<()> {
+		let listener = TcpListener::bind("127.0.0.1:0").await?;
+		let addr = listener.local_addr()?;
+		let (_shutdown, receiver) = tokio::sync::oneshot::channel();
+		let task = spawn_challenge_server(listener, Arc::new(RwLock::new(HashMap::new())), receiver);
+		let _peer = tokio::net::TcpStream::connect(addr).await?;
+		drop(task);
+		tokio::time::timeout(std::time::Duration::from_secs(2), async {
+			loop {
+				if let Ok(listener) = TcpListener::bind(addr).await {
+					break listener;
+				}
+				tokio::task::yield_now().await;
+			}
+		})
+		.await?;
+		Ok(())
+	}
 
 	#[test]
 	fn renews_when_certificate_expires_within_thirty_days() {
