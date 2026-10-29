@@ -107,6 +107,22 @@ pub async fn serve_udp_with_client(
 	stream: UdpStream,
 	expected_client_ip: Option<std::net::IpAddr>,
 ) -> std::io::Result<()> {
+	serve_udp_with_client_limit(socket, stream, expected_client_ip, 65535).await
+}
+
+/// Enforce a payload limit without truncating oversized datagrams.
+pub async fn serve_udp_with_client_limit(
+	socket: std::net::UdpSocket,
+	stream: UdpStream,
+	expected_client_ip: Option<std::net::IpAddr>,
+	max_packet_size: usize,
+) -> std::io::Result<()> {
+	if !(1..=65535).contains(&max_packet_size) {
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::InvalidInput,
+			"invalid SOCKS UDP packet limit",
+		));
+	}
 	let socket = Arc::new(UdpSocket::from_std(socket)?);
 	let UdpStream { tx, mut rx } = stream;
 
@@ -172,6 +188,9 @@ pub async fn serve_udp_with_client(
 					// pointing at a stale or hostile peer.
 					match parse_udp_request_sync(packet_data) {
 						Ok((frag, target_addr, payload)) => {
+							if payload.len() > max_packet_size {
+								continue;
+							}
 							// RFC 1928 §7: FRAG other than X'00' marks a
 							// fragment of a larger datagram. This relay does no
 							// reassembly, so the datagram is dropped instead of
@@ -226,6 +245,9 @@ pub async fn serve_udp_with_client(
 			};
 
 			if let Ok(mut packet_with_header) = new_udp_header(reply_origin) {
+				if packet.payload.len() > max_packet_size {
+					continue;
+				}
 				packet_with_header.extend_from_slice(&packet.payload);
 				if let Err(e) = socket.send_to(&packet_with_header, current_client).await {
 					warn!(target: "udp", "Error sending to client: {}", e);
@@ -403,5 +425,53 @@ mod tests {
 			convert_target_addr(&SocksTargetAddr::Domain("example.com".into(), 443)),
 			TargetAddr::Domain("example.com".into(), 443)
 		);
+	}
+}
+
+#[cfg(test)]
+mod packet_limit_tests {
+	use super::*;
+	#[tokio::test]
+	async fn oversized_datagram_is_dropped_without_truncating_next_packet() -> eyre::Result<()> {
+		let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+		socket.set_nonblocking(true)?;
+		let addr = socket.local_addr()?;
+		let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+		let (tx, mut received) = tokio::sync::mpsc::channel(2);
+		let (_reply_tx, rx) = tokio::sync::mpsc::channel(2);
+		let task = tokio::spawn(serve_udp_with_client_limit(
+			socket,
+			UdpStream { tx, rx },
+			Some(peer.local_addr()?.ip()),
+			4,
+		));
+		for payload in [b"oversized".as_slice(), b"good".as_slice()] {
+			let mut packet = vec![0, 0, 0, 1, 127, 0, 0, 1, 0, 9];
+			packet.extend_from_slice(payload);
+			peer.send_to(&packet, addr).await?;
+		}
+		let packet = tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+			.await?
+			.ok_or_else(|| eyre::eyre!("relay stopped"))?;
+		assert_eq!(packet.payload.as_ref(), b"good");
+		task.abort();
+		let _ = task.await;
+		Ok(())
+	}
+	#[tokio::test]
+	async fn invalid_limits_are_rejected() -> eyre::Result<()> {
+		for limit in [0, 65536, usize::MAX] {
+			let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+			let (tx, _) = tokio::sync::mpsc::channel(1);
+			let (_, rx) = tokio::sync::mpsc::channel(1);
+			assert_eq!(
+				serve_udp_with_client_limit(socket, UdpStream { tx, rx }, None, limit)
+					.await
+					.unwrap_err()
+					.kind(),
+				std::io::ErrorKind::InvalidInput
+			);
+		}
+		Ok(())
 	}
 }

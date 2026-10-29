@@ -16,7 +16,7 @@ use uuid::Uuid;
 use wind_core::{InboundHooks, Router, dispatcher::Dispatcher, inbound::AbstractInbound};
 use wind_quic::{
 	QuicConnection as _, ServerTlsConfig,
-	quiche::{CertStore, bind_server},
+	quiche::{CertStore, bind_server_with_socket},
 };
 
 use crate::{Result, quiche::utils::ConnectionOpts};
@@ -30,6 +30,8 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(3);
 /// TUIC server using the quiche / tokio-quiche backend.
 #[allow(dead_code)]
 pub struct TuicheInbound {
+	dual_stack: Option<bool>,
+	fragment_gc: crate::server::FragmentGc,
 	listen_addr: SocketAddr,
 	users: HashMap<Uuid, String>,
 	opts: ConnectionOpts,
@@ -91,6 +93,8 @@ impl TuicheInbound {
 		bound_addr: Option<watch::Sender<Option<SocketAddr>>>,
 	) -> Self {
 		Self {
+			dual_stack: None,
+			fragment_gc: Default::default(),
 			listen_addr,
 			users,
 			opts,
@@ -105,6 +109,23 @@ impl TuicheInbound {
 			inbound_tag,
 			bound_addr,
 		}
+	}
+
+	/// Configure listener address families and fragment collection. Zero
+	/// durations fail before binding.
+	pub fn with_runtime_options(mut self, dual_stack: bool, gc_interval: Duration, gc_lifetime: Duration) -> Self {
+		self.dual_stack = Some(dual_stack);
+		self.fragment_gc = crate::server::FragmentGc {
+			interval: gc_interval,
+			lifetime: gc_lifetime,
+		};
+		self
+	}
+
+	/// Set the deadline for a peer to authenticate after its QUIC handshake.
+	pub fn with_auth_timeout(mut self, timeout: Duration) -> Self {
+		self.auth_timeout = timeout;
+		self
 	}
 
 	/// Handle to the hot-swappable certificate store. Call
@@ -122,7 +143,17 @@ impl<R: Router> AbstractInbound<R> for TuicheInbound {
 		let tls = ServerTlsConfig::from_pem_paths(self.cert_path.clone(), self.private_key_path.clone());
 		let transport = self.opts.to_transport();
 
-		let mut acceptor = bind_server(self.listen_addr, &tls, &transport, Some(&self.cert_store)).await?;
+		self.fragment_gc.validate()?;
+		let socket = socket2::Socket::new(socket2::Domain::for_address(self.listen_addr), socket2::Type::DGRAM, None)?;
+		if self.listen_addr.is_ipv6()
+			&& let Some(dual) = self.dual_stack
+		{
+			socket.set_only_v6(!dual)?;
+		}
+		socket.bind(&self.listen_addr.into())?;
+		socket.set_nonblocking(true)?;
+		let socket = tokio::net::UdpSocket::from_std(socket.into())?;
+		let mut acceptor = bind_server_with_socket(socket, &tls, &transport, Some(&self.cert_store)).await?;
 		if let Some(tx) = &self.bound_addr {
 			let _ = tx.send_replace(Some(acceptor.local_addr()));
 		}
@@ -171,7 +202,7 @@ impl<R: Router> AbstractInbound<R> for TuicheInbound {
 			let hooks = self.hooks.clone();
 			let active = self.active.clone();
 			conn_tasks.spawn(
-				crate::server::serve_connection(
+				crate::server::serve_connection_with_gc(
 					conn,
 					remote,
 					users,
@@ -182,6 +213,7 @@ impl<R: Router> AbstractInbound<R> for TuicheInbound {
 					hooks,
 					active,
 					self.inbound_tag.clone(),
+					self.fragment_gc,
 				)
 				.instrument(span),
 			);
@@ -344,6 +376,8 @@ impl TuicheInboundBuilder {
 		let cert_store = CertStore::from_pem(&cert_pem, &key_pem)?;
 
 		Ok(TuicheInbound {
+			dual_stack: None,
+			fragment_gc: Default::default(),
 			listen_addr,
 			users: self.users,
 			opts: self.opts,

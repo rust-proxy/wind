@@ -194,6 +194,19 @@ pub async fn bind_server(
 	transport: &TransportConfig,
 	cert_store: Option<&CertStore>,
 ) -> Result<QuicheAcceptor, QuicError> {
+	let socket = UdpSocket::bind(addr)
+		.await
+		.map_err(|e| QuicError::Endpoint(format!("bind {addr}: {e}")))?;
+	bind_server_with_socket(socket, tls_cfg, transport, cert_store).await
+}
+
+/// Bind a server using an already configured UDP socket.
+pub async fn bind_server_with_socket(
+	socket: UdpSocket,
+	tls_cfg: &ServerTlsConfig,
+	transport: &TransportConfig,
+	cert_store: Option<&CertStore>,
+) -> Result<QuicheAcceptor, QuicError> {
 	let (cert, key) = match &tls_cfg.cert {
 		CertSource::PemPaths { cert, key } => (cert.clone(), key.clone()),
 		CertSource::PemBytes { .. } => {
@@ -203,9 +216,6 @@ pub async fn bind_server(
 		}
 	};
 
-	let socket = UdpSocket::bind(addr)
-		.await
-		.map_err(|e| QuicError::Endpoint(format!("bind {addr}: {e}")))?;
 	let local_addr = socket
 		.local_addr()
 		.map_err(|e| QuicError::Endpoint(format!("local_addr: {e}")))?;

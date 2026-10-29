@@ -100,6 +100,35 @@ pub struct TuicOutboundOpts {
 	pub socket_factory: Option<UdpSocketFactory>,
 }
 
+/// Optional Quinn packetization tuning. None preserves backend defaults.
+#[derive(Clone, Debug, Default)]
+pub struct QuinnTransportOptions {
+	pub initial_mtu: Option<u16>,
+	pub min_mtu: Option<u16>,
+	pub gso: Option<bool>,
+	pub pmtu: Option<bool>,
+}
+impl QuinnTransportOptions {
+	fn apply(&self, transport: &mut quinn::TransportConfig) -> eyre::Result<()> {
+		if self.initial_mtu.is_some_and(|v| v < 1200) || self.min_mtu.is_some_and(|v| v < 1200) {
+			return Err(eyre::eyre!("QUIC MTU must be at least 1200"));
+		}
+		if let Some(v) = self.initial_mtu {
+			transport.initial_mtu(v);
+		}
+		if let Some(v) = self.min_mtu {
+			transport.min_mtu(v);
+		}
+		if let Some(v) = self.gso {
+			transport.enable_segmentation_offload(v);
+		}
+		if let Some(v) = self.pmtu {
+			transport.mtu_discovery_config(v.then(Default::default));
+		}
+		Ok(())
+	}
+}
+
 /// Controls how the outbound supervisor re-establishes the QUIC connection
 /// after it drops.
 #[derive(Clone, Debug)]
@@ -145,6 +174,16 @@ pub struct TuicOutbound {
 
 impl TuicOutbound {
 	pub async fn new(ctx: Arc<AppContext>, opts: TuicOutboundOpts) -> Result<Self, Error> {
+		Self::new_with_transport(ctx, opts, QuinnTransportOptions::default()).await
+	}
+
+	/// Create an outbound with explicit packetization settings, preserved
+	/// across reconnects.
+	pub async fn new_with_transport(
+		ctx: Arc<AppContext>,
+		opts: TuicOutboundOpts,
+		transport: QuinnTransportOptions,
+	) -> Result<Self, Error> {
 		let peer_addr = opts.peer_addr;
 		let server_name = opts.sni.clone();
 
@@ -188,6 +227,7 @@ impl TuicOutbound {
 					.map_err(|e| eyre::eyre!("Failed to build QUIC client config: {e}"))?,
 			));
 			let mut transport_config = quinn::TransportConfig::default();
+			transport.apply(&mut transport_config)?;
 			transport_config
 				.congestion_controller_factory(congestion_controller_factory(opts.congestion_control))
 				.keep_alive_interval(None);
@@ -1044,5 +1084,37 @@ mod tests {
 		for address in [Some((Ipv4Addr::LOCALHOST, 8080)), None] {
 			dispatch_incoming_udp(&sessions, packet_frame(0xFF, 2, address)).await;
 		}
+	}
+}
+
+#[cfg(test)]
+mod transport_option_tests {
+	use super::*;
+	#[test]
+	fn packetization_rejects_invalid_mtu_without_panicking() {
+		for (initial, minimum) in [(1199, 1200), (1200, 1199)] {
+			let opts = QuinnTransportOptions {
+				initial_mtu: Some(initial),
+				min_mtu: Some(minimum),
+				..Default::default()
+			};
+			assert!(opts.apply(&mut quinn::TransportConfig::default()).is_err());
+		}
+	}
+	#[test]
+	fn packetization_applies_all_flags() {
+		let opts = QuinnTransportOptions {
+			initial_mtu: Some(1400),
+			min_mtu: Some(1280),
+			gso: Some(false),
+			pmtu: Some(false),
+		};
+		let mut transport = quinn::TransportConfig::default();
+		opts.apply(&mut transport).unwrap();
+		let debug = format!("{transport:?}");
+		assert!(debug.contains("initial_mtu: 1400"), "{debug}");
+		assert!(debug.contains("min_mtu: 1280"), "{debug}");
+		assert!(debug.contains("enable_segmentation_offload: false"), "{debug}");
+		assert!(debug.contains("mtu_discovery_config: None"), "{debug}");
 	}
 }
