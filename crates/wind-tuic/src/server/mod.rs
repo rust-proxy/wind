@@ -60,6 +60,29 @@ pub struct MasqueradeConfig {
 	pub upstream: String,
 }
 
+/// Server fragment reassembly lifetime and collection interval.
+#[derive(Clone, Copy, Debug)]
+pub struct FragmentGc {
+	pub interval: Duration,
+	pub lifetime: Duration,
+}
+impl Default for FragmentGc {
+	fn default() -> Self {
+		Self {
+			interval: UDP_FRAGMENT_GC_INTERVAL,
+			lifetime: crate::udp::DEFAULT_FRAGMENT_TIMEOUT,
+		}
+	}
+}
+impl FragmentGc {
+	pub fn validate(self) -> eyre::Result<()> {
+		if self.interval.is_zero() || self.lifetime.is_zero() {
+			return Err(eyre::eyre!("TUIC GC interval and lifetime must be positive"));
+		}
+		Ok(())
+	}
+}
+
 async fn spawn_logged(label: &str, fut: impl std::future::Future<Output = eyre::Result<()>>) {
 	if let Err(err) = fut.await {
 		error!("{label} error: {err:?}");
@@ -144,6 +167,7 @@ struct AuthState {
 }
 
 struct InboundCtx<C: QuicConnection> {
+	fragment_gc: FragmentGc,
 	conn: C,
 	/// The per-connection `conn` span (created by the backend, entered for the
 	/// whole `serve_connection`). Held so `handle_auth` can record the
@@ -362,6 +386,44 @@ pub async fn serve_connection<C, CB>(
 	C: QuicConnection,
 	CB: InboundCallback + Clone,
 {
+	serve_connection_with_gc(
+		conn,
+		remote_addr,
+		users,
+		auth_timeout,
+		callback,
+		cancel,
+		masq,
+		hooks,
+		active,
+		inbound_tag,
+		FragmentGc::default(),
+	)
+	.await;
+}
+
+/// Serve a TUIC connection with explicit fragment reassembly timing.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_gc<C, CB>(
+	conn: C,
+	remote_addr: SocketAddr,
+	users: Arc<HashMap<Uuid, String>>,
+	auth_timeout: Duration,
+	callback: CB,
+	cancel: CancellationToken,
+	masq: Option<MasqueradeConfig>,
+	hooks: InboundHooks,
+	active: Option<ActiveConnections>,
+	inbound_tag: Arc<str>,
+	fragment_gc: FragmentGc,
+) where
+	C: QuicConnection,
+	CB: InboundCallback + Clone,
+{
+	if fragment_gc.validate().is_err() {
+		conn.close(0, b"invalid GC configuration");
+		return;
+	}
 	let conn_info = ConnInfo {
 		remote_addr,
 		protocol: Protocol::Tuic,
@@ -402,6 +464,7 @@ pub async fn serve_connection<C, CB>(
 		.build();
 
 	let connection = Arc::new(InboundCtx {
+		fragment_gc,
 		conn,
 		conn_span,
 		auth: ArcSwapOption::empty(),
@@ -1155,7 +1218,8 @@ async fn get_or_create_session<C: QuicConnection, CB: InboundCallback + Clone>(
 			// support and otherwise falls back to one uni stream per packet, so
 			// a client on stream relay (`udp_relay_mode = "quic"`) still
 			// receives its replies.
-			let tuic_stream = Arc::new(UdpStream::new(conn, assoc_id, reassembled_tx));
+			let tuic_stream =
+				Arc::new(UdpStream::new(conn, assoc_id, reassembled_tx).with_gc_lifetime(ctx.fragment_gc.lifetime));
 
 			let outbound_stream = CoreUdpStream {
 				tx: from_outbound_tx,
@@ -1199,7 +1263,7 @@ async fn get_or_create_session<C: QuicConnection, CB: InboundCallback + Clone>(
 			// stays pinned for the association's lifetime. A weak handle keeps
 			// the task from pinning the session if this insert is cancelled.
 			tokio::spawn(
-				run_udp_fragment_gc(Arc::downgrade(&tuic_stream), session_cancel.clone(), UDP_FRAGMENT_GC_INTERVAL)
+				run_udp_fragment_gc(Arc::downgrade(&tuic_stream), session_cancel.clone(), ctx.fragment_gc.interval)
 					.in_current_span(),
 			);
 
@@ -1588,6 +1652,10 @@ pub(super) mod tests {
 			})
 		};
 		let ctx = Arc::new(InboundCtx {
+			fragment_gc: FragmentGc {
+				interval: Duration::from_millis(10),
+				lifetime: Duration::from_millis(40),
+			},
 			conn: DummyConn::default(),
 			conn_span: tracing::Span::none(),
 			auth: ArcSwapOption::from(Some(Arc::new(AuthState {
@@ -1613,11 +1681,29 @@ pub(super) mod tests {
 			conn_cancel: CancellationToken::new(),
 		});
 
-		let _stream = get_or_create_session(&ctx, 7, &cb).await.unwrap();
+		let stream = get_or_create_session(&ctx, 7, &cb).await.unwrap();
 		tokio::time::timeout(Duration::from_secs(1), started.notified())
 			.await
 			.expect("UDP callback did not start");
 		assert!(!was_dropped.load(Ordering::SeqCst));
+
+		// Exercise the configured lifetime and interval through session
+		// creation.
+		let target = wind_core::types::TargetAddr::IPv4(Ipv4Addr::LOCALHOST, 9);
+		assert!(
+			stream
+				.process_fragment(7, 1, 2, 0, Bytes::from_static(b"fragment"), None, target)
+				.await
+				.is_none()
+		);
+		assert_eq!(stream.incomplete_group_count_without_cleanup(), 1);
+		tokio::time::timeout(Duration::from_secs(2), async {
+			while stream.incomplete_group_count_without_cleanup() != 0 {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("configured server fragment GC must run");
 
 		udp_root_cancel.cancel();
 		ctx.udp_sessions.invalidate_all();
@@ -2008,6 +2094,7 @@ pub(super) mod tests {
 	/// the auth state before sharing it.
 	fn unauthenticated_test_ctx(conn: DummyConn, auth: Arc<dyn TuicAuthenticator>) -> InboundCtx<DummyConn> {
 		InboundCtx {
+			fragment_gc: FragmentGc::default(),
 			conn,
 			conn_span: tracing::Span::none(),
 			auth: ArcSwapOption::empty(),

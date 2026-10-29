@@ -35,10 +35,15 @@ macro_rules! try_notify {
     };
 }
 
-fn udp_bind_random_port(addr: Option<IpAddr>) -> io::Result<Socket> {
+fn udp_bind_with_mode(addr: Option<IpAddr>, dual_stack: Option<bool>) -> io::Result<Socket> {
 	if let Some(addr) = addr {
 		let sock_addr = SocketAddr::new(addr, 0);
 		let socket = Socket::new(Domain::for_address(sock_addr), Type::DGRAM, None)?;
+		if addr.is_ipv6()
+			&& let Some(dual) = dual_stack
+		{
+			socket.set_only_v6(!dual)?;
+		}
 		socket.bind(&sock_addr.into())?;
 		return socket.set_nonblocking(true).map(|_| socket);
 	}
@@ -66,9 +71,25 @@ where
 	F: FnOnce(Socket) -> R,
 	R: Future<Output = Result<(), Error>>,
 {
+	run_udp_proxy_with_mode(proto, _addr, peer_bind_ip, reply_ip, transfer, None).await
+}
+
+pub async fn run_udp_proxy_with_mode<T, F, R>(
+	proto: Socks5ServerProtocol<T, states::CommandRead>,
+	_addr: &TargetAddr,
+	peer_bind_ip: Option<IpAddr>,
+	reply_ip: IpAddr,
+	transfer: F,
+	dual_stack: Option<bool>,
+) -> Result<T, Error>
+where
+	T: AsyncRead + AsyncWrite + Unpin,
+	F: FnOnce(Socket) -> R,
+	R: Future<Output = Result<(), Error>>,
+{
 	let peer_sock = try_notify!(
 		proto,
-		udp_bind_random_port(peer_bind_ip).err_when("binding client udp socket")
+		udp_bind_with_mode(peer_bind_ip, dual_stack).err_when("binding client udp socket")
 	);
 
 	let peer_addr = try_notify!(proto, peer_sock.local_addr().err_when("getting peer's local addr"));

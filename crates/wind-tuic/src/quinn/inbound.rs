@@ -185,6 +185,9 @@ impl Default for TuicInboundOpts {
 }
 
 pub struct TuicInbound {
+	dual_stack: bool,
+	fragment_gc: crate::server::FragmentGc,
+	pmtu: bool,
 	pub ctx: Arc<AppContext>,
 	opts: TuicInboundOpts,
 	cancel: CancellationToken,
@@ -193,10 +196,30 @@ pub struct TuicInbound {
 impl TuicInbound {
 	pub fn new(ctx: Arc<AppContext>, opts: TuicInboundOpts) -> Self {
 		Self {
+			dual_stack: true,
+			fragment_gc: Default::default(),
+			pmtu: true,
 			opts,
 			cancel: ctx.token.child_token(),
 			ctx,
 		}
+	}
+
+	/// Configure listener address families and fragment collection. Zero
+	/// durations fail before binding.
+	pub fn with_runtime_options(mut self, dual_stack: bool, gc_interval: Duration, gc_lifetime: Duration) -> Self {
+		self.dual_stack = dual_stack;
+		self.fragment_gc = crate::server::FragmentGc {
+			interval: gc_interval,
+			lifetime: gc_lifetime,
+		};
+		self
+	}
+
+	/// Enable or disable path MTU discovery.
+	pub fn with_pmtu(mut self, enabled: bool) -> Self {
+		self.pmtu = enabled;
+		self
 	}
 
 	fn create_server_config(&self) -> eyre::Result<ServerConfig> {
@@ -252,6 +275,7 @@ impl TuicInbound {
 			.initial_mtu(self.opts.initial_mtu)
 			.min_mtu(self.opts.min_mtu)
 			.enable_segmentation_offload(self.opts.gso)
+			.mtu_discovery_config(self.pmtu.then(Default::default))
 			.congestion_controller_factory(self.congestion_controller_factory());
 
 		// Connection-level receive window (quinn leaves its default unless
@@ -300,9 +324,10 @@ impl TuicInbound {
 #[async_trait]
 impl<R: Router> AbstractInbound<R> for TuicInbound {
 	async fn listen(&self, cb: &Dispatcher<R>) -> eyre::Result<()> {
+		self.fragment_gc.validate()?;
 		let config = self.create_server_config()?;
 
-		let socket = bind_listener_socket(self.opts.listen_addr)
+		let socket = bind_listener_socket_with_mode(self.opts.listen_addr, self.dual_stack)
 			.with_context(|| format!("Failed to bind socket on {}", self.opts.listen_addr))?;
 
 		let socket = wrap_server_socket(socket).wrap_err("Failed to wrap QUIC server socket")?;
@@ -360,6 +385,7 @@ impl<R: Router> AbstractInbound<R> for TuicInbound {
 						hooks,
 						active,
 						inbound_tag,
+						self.fragment_gc,
 					),
 				)
 				.instrument(span),
@@ -386,10 +412,15 @@ impl<R: Router> AbstractInbound<R> for TuicInbound {
 /// resolved this server to an IPv4 address would then handshake into the void
 /// until it gave up. Any other address names a family explicitly and is bound
 /// as given.
+#[cfg(test)]
 fn bind_listener_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+	bind_listener_socket_with_mode(addr, true)
+}
+
+pub(crate) fn bind_listener_socket_with_mode(addr: SocketAddr, dual_stack: bool) -> std::io::Result<std::net::UdpSocket> {
 	match addr {
 		SocketAddr::V6(v6) if v6.ip().is_unspecified() => Socket::new(Domain::IPV6, Type::DGRAM, None)
-			.and_then(|socket| socket.set_only_v6(false).map(|_| socket))
+			.and_then(|socket| socket.set_only_v6(!dual_stack).map(|_| socket))
 			.and_then(|socket| socket.bind(&addr.into()).map(|_| socket))
 			.map(std::net::UdpSocket::from),
 		other => std::net::UdpSocket::bind(other),
@@ -424,6 +455,7 @@ async fn handle_connection<C: InboundCallback + Clone>(
 	hooks: InboundHooks,
 	active: Option<crate::active::ActiveConnections>,
 	inbound_tag: Arc<str>,
+	fragment_gc: crate::server::FragmentGc,
 ) -> eyre::Result<()> {
 	let remote_addr = incoming.remote_address();
 
@@ -463,7 +495,7 @@ async fn handle_connection<C: InboundCallback + Clone>(
 		conn
 	};
 
-	crate::server::serve_connection(
+	crate::server::serve_connection_with_gc(
 		QuinnConnection::new(conn),
 		remote_addr,
 		users,
@@ -474,6 +506,7 @@ async fn handle_connection<C: InboundCallback + Clone>(
 		hooks,
 		active,
 		inbound_tag,
+		fragment_gc,
 	)
 	.await;
 
@@ -627,5 +660,27 @@ mod tests {
 		assert!(accept_incoming(&endpoint, &cancel).await.unwrap().is_none());
 		endpoint.close(0u32.into(), b"test shutdown");
 		assert!(accept_incoming(&endpoint, &cancel).await.unwrap().is_none());
+	}
+}
+
+#[cfg(test)]
+mod listener_mode_tests {
+	use super::*;
+	#[test]
+	fn listener_honors_v6_only_and_keeps_ipv4_valid() {
+		for dual in [false, true] {
+			let socket = bind_listener_socket_with_mode("[::]:0".parse().unwrap(), dual).unwrap();
+			assert_eq!(socket2::SockRef::from(&socket).only_v6().unwrap(), !dual);
+			assert!(bind_listener_socket_with_mode("127.0.0.1:0".parse().unwrap(), dual).is_ok());
+		}
+	}
+	#[test]
+	fn fragment_gc_rejects_zero_durations() {
+		for (interval, lifetime) in [
+			(Duration::ZERO, Duration::from_secs(1)),
+			(Duration::from_secs(1), Duration::ZERO),
+		] {
+			assert!(crate::server::FragmentGc { interval, lifetime }.validate().is_err());
+		}
 	}
 }

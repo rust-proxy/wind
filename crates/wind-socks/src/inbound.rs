@@ -57,6 +57,8 @@ pub enum AuthMode {
 }
 
 pub struct SocksInbound {
+	dual_stack: Option<bool>,
+	max_packet_size: usize,
 	opts: Arc<SocksInboundOpt>,
 	cancel: CancellationToken,
 }
@@ -64,7 +66,25 @@ pub struct SocksInbound {
 #[async_trait]
 impl<R: Router> AbstractInbound<R> for SocksInbound {
 	async fn listen(&self, cb: &Dispatcher<R>) -> eyre::Result<()> {
-		let listener = TcpListener::bind(self.opts.listen_addr).await?;
+		if !(1..=65535).contains(&self.max_packet_size) {
+			return Err(eyre::eyre!("SOCKS max_packet_size must be between 1 and 65535"));
+		}
+		let socket = socket2::Socket::new(
+			socket2::Domain::for_address(self.opts.listen_addr),
+			socket2::Type::STREAM,
+			None,
+		)?;
+		if self.opts.listen_addr.is_ipv6()
+			&& let Some(dual) = self.dual_stack
+		{
+			socket.set_only_v6(!dual)?;
+		}
+		#[cfg(unix)]
+		socket.set_reuse_address(true)?;
+		socket.bind(&self.opts.listen_addr.into())?;
+		socket.listen(1024)?;
+		socket.set_nonblocking(true)?;
+		let listener = TcpListener::from_std(socket.into())?;
 		if let Some(tx) = &self.opts.bound_addr {
 			let _ = tx.send_replace(Some(listener.local_addr()?));
 		}
@@ -89,6 +109,8 @@ impl<R: Router> AbstractInbound<R> for SocksInbound {
 					};
 
 					let opts = self.opts.clone();
+					let max_packet_size = self.max_packet_size;
+					let dual_stack = self.dual_stack;
 					let cb = cb.clone();
 					let conn_cancel = self.cancel.child_token();
 					conn_tasks.spawn(
@@ -128,7 +150,7 @@ impl<R: Router> AbstractInbound<R> for SocksInbound {
 									info!(target: "socks_in_handler", "session aborted by shutdown");
 									Ok(())
 								}
-								res = handle_session(opts, stream, client_addr, cb, handler_cancel, record_auth) => res,
+								res = handle_session(opts, stream, client_addr, cb, handler_cancel, record_auth, max_packet_size, dual_stack) => res,
 							};
 							if let Err(err) = result {
 								error!(target: "socks_in_handler" , "{:}", err);
@@ -154,11 +176,21 @@ impl<R: Router> AbstractInbound<R> for SocksInbound {
 }
 
 impl SocksInbound {
+	/// Override IPv6 dual-stack mode and the maximum SOCKS UDP payload in bytes
+	/// (1..=65535).
+	pub fn with_socket_options(mut self, dual_stack: Option<bool>, max_packet_size: usize) -> Self {
+		self.dual_stack = dual_stack;
+		self.max_packet_size = max_packet_size;
+		self
+	}
+
 	// Pure plumbing — no `await` was reached inside. Drop the redundant
 	// `async`. Callers update from `.await` to plain call.
 	pub fn new(opts: SocksInboundOpt, cancel: CancellationToken) -> Self {
 		Self {
 			opts: Arc::new(opts),
+			dual_stack: None,
+			max_packet_size: 65535,
 			cancel,
 		}
 	}
@@ -169,6 +201,7 @@ impl SocksInbound {
 /// `record_auth` is invoked as soon as an identity is bound so the caller can
 /// report it through `on_disconnect` even if cancellation drops this future
 /// before it returns.
+#[allow(clippy::too_many_arguments)]
 async fn handle_session<C: InboundCallback>(
 	opts: Arc<SocksInboundOpt>,
 	stream: TcpStream,
@@ -176,6 +209,8 @@ async fn handle_session<C: InboundCallback>(
 	cb: C,
 	cancel: CancellationToken,
 	record_auth: impl Fn(&UserId),
+	max_packet_size: usize,
+	dual_stack: Option<bool>,
 ) -> Result<(), Error> {
 	// Identity bound by this session; `record_auth` mirrors it to the caller
 	// (which needs it for `on_disconnect`) while this future stays alive.
@@ -311,49 +346,62 @@ async fn handle_session<C: InboundCallback>(
 				inbound_type: Some(InboundType::Socks),
 			};
 
-			crate::ext::run_udp_proxy(proto, &target_addr, None, reply_ip, move |inbound| async move {
-				let (tx_to_out, rx_from_in) = mpsc::channel(100);
-				let (tx_to_in, rx_from_out) = mpsc::channel(100);
+			crate::ext::run_udp_proxy_with_mode(
+				proto,
+				&target_addr,
+				dual_stack.map(|_| opts.listen_addr.ip()),
+				reply_ip,
+				move |inbound| async move {
+					let (tx_to_out, rx_from_in) = mpsc::channel(100);
+					let (tx_to_in, rx_from_out) = mpsc::channel(100);
 
-				let udp_stream = UdpStream {
-					tx: tx_to_out,
-					rx: rx_from_out,
-				};
+					let udp_stream = UdpStream {
+						tx: tx_to_out,
+						rx: rx_from_out,
+					};
 
-				// Wrap the callback-facing stream so UDP payloads are metered.
-				let udp_stream = match (stats, stats_user) {
-					(Some(s), Some(u)) => count_udp(udp_stream, s, u),
-					_ => udp_stream,
-				};
+					// Wrap the callback-facing stream so UDP payloads are
+					// metered.
+					let udp_stream = match (stats, stats_user) {
+						(Some(s), Some(u)) => count_udp(udp_stream, s, u),
+						_ => udp_stream,
+					};
 
-				let serve_stream = UdpStream {
-					tx: tx_to_in,
-					rx: rx_from_in,
-				};
+					let serve_stream = UdpStream {
+						tx: tx_to_in,
+						rx: rx_from_in,
+					};
 
-				let cb = cb.clone();
-				// Detached from the session task, so it needs its own cancel
-				// guard — otherwise it would outlive shutdown until runtime
-				// drop.
-				let udp_cancel = cancel.clone();
-				tokio::spawn(
-					async move {
-						tokio::select! {
-							_ = udp_cancel.cancelled() => {}
-							res = cb.handle_udpstream(udp_ctx, udp_stream) => {
-								if let Err(e) = res {
-									error!(target: "socks_in_handler", "UDP association error: {}", e);
+					let cb = cb.clone();
+					// Detached from the session task, so it needs its own
+					// cancel guard — otherwise it would
+					// outlive shutdown until runtime drop.
+					let udp_cancel = cancel.clone();
+					tokio::spawn(
+						async move {
+							tokio::select! {
+								_ = udp_cancel.cancelled() => {}
+								res = cb.handle_udpstream(udp_ctx, udp_stream) => {
+									if let Err(e) = res {
+										error!(target: "socks_in_handler", "UDP association error: {}", e);
+									}
 								}
 							}
 						}
-					}
-					.in_current_span(),
-				);
+						.in_current_span(),
+					);
 
-				crate::udp::serve_udp_with_client(inbound.into(), serve_stream, Some(expected_client_ip))
+					crate::udp::serve_udp_with_client_limit(
+						inbound.into(),
+						serve_stream,
+						Some(expected_client_ip),
+						max_packet_size,
+					)
 					.await
 					.context(IoSnafu)
-			})
+				},
+				dual_stack,
+			)
 			.await?;
 		}
 		_ => {
