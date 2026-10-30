@@ -84,6 +84,8 @@ impl Default for ReconnectConfig {
 /// Static configuration for a [`TuicheOutbound`].
 #[derive(Clone)]
 pub struct TuicheOutboundOpts {
+	/// Binary ECHConfigList; require ECH acceptance when configured.
+	pub ech_config_list: Option<Vec<u8>>,
 	/// Server socket address to dial (already resolved).
 	pub peer_addr: SocketAddr,
 	/// Server name (SNI) sent and verified against.
@@ -318,6 +320,7 @@ async fn establish(
 	factory: Option<&UdpSocketFactory>,
 ) -> Result<QuicheConnection, Error> {
 	let tls = ClientTlsConfig {
+		ech_config_list: opts.ech_config_list.clone(),
 		server_name: opts.sni.clone(),
 		verify_certificate: opts.verify_certificate,
 		alpn: if opts.alpn.is_empty() {
@@ -717,6 +720,7 @@ impl Outbound for TuicheOutbound {
 /// Builder for [`TuicheOutbound`], mirroring
 /// [`TuicheInboundBuilder`](crate::quiche::TuicheInboundBuilder).
 pub struct TuicheOutboundBuilder {
+	ech_config_list: Option<Vec<u8>>,
 	server_addr: Option<SocketAddr>,
 	server_name: Option<String>,
 	uuid: Option<Uuid>,
@@ -735,6 +739,7 @@ impl TuicheOutboundBuilder {
 	/// Create a new builder.
 	pub fn new() -> Self {
 		Self {
+			ech_config_list: None,
 			server_addr: None,
 			server_name: None,
 			uuid: None,
@@ -748,6 +753,12 @@ impl TuicheOutboundBuilder {
 			connection: ConnectionOpts::default(),
 			context: None,
 		}
+	}
+
+	/// Require ECH using the supplied binary ECHConfigList.
+	pub fn ech_config_list(mut self, list: Vec<u8>) -> Self {
+		self.ech_config_list = Some(list);
+		self
 	}
 
 	/// Set the server socket address.
@@ -833,6 +844,7 @@ impl TuicheOutboundBuilder {
 		let password = self.password.ok_or_else(|| eyre::eyre!("Password not set"))?;
 
 		let opts = TuicheOutboundOpts {
+			ech_config_list: self.ech_config_list,
 			peer_addr: server_addr,
 			sni: server_name,
 			auth: (uuid, Arc::from(password.into_boxed_slice())),
@@ -922,6 +934,7 @@ mod tests {
 	#[test_log::test(tokio::test)]
 	async fn outbound_construction_rejects_a_zero_initial_backoff() {
 		let opts = TuicheOutboundOpts {
+			ech_config_list: None,
 			peer_addr: "127.0.0.1:9443".parse().unwrap(),
 			sni: "localhost".into(),
 			auth: (Uuid::nil(), Arc::<[u8]>::from(&[][..])),
@@ -1313,6 +1326,7 @@ mod tests {
 			.await?;
 
 			let tls = wind_quic::ClientTlsConfig {
+				ech_config_list: None,
 				server_name: "localhost".to_string(),
 				verify_certificate: false,
 				alpn: vec![b"h3".to_vec()],

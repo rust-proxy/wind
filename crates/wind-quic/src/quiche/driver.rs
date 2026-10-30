@@ -240,6 +240,7 @@ impl Future for WaitOut {
 
 /// The protocol-agnostic quiche driver.
 pub(crate) struct BridgeDriver {
+	pub(crate) require_ech: bool,
 	is_server: bool,
 	span: Span,
 	established: bool,
@@ -300,6 +301,7 @@ impl BridgeDriver {
 		);
 		let (est_tx, est_rx) = oneshot::channel();
 		let driver = Self {
+			require_ech: false,
 			is_server,
 			span,
 			established: false,
@@ -685,6 +687,11 @@ fn export_out_ptr(out: &mut [u8], scratch: &mut u8) -> *mut u8 {
 
 impl ApplicationOverQuic for BridgeDriver {
 	fn on_conn_established(&mut self, qconn: &mut QuicheConnection, _info: &HandshakeInfo) -> QuicResult<()> {
+		// Fail before delivering a handle or permitting any application data.
+		// BoringSSL may ignore a list containing only unsupported ECH versions.
+		if self.require_ech && !qconn.as_mut().ech_accepted() {
+			return Err("ECH was required but was not accepted".into());
+		}
 		let span = self.span.clone();
 		let _enter = span.enter();
 		self.established = true;

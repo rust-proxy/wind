@@ -23,8 +23,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use boring::{
 	error::ErrorStack,
+	hpke::HpkeKey,
 	pkey::{PKey, Private},
-	ssl::{SelectCertError, SslContextBuilder, SslMethod, SslRef, SslVersion},
+	ssl::{SelectCertError, SslContextBuilder, SslEchKeys, SslMethod, SslRef, SslVersion},
 	x509::X509,
 };
 use eyre::{WrapErr as _, eyre};
@@ -52,6 +53,7 @@ fn parse(cert_pem: &[u8], key_pem: &[u8]) -> eyre::Result<CurrentCert> {
 #[derive(Clone)]
 pub struct CertStore {
 	inner: Arc<ArcSwap<CurrentCert>>,
+	ech_keys: Option<Arc<SslEchKeys>>,
 }
 
 impl CertStore {
@@ -59,7 +61,22 @@ impl CertStore {
 	pub fn from_pem(cert_pem: &[u8], key_pem: &[u8]) -> eyre::Result<Self> {
 		Ok(Self {
 			inner: Arc::new(ArcSwap::from_pointee(parse(cert_pem, key_pem)?)),
+			ech_keys: None,
 		})
+	}
+
+	/// Enable ECH with a binary ECHConfig and its raw X25519 private key.
+	/// The key is independent of the certificate and survives certificate
+	/// reloads.
+	pub fn with_ech_key(mut self, config: &[u8], private_key: &[u8]) -> eyre::Result<Self> {
+		// Despite its name, boring 5's constructor uses X25519 (see its API
+		// docs).
+		let key = HpkeKey::dhkem_p256_sha256(private_key).wrap_err("invalid ECH private key")?;
+		let mut keys = SslEchKeys::builder().wrap_err("creating ECH keys")?;
+		keys.add_key(true, config, key)
+			.wrap_err("invalid ECH config or mismatched key")?;
+		self.ech_keys = Some(Arc::new(keys.build()));
+		Ok(self)
 	}
 
 	/// Replace the served certificate. Subsequent handshakes use the new
@@ -95,6 +112,17 @@ impl CertReloadHook {
 }
 
 impl ConnectionHook for CertReloadHook {
+	fn requires_custom_ssl_context(&self) -> bool {
+		self.store.ech_keys.is_some()
+	}
+
+	fn configure_ssl_context(&self, builder: &mut SslContextBuilder) -> tokio_quiche::QuicResult<()> {
+		if let Some(keys) = &self.store.ech_keys {
+			builder.set_ech_keys(keys)?;
+		}
+		Ok(())
+	}
+
 	fn create_custom_ssl_context_builder(&self, _settings: TlsCertificatePaths<'_>) -> Option<SslContextBuilder> {
 		let mut builder = SslContextBuilder::new(SslMethod::tls()).ok()?;
 		// QUIC mandates TLS 1.3.
@@ -120,5 +148,20 @@ impl ConnectionHook for CertReloadHook {
 		});
 
 		Some(builder)
+	}
+}
+
+/// Installs ECH before the client's first handshake flight, including
+/// reconnects.
+pub(crate) struct EchClientHook(pub Vec<u8>);
+
+impl ConnectionHook for EchClientHook {
+	fn create_custom_ssl_context_builder(&self, _: TlsCertificatePaths<'_>) -> Option<SslContextBuilder> {
+		None
+	}
+
+	fn configure_client_ssl(&self, ssl: &mut SslRef) -> tokio_quiche::QuicResult<()> {
+		ssl.set_ech_config_list(&self.0)?;
+		Ok(())
 	}
 }

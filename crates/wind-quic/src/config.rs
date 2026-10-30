@@ -235,6 +235,8 @@ impl ServerTlsConfig {
 /// Client-side TLS configuration.
 #[derive(Clone, Debug)]
 pub struct ClientTlsConfig {
+	/// Binary ECHConfigList. When set, ECH acceptance is mandatory.
+	pub ech_config_list: Option<Vec<u8>>,
 	/// Server name (SNI) to send and verify against.
 	pub server_name: String,
 	/// Verify the server certificate. Disabling it is insecure (MITM-able) and
@@ -251,6 +253,7 @@ impl ClientTlsConfig {
 	/// A verifying client config for `server_name` advertising the `h3` ALPN.
 	pub fn new(server_name: impl Into<String>) -> Self {
 		Self {
+			ech_config_list: None,
 			server_name: server_name.into(),
 			verify_certificate: true,
 			alpn: vec![b"h3".to_vec()],

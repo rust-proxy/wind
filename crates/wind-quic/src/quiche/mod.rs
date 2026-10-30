@@ -348,11 +348,18 @@ pub async fn connect_with_session_and_socket(
 	let mut settings = quic_settings(transport);
 	settings.verify_peer = tls_cfg.verify_certificate;
 	settings.alpn = tls_cfg.alpn.clone();
-	let mut params = ConnectionParams::new_client(settings, None, Hooks { connection_hook: None });
+	let hooks = Hooks {
+		connection_hook: tls_cfg
+			.ech_config_list
+			.as_ref()
+			.map(|list| Arc::new(tls::EchClientHook(list.clone())) as _),
+	};
+	let mut params = ConnectionParams::new_client(settings, None, hooks);
 	params.session = session;
 
 	let span = tracing::info_span!("quiche-conn", peer = %peer);
-	let (driver, est_rx) = BridgeDriver::new(false, peer, span);
+	let (mut driver, est_rx) = BridgeDriver::new(false, peer, span);
+	driver.require_ech = tls_cfg.ech_config_list.is_some();
 
 	// `connect_with_config` resolves once the handshake completes; the driver's
 	// `on_conn_established` delivers the handle through `est_rx`.

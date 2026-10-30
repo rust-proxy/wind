@@ -60,6 +60,9 @@ pub(super) fn server_crypto(cfg: &ServerTlsConfig, transport: &TransportConfig) 
 
 pub(super) fn client_crypto(cfg: &ClientTlsConfig) -> Result<rustls::ClientConfig, QuicError> {
 	use rustls_platform_verifier::BuilderVerifierExt as _;
+	if cfg.ech_config_list.is_some() {
+		return Err(QuicError::Tls("ECH is not wired to this quinn client configuration".into()));
+	}
 
 	let provider = rustls::crypto::CryptoProvider::get_default()
 		.ok_or_else(|| QuicError::Tls("no default crypto provider installed".into()))?
