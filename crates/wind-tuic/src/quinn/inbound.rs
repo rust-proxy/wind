@@ -297,8 +297,8 @@ impl TuicInbound {
 	fn congestion_controller_factory(&self) -> Arc<dyn quinn::congestion::ControllerFactory + Send + Sync + 'static> {
 		let iw = self.opts.initial_window;
 		match self.opts.congestion_control {
-			// `quinn-congestions` provides a single BBR implementation; both the
-			// `bbr` and `bbr3` config aliases map to it.
+			// `quinn-congestions` provides a single BBR implementation; both
+			// the `bbr` and `bbr3` config aliases map to it.
 			CongestionControl::Bbr | CongestionControl::Bbr3 => {
 				let mut cfg = quinn_congestions::bbr::BbrConfig::default();
 				cfg.initial_window(iw);

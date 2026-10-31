@@ -92,7 +92,8 @@ fn build_geosite(list: &GeoSiteList) -> Result<GeoSiteIndex, GeoDataError> {
 		keyword_domains.extend(keyword);
 
 		categories.push(CategoryInfo {
-			// Stored uppercase so lookups can be case-insensitive (geosite.dat tags are uppercase).
+			// Stored uppercase so lookups can be case-insensitive (geosite.dat
+			// tags are uppercase).
 			name,
 			exact_start,
 			exact_len,

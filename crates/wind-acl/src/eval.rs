@@ -51,9 +51,9 @@ impl Ruleset {
 			Resolution::Forward(o) => RouteAction::Forward(o),
 			Resolution::Reject(r) => RouteAction::Reject(r),
 			Resolution::Drop => RouteAction::Reject("dropped".to_string()),
-			// Both a chain that ran out of rules and a `Return` that popped past
-			// the entry chain apply the entry policy. `policy` is a terminal
-			// verdict by construction.
+			// Both a chain that ran out of rules and a `Return` that popped
+			// past the entry chain apply the entry policy. `policy` is a
+			// terminal verdict by construction.
 			Resolution::Fallthrough | Resolution::Returned => match self.resolve_policy(self.entry, ctx) {
 				Resolution::Forward(o) => RouteAction::Forward(o),
 				Resolution::Reject(r) => RouteAction::Reject(r),

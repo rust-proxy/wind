@@ -231,7 +231,8 @@ fn chain_control_verdicts_are_distinguishable() {
 				policy: Verdict::Forward("main-policy".into()),
 				rules: vec![
 					port_rule(80, Verdict::Return),
-					// Reached only if rule 1 resumes the scan, so it must not run.
+					// Reached only if rule 1 resumes the scan, so it must not
+					// run.
 					port_rule(80, Verdict::Forward("after-return".into())),
 					port_rule(81, Verdict::Goto("leaf".into())),
 					port_rule(81, Verdict::Forward("after-goto".into())),

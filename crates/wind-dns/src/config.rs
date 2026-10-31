@@ -16,10 +16,11 @@ use wind_core::StackPrefer;
 #[educe(Default)]
 pub enum DnsMode {
 	// `System` is the default: it preserves the legacy behaviour documented on
-	// `DnsConfig` ("Defaults to the OS resolver"). The default previously sat on
-	// `CloudflareTls`, which silently rerouted every outbound lookup through
-	// Cloudflare DoT for users who omitted the `[dns]` section -- a behaviour and
-	// privacy change that also breaks environments where port 853 is blocked.
+	// `DnsConfig` ("Defaults to the OS resolver"). The default previously sat
+	// on `CloudflareTls`, which silently rerouted every outbound lookup through
+	// Cloudflare DoT for users who omitted the `[dns]` section -- a behaviour
+	// and privacy change that also breaks environments where port 853 is
+	// blocked.
 	#[educe(Default)]
 	System,
 	Cloudflare,

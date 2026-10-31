@@ -109,8 +109,9 @@ impl From<ParseError> for ProtoError {
 			ParseError::UnknownCommandType { value } => UnknownCommandTypeSnafu { value }.build(),
 			ParseError::UnknownAddressType { value } => UnknownAddressTypeSnafu { value }.build(),
 			ParseError::FailParseDomain { raw, source } => FailParseDomainSnafu { raw }.into_error(source),
-			// A structural failure with no more specific name keeps the historic
-			// "caller should yield" signal that `decode_eof` also produces.
+			// A structural failure with no more specific name keeps the
+			// historic "caller should yield" signal that `decode_eof` also
+			// produces.
 			ParseError::Verify => BytesRemainingSnafu.build(),
 		}
 	}

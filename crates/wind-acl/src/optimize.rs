@@ -117,7 +117,8 @@ fn bucket_same_verdict(run: &[IrRule], sets: &mut Vec<NamedSet>) -> IrRule {
 			Match::Ip { side: Side::Src, net } => src_ips.push(*net),
 			Match::Port { side: Side::Dst, range } => dst_ports.push(range.clone()),
 			Match::Port { side: Side::Src, range } => src_ports.push(range.clone()),
-			// Proto / Predicate / compound / Always / InSet: not set-able; keep.
+			// Proto / Predicate / compound / Always / InSet: not set-able;
+			// keep.
 			other => alts.push(other.clone()),
 		}
 	}

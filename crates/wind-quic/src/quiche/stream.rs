@@ -148,8 +148,9 @@ impl AsyncRead for QuicheRecv {
 						let _ = self.cmd_tx.send(DriverCommand::FlushInbound(self.sid));
 					}
 				}
-				// Peer reset the stream → surface an error, not a truncated-but-clean
-				// EOF, so callers can tell a complete stream from an aborted one.
+				// Peer reset the stream → surface an error, not a
+				// truncated-but-clean EOF, so callers can tell a complete
+				// stream from an aborted one.
 				Poll::Ready(Some(Err(code))) => {
 					return Poll::Ready(Err(io::Error::new(
 						io::ErrorKind::ConnectionReset,
