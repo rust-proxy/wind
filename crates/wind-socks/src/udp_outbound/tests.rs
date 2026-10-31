@@ -37,6 +37,13 @@ async fn case(hint: usize) -> eyre::Result<Case> {
 	let (peer_control, _) = listener.accept().await?;
 	let proxy = UdpSocket::bind("127.0.0.1:0").await?;
 	let udp = UdpSocket::bind("127.0.0.1:0").await?;
+	// Darwin's default UDP send buffer is smaller than the 65 KB fixture.
+	// Reserve room on both sockets without reducing the whole-datagram check.
+	for socket in [&proxy, &udp] {
+		let socket = socket2::SockRef::from(socket);
+		socket.set_send_buffer_size(BUFFER_SIZE * 2)?;
+		socket.set_recv_buffer_size(BUFFER_SIZE * 2)?;
+	}
 	udp.connect(proxy.local_addr()?).await?;
 	let peer = udp.local_addr()?;
 	let (send, rx) = mpsc::channel(8);
