@@ -5870,6 +5870,7 @@ dependencies = [
  "futures",
  "pin-project",
  "pin-project-lite",
+ "portable-atomic",
  "quinn 0.12.0",
  "quinn-udp 0.6.3",
  "rand 0.10.3",

@@ -10,9 +10,8 @@
 //! [`reset_all`]: StatsCollector::reset_all
 //! [`restore`]: StatsCollector::restore
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
 use dashmap::DashMap;
+use portable_atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::UserId;
 

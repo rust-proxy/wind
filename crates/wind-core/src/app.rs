@@ -430,12 +430,13 @@ mod tests {
 	use std::{
 		sync::{
 			Arc, Mutex,
-			atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+			atomic::{AtomicBool, AtomicUsize, Ordering},
 		},
 		time::Duration,
 	};
 
 	use async_trait::async_trait;
+	use portable_atomic::AtomicU64;
 
 	use super::*;
 	use crate::{FlowContext, RouteAction, UserId, UserTraffic};

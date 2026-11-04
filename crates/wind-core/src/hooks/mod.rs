@@ -16,18 +16,10 @@
 //! [`InboundHooks`], which is threaded into each inbound via its opts struct
 //! and defaults to all-`None` (no behavior change).
 
-use std::{
-	collections::HashMap,
-	fmt,
-	net::SocketAddr,
-	sync::{
-		Arc,
-		atomic::{AtomicU64, Ordering},
-	},
-	time::Duration,
-};
+use std::{collections::HashMap, fmt, net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use portable_atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
 mod counting;

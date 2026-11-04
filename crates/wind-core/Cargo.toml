@@ -25,6 +25,9 @@ quinn = { workspace = true, default-features = false, optional = true }
 
 socket2 = "0.6"
 
+# `AtomicU64` is not available on all 32-bit targets (e.g. mips/mipsel musl).
+portable-atomic = "1"
+
 serde = { version = "1", features = ["derive"] }
 
 futures = "0.3"
