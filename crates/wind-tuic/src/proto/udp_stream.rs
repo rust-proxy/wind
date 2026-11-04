@@ -5,11 +5,11 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use crossfire::{MAsyncTx, mpmc};
+use tokio::sync::mpsc;
 use tokio_util::codec::Encoder;
 use wind_core::{types::TargetAddr, udp::UdpPacket};
 
-type UdpPacketTx = MAsyncTx<mpmc::Array<UdpPacket>>;
+type UdpPacketTx = mpsc::Sender<UdpPacket>;
 
 use wind_quic::QuicConnection;
 
@@ -655,7 +655,7 @@ mod tests {
 
 	/// Build a `UdpStream` over `conn` with `mode` and a live receive channel.
 	fn recording_stream(conn: &RecordingConn, mode: UdpRelayMode) -> UdpStream<RecordingConn> {
-		let (tx, _rx) = crossfire::mpmc::bounded_async::<UdpPacket>(8);
+		let (tx, _rx) = mpsc::channel::<UdpPacket>(8);
 		UdpStream::new(conn.clone(), TEST_ASSOC_ID, tx).with_relay_mode(mode)
 	}
 
@@ -666,7 +666,7 @@ mod tests {
 	#[tokio::test]
 	async fn collect_garbage_evicts_groups_past_the_configured_lifetime() {
 		let conn = RecordingConn::new(Some(1200));
-		let (tx, _rx) = crossfire::mpmc::bounded_async::<UdpPacket>(8);
+		let (tx, _rx) = mpsc::channel::<UdpPacket>(8);
 		let lifetime = Duration::from_millis(100);
 		let stream = UdpStream::new(conn, TEST_ASSOC_ID, tx).with_gc_lifetime(lifetime);
 		let target = TargetAddr::IPv4(Ipv4Addr::new(127, 0, 0, 1), 5353);

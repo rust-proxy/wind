@@ -581,7 +581,7 @@ async fn run_session(
 	session_cancel: CancellationToken,
 	shutdown: CancellationToken,
 ) -> eyre::Result<SessionEnd> {
-	let (datagram_rx, bi_rx, uni_rx) = conn.handle_incoming(ctx.clone(), session_cancel.clone()).await?;
+	let (mut datagram_rx, mut bi_rx, mut uni_rx) = conn.handle_incoming(ctx.clone(), session_cancel.clone()).await?;
 
 	let mut hb_interval = tokio::time::interval(heartbeat);
 	const HEARTBEAT_MAX_FAILURES: usize = 3;
@@ -611,15 +611,15 @@ async fn run_session(
 					hb_failures = 0;
 				}
 			}
-			Ok(_) = bi_rx.recv() => {
+			Some(_) = bi_rx.recv() => {
 				warn!(target: "tuic_out", "Received bi-directional stream on Outbound");
 			}
-			Ok(buf) = datagram_rx.recv() => {
+			Some(buf) = datagram_rx.recv() => {
 				info!(target: "tuic_out", "Received datagram: {} bytes", buf.len());
 				dispatch_incoming_udp(udp_session, buf).await;
 			}
 
-			Ok(mut recv) = uni_rx.recv() => {
+			Some(mut recv) = uni_rx.recv() => {
 				// QUIC relay mode delivers UDP responses on uni streams; read
 				// (bounded) and feed the matching association, mirroring the
 				// datagram path above.
@@ -787,7 +787,7 @@ impl Outbound for TuicOutbound {
 		// association's own connection closing (on reconnect or any loss) and
 		// end the session, while `connection` stays available for teardown.
 		let assoc_connection = connection.clone();
-		let (receive_tx, receive_rx) = crossfire::mpmc::bounded_async(256);
+		let (receive_tx, mut receive_rx) = tokio::sync::mpsc::channel(256);
 		let tuic_stream = Arc::new(
 			crate::proto::UdpStream::new(connection.clone(), assoc_id, receive_tx)
 				.with_relay_mode(self.opts.udp_relay_mode)
@@ -824,11 +824,11 @@ impl Outbound for TuicOutbound {
 
 					result = receive_rx.recv() => {
 						let packet = match result {
-							Err(e) => {
-								warn!(target: "tuic_out", "Error receiving packet from channel for association {:#06x}: {}", assoc_id, e);
+							None => {
+								warn!(target: "tuic_out", "Packet channel closed for association {:#06x}", assoc_id);
 								break;
 							}
-							Ok(packet) => packet,
+							Some(packet) => packet,
 						};
 
 						if let Err(e) = client_tx.send(packet).await {

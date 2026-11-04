@@ -8,7 +8,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use crossfire::{AsyncRx, SendTimeoutError, spsc};
+use tokio::sync::mpsc::{self, error::SendTimeoutError};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, info, warn};
 use wind_core::AppContext;
@@ -24,9 +24,9 @@ const SPSC_BUFFER_SIZE: usize = 64;
 /// Receivers returned by [`ClientTaskExt::handle_incoming`]: datagrams,
 /// incoming bidirectional streams, and incoming unidirectional streams.
 type IncomingRx<C> = (
-	AsyncRx<spsc::Array<Bytes>>,
-	AsyncRx<spsc::Array<(<C as QuicConnection>::SendStream, <C as QuicConnection>::RecvStream)>>,
-	AsyncRx<spsc::Array<<C as QuicConnection>::RecvStream>>,
+	mpsc::Receiver<Bytes>,
+	mpsc::Receiver<(<C as QuicConnection>::SendStream, <C as QuicConnection>::RecvStream)>,
+	mpsc::Receiver<<C as QuicConnection>::RecvStream>,
 );
 
 /// Spawn a task that drives an `accept`-style call and forwards each accepted
@@ -37,14 +37,14 @@ async fn spawn_handler<C, T, F, Fut>(
 	cancel_token: CancellationToken,
 	accept_fn: F,
 	name: &'static str,
-) -> AsyncRx<spsc::Array<T>>
+) -> mpsc::Receiver<T>
 where
 	C: QuicConnection,
 	T: Send + Unpin + 'static,
 	F: Fn(C) -> Fut + Send + 'static,
 	Fut: std::future::Future<Output = Result<T, wind_quic::QuicError>> + Send,
 {
-	let (tx, rx) = spsc::bounded_async(SPSC_BUFFER_SIZE);
+	let (tx, rx) = mpsc::channel(SPSC_BUFFER_SIZE);
 
 	ctx.tasks.spawn(
 		async move {
@@ -65,7 +65,7 @@ where
 						// the item and keep accepting).
 						match tx.send_timeout(item, Duration::from_secs(1)).await {
 							Ok(()) => {}
-							Err(SendTimeoutError::Disconnected(_)) => {
+							Err(SendTimeoutError::Closed(_)) => {
 								warn!("{name} consumer dropped; ending accept loop");
 								break;
 							}

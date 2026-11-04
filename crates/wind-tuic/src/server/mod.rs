@@ -1208,7 +1208,7 @@ async fn get_or_create_session<C: QuicConnection, CB: InboundCallback + Clone>(
 		.or_insert_with(async {
 			info!("Creating new UDP session for assoc_id {}", assoc_id);
 
-			let (reassembled_tx, reassembled_rx) = crossfire::mpmc::bounded_async::<UdpPacket>(128);
+			let (reassembled_tx, mut reassembled_rx) = mpsc::channel::<UdpPacket>(128);
 
 			let (to_outbound_tx, to_outbound_rx) = mpsc::channel::<UdpPacket>(100);
 			let (from_outbound_tx, mut from_outbound_rx) = mpsc::channel::<UdpPacket>(100);
@@ -1236,8 +1236,8 @@ async fn get_or_create_session<C: QuicConnection, CB: InboundCallback + Clone>(
 							_ = cancel_a.cancelled() => break,
 							res = reassembled_rx.recv() => {
 								let packet = match res {
-									Ok(p) => p,
-									Err(_) => break,
+									Some(p) => p,
+									None => break,
 								};
 								tokio::select! {
 									_ = cancel_a.cancelled() => break,
@@ -1723,7 +1723,7 @@ pub(super) mod tests {
 	#[tokio::test]
 	async fn udp_fragment_gc_evicts_groups_past_the_fragment_lifetime() {
 		let lifetime = Duration::from_millis(50);
-		let (tx, _rx) = crossfire::mpmc::bounded_async::<UdpPacket>(8);
+		let (tx, _rx) = mpsc::channel::<UdpPacket>(8);
 		let stream = Arc::new(UdpStream::new(DummyConn::default(), 7, tx).with_gc_lifetime(lifetime));
 		let target = wind_core::types::TargetAddr::IPv4(Ipv4Addr::new(127, 0, 0, 1), 8080);
 

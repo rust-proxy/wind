@@ -79,7 +79,6 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 bytes = "1"
 eyre = "0.6"
 uuid = { version = "1", features = ["v4"] }
-crossfire = { version = "3", features = ["tokio"] }
 moka = { version = "0.12", features = ["future"] }
 # Server-only live-connection registry (per-user limits + active kick); enabled
 # by the `server` feature.
