@@ -28,7 +28,10 @@ tool = "cross"
 
 # 32-bit Linux (GNU)
 [[target]]
-os = "ubuntu-latest"
+# Ubuntu 26.04's Docker 29.4.2 blocks i386 socketcall (ENOSYS), including
+# Tokio's signal socketpair. Keep tests enabled on 24.04 until that runner
+# ships Docker >= 29.4.3: https://github.com/actions/runner-images/issues/14790
+os = "ubuntu-24.04"
 target = "i686-unknown-linux-gnu"
 release-name = "i686-linux"
 

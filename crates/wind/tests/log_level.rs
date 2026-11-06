@@ -3,20 +3,32 @@
 //!
 //! These run the real binary (Cargo provides `CARGO_BIN_EXE_wind` for
 //! integration tests) with an empty working directory, so no ambient config can
-//! influence the run. `main` fails on the empty config *after* logging is
-//! configured, which is exactly what makes the level observable: the diagnostic
-//! `Wind starting` line is emitted through the subscriber and must be filtered
-//! out at `error`.
+//! influence the run. `--version` exits successfully after logging is
+//! configured: the diagnostic `Wind starting` line must be filtered out at
+//! `error`, while the version output proves that the binary actually ran.
 
 use std::process::Command;
 
 /// Run the binary with `args` from an empty, per-test working directory.
 fn run_wind(args: &[&str]) -> std::process::Output {
 	let exe = env!("CARGO_BIN_EXE_wind");
+	// Cross wraps the test harness, but Command does not inherit Cargo's
+	// runner. Its images expose a whitespace-separated runner command (e.g.
+	// `/linux-runner aarch64`); use it for the child binary as well.
+	let mut command = match std::env::var("CROSS_TARGET_RUNNER") {
+		Ok(runner) => {
+			let mut parts = runner.split_whitespace();
+			let mut command = Command::new(parts.next().expect("CROSS_TARGET_RUNNER must not be empty"));
+			command.args(parts).arg(exe);
+			command
+		}
+		Err(std::env::VarError::NotPresent) => Command::new(exe),
+		Err(err) => panic!("invalid CROSS_TARGET_RUNNER: {err}"),
+	};
 	let dir = std::env::temp_dir().join(format!("wind-log-level-{}-{}", std::process::id(), args.join("_")));
 	let _ = std::fs::remove_dir_all(&dir);
 	std::fs::create_dir_all(&dir).expect("the scratch working directory must be creatable");
-	let output = Command::new(exe)
+	let output = command
 		.args(args)
 		.current_dir(&dir)
 		.output()
@@ -33,6 +45,21 @@ fn stderr(output: &std::process::Output) -> String {
 	String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn assert_version_succeeded(output: &std::process::Output) {
+	assert!(
+		output.status.success(),
+		"--version must exit 0, status: {}, stdout: {}, stderr: {}",
+		output.status,
+		stdout(output),
+		stderr(output)
+	);
+	assert!(
+		stdout(output).lines().any(|line| line.starts_with("wind ")),
+		"--version must print the version, got stdout: {}",
+		stdout(output)
+	);
+}
+
 #[test]
 fn binary_help_documents_the_log_level_flag() {
 	let output = run_wind(&["--help"]);
@@ -46,7 +73,8 @@ fn binary_help_documents_the_log_level_flag() {
 
 #[test]
 fn error_level_suppresses_the_info_startup_line() {
-	let output = run_wind(&["--log-level", "error"]);
+	let output = run_wind(&["--version", "--log-level", "error"]);
+	assert_version_succeeded(&output);
 	let out = stdout(&output);
 	assert!(
 		!out.contains("Wind starting"),
@@ -56,8 +84,9 @@ fn error_level_suppresses_the_info_startup_line() {
 
 #[test]
 fn default_and_info_levels_emit_the_info_startup_line() {
-	for args in [vec![], vec!["--log-level", "info"]] {
+	for args in [vec!["--version"], vec!["--version", "--log-level", "info"]] {
 		let output = run_wind(&args);
+		assert_version_succeeded(&output);
 		let out = stdout(&output);
 		assert!(
 			out.contains("Wind starting"),
