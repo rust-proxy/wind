@@ -310,7 +310,19 @@ mod tests {
 	#[test]
 	fn tls_config_without_a_preinstalled_crypto_provider_does_not_panic() {
 		let exe = std::env::current_exe().expect("test executable path");
-		let output = std::process::Command::new(exe)
+		// Cross wraps the parent test harness, but a directly spawned child
+		// also needs its runner to execute on a foreign architecture.
+		let mut command = match std::env::var("CROSS_TARGET_RUNNER") {
+			Ok(runner) => {
+				let mut parts = runner.split_whitespace();
+				let mut command = std::process::Command::new(parts.next().expect("CROSS_TARGET_RUNNER must not be empty"));
+				command.args(parts).arg(exe);
+				command
+			}
+			Err(std::env::VarError::NotPresent) => std::process::Command::new(exe),
+			Err(err) => panic!("invalid CROSS_TARGET_RUNNER: {err}"),
+		};
+		let output = command
 			.args(["no_provider_child_worker", "--test-threads=1", "--nocapture"])
 			.env(CHILD_ENV, "1")
 			.output()
