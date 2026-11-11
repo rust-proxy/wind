@@ -15,7 +15,7 @@
 //!     [..]  destination addr    (SOCKS5 address, see below)
 //!
 //! packet (both directions, repeated), non-connect mode:
-//!     [..]  address             (SOCKS5 address: remote peer)
+//!     [..]  address             (UoT address: remote peer)
 //!     [2]   length              (u16, big-endian, = payload length)
 //!     [..]  payload
 //! ```
@@ -28,6 +28,9 @@
 //!     IPv6:   [16] addr           + [2] port (big-endian)
 //!     domain: [1] len + [len] str + [2] port (big-endian)
 //! ```
+//!
+//! Packet address types are 0x00 (IPv4), 0x01 (IPv6), 0x02 (domain); only
+//! the initial request uses SOCKS5 types.
 //!
 //! We always use **non-connect** mode (`is_connect = false`) so a single tunnel
 //! can fan out to many destinations: every packet carries its own address.
@@ -42,24 +45,25 @@ pub const MAGIC_ADDRESS: &str = "sp.v2.udp-over-tcp.arpa";
 /// Protocol version implemented by this module.
 pub const VERSION: u8 = 2;
 
-// SOCKS5 `ATYP` codepoints.
-const ATYP_IPV4: u8 = 0x01;
-const ATYP_DOMAIN: u8 = 0x03;
-const ATYP_IPV6: u8 = 0x04;
+// UoT packet codepoints differ from the SOCKS5 request header.
+const ATYP_IPV4: u8 = 0x00;
+const ATYP_DOMAIN: u8 = 0x02;
+const ATYP_IPV6: u8 = 0x01;
 
-/// Append a SOCKS5-encoded address (type + addr + 2-byte big-endian port).
+/// Append an address (type + addr + 2-byte big-endian port), selecting the
+/// SOCKS5 request types or UoT packet types.
 ///
 /// Returns an error for domains longer than 255 bytes, which cannot be encoded
 /// in the single length octet.
-fn write_addr(buf: &mut Vec<u8>, addr: &TargetAddr) -> io::Result<()> {
+fn write_addr(buf: &mut Vec<u8>, addr: &TargetAddr, request: bool) -> io::Result<()> {
 	match addr {
 		TargetAddr::IPv4(ip, port) => {
-			buf.push(ATYP_IPV4);
+			buf.push(if request { 0x01 } else { ATYP_IPV4 });
 			buf.extend_from_slice(&ip.octets());
 			buf.extend_from_slice(&port.to_be_bytes());
 		}
 		TargetAddr::IPv6(ip, port) => {
-			buf.push(ATYP_IPV6);
+			buf.push(if request { 0x04 } else { ATYP_IPV6 });
 			buf.extend_from_slice(&ip.octets());
 			buf.extend_from_slice(&port.to_be_bytes());
 		}
@@ -69,7 +73,7 @@ fn write_addr(buf: &mut Vec<u8>, addr: &TargetAddr) -> io::Result<()> {
 				.len()
 				.try_into()
 				.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "UoT domain longer than 255 bytes"))?;
-			buf.push(ATYP_DOMAIN);
+			buf.push(if request { 0x03 } else { ATYP_DOMAIN });
 			buf.push(len);
 			buf.extend_from_slice(bytes);
 			buf.extend_from_slice(&port.to_be_bytes());
@@ -124,7 +128,7 @@ fn read_addr<R: Read>(r: &mut R) -> io::Result<TargetAddr> {
 pub fn encode_request(destination: &TargetAddr) -> io::Result<Vec<u8>> {
 	let mut buf = Vec::with_capacity(1 + 1 + 16 + 2);
 	buf.push(0u8); // is_connect = false
-	write_addr(&mut buf, destination)?;
+	write_addr(&mut buf, destination, true)?;
 	Ok(buf)
 }
 
@@ -137,7 +141,7 @@ pub fn encode_packet_into(buf: &mut Vec<u8>, destination: &TargetAddr, payload: 
 		.len()
 		.try_into()
 		.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "UoT payload exceeds 65535 bytes"))?;
-	write_addr(buf, destination)?;
+	write_addr(buf, destination, false)?;
 	buf.extend_from_slice(&len.to_be_bytes());
 	buf.extend_from_slice(payload);
 	Ok(())
@@ -201,9 +205,23 @@ mod tests {
 	fn request_header_is_non_connect() {
 		let req = encode_request(&TargetAddr::IPv4("8.8.8.8".parse().unwrap(), 53)).unwrap();
 		assert_eq!(req[0], 0, "is_connect must be false");
-		assert_eq!(req[1], ATYP_IPV4);
+		assert_eq!(req[1], 0x01, "request uses SOCKS5 types, not UoT packet types");
 		assert_eq!(&req[2..6], &[8, 8, 8, 8]);
 		assert_eq!(u16::from_be_bytes([req[6], req[7]]), 53);
+	}
+
+	#[test]
+	fn packet_matches_sing_uot_wire_format() {
+		let addr = TargetAddr::IPv4("127.0.0.1".parse().unwrap(), 53);
+		assert_eq!(
+			encode_packet(&addr, b"hi").unwrap(),
+			[0, 127, 0, 0, 1, 0, 53, 0, 2, b'h', b'i']
+		);
+		let domain = TargetAddr::Domain("a.test".into(), 443);
+		assert_eq!(
+			encode_packet(&domain, b"").unwrap(),
+			[2, 6, b'a', b'.', b't', b'e', b's', b't', 1, 187, 0, 0]
+		);
 	}
 
 	#[test]

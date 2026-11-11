@@ -947,7 +947,7 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 [[package]]
 name = "cronet-rs"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?branch=main#fc80ff9d97b7288f5323527e93f3ea2b6167969b"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=2571154372c16911ff8970aa308d5632a92eb2ff#2571154372c16911ff8970aa308d5632a92eb2ff"
 dependencies = [
  "cronet-sys",
  "log",
@@ -958,7 +958,7 @@ dependencies = [
 [[package]]
 name = "cronet-sys"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?branch=main#fc80ff9d97b7288f5323527e93f3ea2b6167969b"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=2571154372c16911ff8970aa308d5632a92eb2ff#2571154372c16911ff8970aa308d5632a92eb2ff"
 dependencies = [
  "libloading",
  "sha2",

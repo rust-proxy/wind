@@ -113,28 +113,17 @@ NaiveOutbound (cronet-rs)
 ### Data relay
 
 ```
-┌─────────────────────────┐
-│    tokio async task     │
-│  ┌───────────────────┐  │
-│  │ select! loop      │  │
-│  │ stream.read()    ──┼──┐ write_tx
-│  │ read_rx.recv()  ◀──┼──┘ read_tx
-│  └───────────────────┘  │
-└─────────────────────────┘
-         │ channels
-┌─────────────────────────┐
-│   std::thread (sync)    │
-│  ┌───────────────────┐  │
-│  │ NaiveConn         │  │  ← owns the Cronet stream
-│  │ read() / write()  │  │  ← blocking FFI calls
-│  └───────────────────┘  │
-└─────────────────────────┘
+tokio stream.read()  ── bounded queue ──▶ blocking NaiveWriteHalf
+tokio stream.write() ◀─ bounded queue ─── blocking NaiveReadHalf
+                                              │
+                                   shared Cronet stream/engine
 ```
 
-When the relay ends, the channel closures make the sync thread unwind, and the
-async side hands its `JoinHandle` to a session guard that joins it on a blocking
-thread. The thread and the socket inside its `NaiveConn` are therefore reclaimed
-instead of being detached and left to outlive the tunnel.
+Reading and writing run on separate workers: an idle blocking read cannot stall
+the next outgoing request. Each worker retains the engine until its native I/O
+half is dropped. When the relay ends or is cancelled, a guard cancels native
+I/O, channels close, and session guards join both workers on blocking threads.
+Read buffers remain alive until Cronet reports completion or cancellation.
 
 ## UDP (UDP-over-TCP v2)
 
@@ -155,9 +144,8 @@ CONNECT tunnel:
 > TCP CONNECT and will reject the magic authority.
 
 ```
-UdpStream ──frame──▶ [uplink chan] ──▶ ┌── std::thread (owns NaiveConn) ──┐
-UdpStream ◀─packet── [downlink chan] ◀─┤  write_all(frame) / read_packet  │ ──▶ [Naive/UoT server]
-                                       └──────────────────────────────────┘
+UdpStream ── frame queue ──▶ write worker ──▶ Naive/UoT server
+UdpStream ◀─ packet queue ── read worker  ◀── Naive/UoT server
 ```
 
 ## Building
