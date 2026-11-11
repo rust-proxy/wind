@@ -72,7 +72,7 @@ application wiring in `crates/wind`.
   quiche providers; do not fix one backend by silently changing behavior in the
   other.
 - Preserve feature hygiene. Test the smallest meaningful feature set when
-  changing optional quinn, quiche, server, client, masquerade, ACME, or TLS
+  changing optional quinn, server, client, masquerade, ACME, or TLS
   provider code, and avoid making optional dependencies unconditional.
 - Keep `wind-rule` a leaf crate. Routing vocabulary belongs there; ACL lowering,
   chain semantics, and verdict evaluation belong in `wind-acl`.
@@ -93,9 +93,11 @@ editing either one, inspect its own status and instructions and validate it from
 its own root. Do not treat an uncommitted submodule checkout as an ordinary
 directory change.
 
-The workspace intentionally patches `datagram-socket` and `tokio-quiche` to
-paths under `forks/quiche/`. Preserve those patches unless the task explicitly
-replaces them with a verified alternative. Initialize submodules only when the
+The workspace intentionally patches `quiche`, `datagram-socket`, and
+`tokio-quiche` to one fixed Git revision of `rust-proxy/quiche`. Keep that
+revision synchronized with the `forks/quiche/` reference and editing submodule.
+Preserve these patches unless the task explicitly replaces them with a verified
+alternative. Initialize submodules only when the
 task requires their contents:
 
 ```sh

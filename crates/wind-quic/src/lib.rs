@@ -53,5 +53,4 @@ pub use wind_core::quic::QuicCongestionControl;
 #[cfg(feature = "quinn")]
 pub mod quinn;
 
-#[cfg(feature = "quiche")]
 pub mod quiche;

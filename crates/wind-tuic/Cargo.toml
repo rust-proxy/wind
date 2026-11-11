@@ -52,15 +52,11 @@ ring = [
     "quinn/rustls-ring"
 ]
 
-# Quiche (tokio-quiche) backend — the TUIC protocol runs through the same
-# backend-agnostic core over `wind_quic::quiche::QuicheConnection`.
-quiche = ["wind-quic/quiche"]
-
 [dependencies]
 wind-core = { path = "../wind-core", features = ["quic"] }
 # Backend-agnostic QUIC abstraction. The TUIC protocol core is generic over
-# `wind_quic::QuicConnection`; the `quinn`/`quiche` features enable the matching
-# wind-quic backend.
+# `wind_quic::QuicConnection`; Quiche is always available, while `quinn` enables
+# the optional Quinn backend.
 wind-quic = { path = "../wind-quic", default-features = false }
 
 # Wire codecs (formerly in tuic-core)

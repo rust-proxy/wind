@@ -4,7 +4,6 @@
 //! and echo, send a uni stream, round-trip a datagram, confirm the keying
 //! material matches on both ends, and close.
 
-#![cfg(any(feature = "quinn", feature = "quiche"))]
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -218,7 +217,6 @@ async fn quinn_loopback() {
 	run_case(server_conn, client_conn).await;
 }
 
-#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_loopback() {
 	use wind_quic::quiche;
@@ -260,13 +258,6 @@ async fn quinn_bulk_transfer() {
 	run_bulk(server_conn, client_conn).await;
 }
 
-// x86_64 only. Pushing ~4 MiB drives quiche 0.29's congestion controller hard,
-// which is unreliable off x86_64: it panics in PRR recovery on 32-bit
-// (`congestion/prr.rs` overflow) and paces so slowly on the aarch64 CI runners
-// that the transfer times out. Both are upstream quiche limitations unrelated
-// to the (architecture-independent) driver buffering this test exercises, which
-// x86_64 covers; the `quinn_bulk_transfer` variant still runs everywhere.
-#[cfg(all(feature = "quiche", target_arch = "x86_64"))]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_bulk_transfer() {
 	use wind_quic::quiche;
@@ -308,7 +299,6 @@ async fn quinn_reset_visibility() {
 	run_reset_visibility(server_conn, client_conn).await;
 }
 
-#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_reset_visibility() {
 	use wind_quic::quiche;
@@ -339,7 +329,6 @@ async fn quiche_reset_visibility() {
 /// fault because BoringSSL's HKDF expansion loop never runs for a zero length.
 /// This test drives the whole path — including the FFI call — with an empty
 /// buffer.
-#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_zero_length_export_succeeds() {
 	use wind_quic::quiche;
@@ -451,7 +440,6 @@ async fn quinn_byte_stats_survives_close() {
 	byte_stats_survives_close(server_conn, client_conn).await;
 }
 
-#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_byte_stats_survives_close() {
 	use wind_quic::quiche;
@@ -476,7 +464,6 @@ async fn quiche_byte_stats_survives_close() {
 /// The quiche client must bind its local UDP socket on the peer's address
 /// family. It used to always bind `0.0.0.0:0`, so dialing an IPv6 peer failed
 /// with an address-family mismatch before the handshake could start.
-#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_connects_to_ipv6_peer() {
 	use wind_quic::quiche;
@@ -665,57 +652,23 @@ async fn quinn_client_binds_the_configured_address_family() {
 	let _ = tokio::time::timeout(Duration::from_secs(2), client_conn.closed()).await;
 }
 
-/// Flood `client` with datagrams in bursts while a reader drains them slower
-/// than they arrive.
-///
-/// Models a handle that lags behind the peer: the flood must not be absorbed
-/// into an unbounded driver queue. Returns how many datagrams the flood sent
-/// (`sent`), how many arrived (`received`), how many the driver dropped in
-/// total (`dropped`), and the drop count observed at the moment the flood
-/// stopped (`dropped_at_stop`). A healthy run has `dropped_at_stop > 0`
-/// *while* the flood is still delivering datagrams; an unbounded queue drops
-/// nothing no matter how far behind the reader is, so it can never produce
-/// that.
-#[cfg(feature = "quiche")]
+/// Hold the application reader until the flood observes a driver queue drop.
+/// This avoids depending on architecture-specific scheduling or timer
+/// resolution to make a concurrently draining reader slower than the sender.
+/// Returns received, sent, final drops, and drops observed before reading.
 async fn read_datagrams_during_flood(
 	server: &wind_quic::quiche::QuicheConnection,
 	client: &wind_quic::quiche::QuicheConnection,
 ) -> (usize, usize, u64, u64) {
-	/// The burst has to be large enough to outrun the reader for the length of
-	/// a batch — otherwise the queue never fills and a bounded queue is
-	/// indistinguishable from an unbounded one — while staying under the
-	/// kernel's UDP receive buffer so the drops this test counts are the
-	/// driver's, not the kernel's. A 4096-datagram burst delivered every sent
-	/// datagram below the driver's cap on the development host.
 	const BATCH: usize = 512;
 	const MAX_BATCHES: usize = 64;
 
-	let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+	let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
 	let reader = async {
+		let _ = stop_rx.await;
 		let mut received = 0usize;
-		loop {
-			tokio::select! {
-				res = client.read_datagram() => match res {
-					Ok(_) => received += 1,
-					Err(_) => break,
-				},
-				_ = &mut stop_rx => {
-					// The flood is over; drain whatever is already queued so
-					// the caller can compare arrivals against sends.
-					while tokio::time::timeout(Duration::from_millis(100), client.read_datagram())
-						.await
-						.is_ok()
-					{
-						received += 1;
-					}
-					break
-				}
-			}
-			// Deliberately drain slower than the bursts deliver, so the
-			// driver's queue is what has to absorb the difference.
-			if received.is_multiple_of(4) {
-				tokio::time::sleep(Duration::from_millis(1)).await;
-			}
+		while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(100), client.read_datagram()).await {
+			received += 1;
 		}
 		received
 	};
@@ -754,7 +707,6 @@ async fn read_datagrams_during_flood(
 /// already capped at 2048. The flood below therefore has to start dropping
 /// datagrams while it is still delivering them; if the queue were unbounded
 /// nothing would ever be dropped, no matter how far behind the reader is.
-#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_inbound_datagram_queue_is_bounded() {
 	use wind_quic::quiche;

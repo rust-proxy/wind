@@ -9,6 +9,7 @@ members = [
 # as workspace members (otherwise fmt/clippy/-D warnings would apply to upstream
 # code). Excluding them keeps cargo treating them as plain (cap-lint'd) deps.
 exclude = [
+    "forks/quiche",
     "patches/datagram-socket",
     "patches/tokio-quiche",
     # Submodule fork of rustls-acme (forks/). Used via a git dependency pinned to
@@ -34,8 +35,9 @@ quinn-proto = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", d
 quinn-congestions = { git = "https://github.com/proxy-rs/quinn-congestions.git", default-features = false }
 
 [patch.crates-io]
-datagram-socket = { path = "forks/quiche/datagram-socket" }
-tokio-quiche = { path = "forks/quiche/tokio-quiche" }
+quiche = { git = "https://github.com/rust-proxy/quiche", rev = "b25abcc4077ef03de1272832d6427ecfe761c09c" }
+datagram-socket = { git = "https://github.com/rust-proxy/quiche", rev = "b25abcc4077ef03de1272832d6427ecfe761c09c" }
+tokio-quiche = { git = "https://github.com/rust-proxy/quiche", rev = "b25abcc4077ef03de1272832d6427ecfe761c09c" }
 
 [profile.release]
 opt-level = 3

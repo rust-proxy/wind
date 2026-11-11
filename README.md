@@ -2,6 +2,20 @@
 
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/rust-proxy/wind?utm_source=badge)
 
+## QUIC backends
+
+Quiche is compiled unconditionally by `wind-quic` and `wind-tuic`, including
+32-bit targets and `--no-default-features` builds. There is no `quiche` Cargo
+feature. Quinn remains an optional backend with a separately selected Rustls
+crypto provider. Applications still select their backend at runtime.
+
+Building the Quiche backend requires the target's BoringSSL C/C++ toolchain,
+CMake and libclang; Windows builds also require NASM. Cross builds need the
+corresponding compiler and sysroot. The workspace patches the core `quiche`,
+`tokio-quiche` and `datagram-socket` crates to the same pinned Git revision of
+`rust-proxy/quiche` so every backend consumer receives the same portability
+fixes. The `forks/quiche` submodule is the reference and editing checkout.
+
 ## Naive / cronet
 
 The `naive` outbound (`crates/wind-naive`) uses Chromium Cronet through the

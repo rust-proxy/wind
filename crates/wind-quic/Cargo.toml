@@ -7,9 +7,8 @@ description = "Backend-agnostic QUIC abstraction unifying quinn and quiche for t
 license = "MIT OR Apache-2.0"
 
 [features]
-# No backend is selected by default; consumers opt into one (or both). The
-# crate's own tests run with `--features quinn,quiche,aws-lc-rs` (or `ring`
-# instead of `aws-lc-rs` for the ring crypto provider).
+# Quiche is always available. Quinn and its Rustls crypto provider remain
+# optional; test both backends with `--features quinn,aws-lc-rs` or `quinn,ring`.
 default = []
 
 # quinn backend. The rustls crypto provider is selected separately via the
@@ -34,15 +33,6 @@ aws-lc-rs = [
 ring = [
     "rustls/ring",
     "quinn/rustls-ring",
-]
-
-# quiche / tokio-quiche backend.
-quiche = [
-    "dep:tokio-quiche",
-    "dep:boring",
-    "dep:boring-sys",
-    "dep:foreign-types-shared",
-    "dep:arc-swap",
 ]
 
 # HTTP/3 masquerade adapter: an `h3::quic` server surface over `QuicConnection`,
@@ -83,14 +73,14 @@ h3 = { version = "0.0.8", optional = true }
 # QUIC with quiche / tokio-quiche. `quiche_internal` unlocks
 # `quiche::Config::set_custom_bbr_params` (gated behind quiche's `internal`
 # feature) so the quiche backend can apply per-connection BBR tuning.
-tokio-quiche = { version = "0.20", optional = true, features = ["quiche_internal"] }
+tokio-quiche = { version = "0.23", features = ["quiche_internal"] }
 # `boring-sys` uses `links = "boringssl"`, so the whole graph resolves to one
 # major version. Pin 5 here (the version `forks/quiche` already adapts to via
 # its `cfg(boring_v5)` build detection) instead of leaving the choice implicit.
-boring = { version = "5", default-features = false, optional = true }
-boring-sys = { version = "5", default-features = false, optional = true }
-foreign-types-shared = { version = "0.3", optional = true }
-arc-swap = { version = "1", optional = true }
+boring = { version = "5", default-features = false }
+boring-sys = { version = "5", default-features = false }
+foreign-types-shared = "0.3"
+arc-swap = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
