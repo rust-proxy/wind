@@ -45,10 +45,11 @@ Windows MSVC. Existing Apple/Android archives also support static linking.
 A supplied `CRONET_LIB_DIR` takes precedence over `download`. Linux/Windows
 static downloads remain unavailable until their release checksums are pinned.
 
+The cronet-binaries Windows build uses the static MSVC CRT (`/MT`). Match it
+with `RUSTFLAGS="-C target-feature=+crt-static"` and an explicit Rust MSVC
+`--target`; do not mix archives built for a different CRT.
+
 ## Acknowledgments
 
 - [fast-socks5](https://github.com/dizda/fast-socks5)
 - [yimu-rs](https://github.com/yfaming/yimu-rs)
-The cronet-binaries Windows build uses the static MSVC CRT (`/MT`). Match it
-with `RUSTFLAGS="-C target-feature=+crt-static"` and an explicit Rust MSVC
-`--target`; do not mix archives built for a different CRT.
