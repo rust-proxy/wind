@@ -42,8 +42,7 @@ CRONET_LIB_DIR=/path/to/native/lib cargo build -p wind --features naive-static
 `naive-static` takes precedence over dynamic loading. Use a matching glibc or
 musl archive on Linux, or `cronet.lib` and its generated `link_flags.txt` on
 Windows MSVC. Existing Apple/Android archives also support static linking.
-A supplied `CRONET_LIB_DIR` takes precedence over `download`. Linux/Windows
-static downloads remain unavailable until their release checksums are pinned.
+A supplied `CRONET_LIB_DIR` takes precedence over automatic downloads.
 
 The cronet-binaries Windows build uses the static MSVC CRT (`/MT`). Match it
 with `RUSTFLAGS="-C target-feature=+crt-static"` and an explicit Rust MSVC
@@ -63,8 +62,8 @@ Static linkage takes precedence when Cargo enables both backends. A supplied
 `CRONET_LIB_DIR` overrides downloading. The legacy `download` feature retains
 its existing behavior.
 
-Apple/Android assets already have pinned checksums. Linux/Windows static
-release assets are still pending publication; until then supply a local archive.
+Static archives for Linux (glibc/musl), Windows MSVC, Apple, and Android
+are pinned to the `static-20261116` release with SHA-256 verification.
 Custom unpinned assets require `CRONET_DOWNLOAD_SHA256`. Windows also downloads
 the matching `.link-flags.txt` and requires its pinned checksum or
 `CRONET_DOWNLOAD_LINK_FLAGS_SHA256`.
