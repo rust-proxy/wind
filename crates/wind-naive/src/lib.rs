@@ -600,7 +600,7 @@ where
 }
 
 /// Default search paths for `libcronet` (dynamic loading only).
-#[cfg(feature = "dynamic")]
+#[cfg(all(feature = "dynamic", not(feature = "static-link")))]
 const CRONET_SEARCH_PATHS: &[&str] = &[
 	"libcronet.so",
 	"./libcronet.so",
@@ -615,19 +615,19 @@ const CRONET_SEARCH_PATHS: &[&str] = &[
 fn load_cronet(path: Option<String>) -> eyre::Result<()> {
 	// With `static-link`, libcronet is linked at compile time — there is
 	// nothing to dlopen, so skip the search entirely.
-	#[cfg(not(feature = "dynamic"))]
+	#[cfg(any(feature = "static-link", not(feature = "dynamic")))]
 	{
 		let _ = path;
-		return Ok(());
+		Ok(())
 	}
 
-	#[cfg(feature = "dynamic")]
+	#[cfg(all(feature = "dynamic", not(feature = "static-link")))]
 	{
 		load_cronet_dynamic(path)
 	}
 }
 
-#[cfg(feature = "dynamic")]
+#[cfg(all(feature = "dynamic", not(feature = "static-link")))]
 fn load_cronet_dynamic(path: Option<String>) -> eyre::Result<()> {
 	use cronet_rs::sys::load_library;
 

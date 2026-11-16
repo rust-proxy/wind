@@ -17,7 +17,7 @@ download = ["cronet-rs/download"]
 
 [dependencies]
 # Cronet-based networking
-cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "442294cb472baaa871800c0cbfba13029119fb6b", default-features = false }
+cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "db7474fb6be2d2a2f7990210e19e6b0b3538e1e2", default-features = false }
 
 # Wind core abstractions
 wind-core = { path = "../wind-core" }

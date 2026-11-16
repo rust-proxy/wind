@@ -1,5 +1,6 @@
 //! Real Wind -> Cronet -> Docker sing-box -> container TCP half-close
-//! regressions. Set WIND_NAIVE_CRONET_LIB, then run with --ignored.
+//! regressions. In dynamic mode set WIND_NAIVE_CRONET_LIB, then run with
+//! --ignored.
 
 use std::{
 	collections::HashMap,
@@ -54,6 +55,11 @@ impl Server {
 			Err(_) => (Docker::connect_with_socket_defaults()?, "127.0.0.1".into()),
 		};
 		for image in [IMAGE, TARGET_IMAGE] {
+			// Digest-pinned fixtures can be reused without contacting the
+			// registry.
+			if image.contains("@sha256:") && docker.inspect_image(image).await.is_ok() {
+				continue;
+			}
 			let mut pull = docker.create_image(
 				Some(CreateImageOptions {
 					from_image: Some(image.into()),
@@ -338,7 +344,7 @@ async fn half_close_suite(quic: bool) -> Result<()> {
 					username: Some("half-close-test".into()),
 					password: Some("synthetic-password".into()),
 					trusted_root_certificates: Some(server.ca.clone()),
-					cronet_lib_path: Some(std::env::var("WIND_NAIVE_CRONET_LIB").context("set WIND_NAIVE_CRONET_LIB")?),
+					cronet_lib_path: std::env::var("WIND_NAIVE_CRONET_LIB").ok(),
 					quic_enabled: quic,
 					..Default::default()
 				})

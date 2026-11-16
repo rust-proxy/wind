@@ -43,3 +43,5 @@ default = []
 # Fetch and SHA-256-verify a prebuilt libcronet at build time (delegates to
 # `wind-naive/download`); opt-in so ordinary builds never touch the network.
 download = ["wind-naive/download"]
+# Embed Cronet instead of loading it at runtime; takes precedence over dynamic.
+naive-static = ["wind-naive/static-link"]
