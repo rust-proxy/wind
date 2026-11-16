@@ -178,24 +178,29 @@ search paths); in static mode the archive is staged and linked automatically.
 ## Half-close end-to-end tests
 
 `tests/half_close_e2e.rs` exercises Wind's public outbound through a real Cronet
-library, a local sing-box Naive server, and a separate loopback TCP destination.
+library, a Docker sing-box Naive server, and a separate TCP destination on the test host.
 The destination waits for request EOF before sending a 256 KiB response. Both
 HTTP/2 and HTTP/3 cover empty, 7-byte, and 256 KiB requests, including repeated
 client shutdown. The HTTP/3 server listens only on UDP to prevent H2 fallback.
-Temporary certificates, configuration, and server processes are cleaned up on
+Temporary certificates and configuration are uploaded through the Docker API;
+containers are removed on
 success or failure. No production configuration or public proxy is used.
 
-Install a sing-box build with Naive inbound and QUIC support (tested with
-1.14.4), then run from the Wind repository root:
+Start Docker with Linux containers. The tests pull the pinned
+`ghcr.io/sagernet/sing-box:v1.14.4` image; no host sing-box binary is used.
+Run from the Wind repository root:
 
 ```powershell
-$env:WIND_NAIVE_SING_BOX = 'C:\tools\sing-box.exe'
+$env:CLIENT_IP = '<test-host IPv4 reachable from the container>'
 $env:WIND_NAIVE_CRONET_LIB = 'C:\tools\libcronet-windows-amd64.dll'
 cargo test -p wind-naive --test half_close_e2e --locked -- --ignored
 ```
 
-On Unix, export the same variables with the corresponding executable/shared
-library paths. These tests are explicitly ignored in ordinary test runs; when
+Set `DOCKER_HOST` for a remote daemon (TCP/HTTP or a local socket); otherwise
+the platform default Docker socket is used. `CLIENT_IP` must route back to the
+test host, with its ephemeral TCP ports reachable through the firewall. Fixtures
+are uploaded rather than bind-mounted, including with remote daemons.
+On Unix, export the same variables with the corresponding shared library path. These tests are explicitly ignored in ordinary test runs; when
 selected, missing dependencies or startup failures fail the test instead of
 silently skipping it. Reverse-direction half-close and cancellation remain
 covered by the bridge unit tests; this interoperability suite specifically
