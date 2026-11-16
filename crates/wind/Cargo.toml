@@ -45,3 +45,5 @@ default = []
 download = ["wind-naive/download"]
 # Embed Cronet instead of loading it at runtime; takes precedence over dynamic.
 naive-static = ["wind-naive/static-link"]
+# Download only with naive-static; by itself this keeps runtime libloading.
+naive-download = ["wind-naive/download-static"]

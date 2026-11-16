@@ -226,3 +226,23 @@ needed. Docker E2E tests also run without `WIND_NAIVE_CRONET_LIB` in static mode
 The cronet-binaries Windows build uses the static MSVC CRT (`/MT`). Match it
 with `RUSTFLAGS="-C target-feature=+crt-static"` and an explicit Rust MSVC
 `--target`; do not mix archives built for a different CRT.
+
+
+### Optional static archive download
+
+```sh
+cargo build -p wind-naive --features static-link,download-static
+```
+
+The download switch does not select a backend. In dynamic mode it keeps
+runtime `libloading` and performs no download. Combined with the static switch it
+fetches the target's static archive and verifies SHA-256 before linking.
+Static linkage takes precedence when Cargo enables both backends. A supplied
+`CRONET_LIB_DIR` overrides downloading. The legacy `download` feature retains
+its existing behavior.
+
+Apple/Android assets already have pinned checksums. Linux/Windows static
+release assets are still pending publication; until then supply a local archive.
+Custom unpinned assets require `CRONET_DOWNLOAD_SHA256`. Windows also downloads
+the matching `.link-flags.txt` and requires its pinned checksum or
+`CRONET_DOWNLOAD_LINK_FLAGS_SHA256`.
