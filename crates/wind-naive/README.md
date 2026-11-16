@@ -121,7 +121,11 @@ tokio stream.write() ◀─ bounded queue ─── blocking NaiveReadHalf
 
 Reading and writing run on separate workers: an idle blocking read cannot stall
 the next outgoing request. Each worker retains the engine until its native I/O
-half is dropped. When the relay ends or is cancelled, a guard cancels native
+half is dropped. TCP EOF closes only its own direction: local EOF drains the
+write queue and sends native `END_STREAM`, while responses continue until remote
+EOF. Remote EOF shuts down the local write half without stopping uploads.
+The relay waits for both directions on clean shutdown and propagates I/O errors.
+When the relay ends or is cancelled, a guard cancels native
 I/O, channels close, and session guards join both workers on blocking threads.
 Read buffers remain alive until Cronet reports completion or cancellation.
 
@@ -170,6 +174,32 @@ into `OUT_DIR` and verifies its **SHA-256** against a pinned checksum. No networ
 is touched unless the feature is enabled. In dynamic mode the downloaded path is
 tried automatically (after an explicit `cronet_lib_path`, before the system
 search paths); in static mode the archive is staged and linked automatically.
+
+## Half-close end-to-end tests
+
+`tests/half_close_e2e.rs` exercises Wind's public outbound through a real Cronet
+library, a local sing-box Naive server, and a separate loopback TCP destination.
+The destination waits for request EOF before sending a 256 KiB response. Both
+HTTP/2 and HTTP/3 cover empty, 7-byte, and 256 KiB requests, including repeated
+client shutdown. The HTTP/3 server listens only on UDP to prevent H2 fallback.
+Temporary certificates, configuration, and server processes are cleaned up on
+success or failure. No production configuration or public proxy is used.
+
+Install a sing-box build with Naive inbound and QUIC support (tested with
+1.14.4), then run from the Wind repository root:
+
+```powershell
+$env:WIND_NAIVE_SING_BOX = 'C:\tools\sing-box.exe'
+$env:WIND_NAIVE_CRONET_LIB = 'C:\tools\libcronet-windows-amd64.dll'
+cargo test -p wind-naive --test half_close_e2e --locked -- --ignored
+```
+
+On Unix, export the same variables with the corresponding executable/shared
+library paths. These tests are explicitly ignored in ordinary test runs; when
+selected, missing dependencies or startup failures fail the test instead of
+silently skipping it. Reverse-direction half-close and cancellation remain
+covered by the bridge unit tests; this interoperability suite specifically
+guards responses to EOF-delimited client requests.
 
 ## License
 

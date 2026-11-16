@@ -19,7 +19,7 @@ use cronet_rs::naive_client::{NaiveClient, NaiveClientConfig, QuicCongestionCont
 use eyre::Context as _;
 use tokio::{
 	io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-	sync::mpsc,
+	sync::{mpsc, oneshot},
 };
 use tracing::info;
 use wind_core::{
@@ -220,7 +220,14 @@ impl Outbound for NaiveOutbound {
 		// Bridge the blocking NaiveConn to the async stream.
 		let (reader, writer, cancel) = naive_conn.into_split()?;
 		let _cancel = CancelOnDrop(cancel);
-		naive_async_bridge(reader, writer, stream, Some(client)).await
+		naive_async_bridge(
+			reader,
+			writer,
+			stream,
+			Some(client),
+			cronet_rs::naive_conn::NaiveWriteHalf::shutdown,
+		)
+		.await
 	}
 
 	/// Relay UDP through a **single** Naive CONNECT tunnel using UoT v2
@@ -469,8 +476,7 @@ async fn naive_uot_bridge(
 	Ok(())
 }
 
-/// Relay a bridge's local stream and its blocking I/O thread until either side
-/// ends.
+/// Relay both directions independently until both reach EOF, or either fails.
 ///
 /// Owns the relay's **single** read buffer: `read` fills it from the start and
 /// reports the filled prefix, so the next read reuses it as is — no fresh
@@ -484,38 +490,40 @@ async fn naive_uot_bridge(
 /// relay, not one per chunk — can be asserted without a Cronet engine.
 async fn relay_local_and_naive(
 	stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
-	naive_write_tx: &mpsc::Sender<Vec<u8>>,
-	naive_read_rx: &mut mpsc::Receiver<Vec<u8>>,
-) {
-	let mut local_buf = vec![0u8; NAIVE_BRIDGE_CHUNK];
-
-	loop {
-		tokio::select! {
-			result = stream.read(&mut local_buf) => {
-				match result {
-					Ok(0) => break,
-					Ok(n) => {
-						if naive_write_tx.send(local_buf[..n].to_vec()).await.is_err() {
-							break;
-						}
-					}
-					Err(e) => {
-						tracing::debug!(error = %e, "local stream read error");
-						break;
-					}
-				}
+	naive_write_tx: mpsc::Sender<Vec<u8>>,
+	naive_read_rx: &mut mpsc::Receiver<std::io::Result<Vec<u8>>>,
+	writer_done: oneshot::Receiver<std::io::Result<()>>,
+) -> std::io::Result<()> {
+	let (mut local_read, mut local_write) = tokio::io::split(stream);
+	let uplink = async move {
+		let mut local_buf = vec![0u8; NAIVE_BRIDGE_CHUNK];
+		loop {
+			let n = local_read.read(&mut local_buf).await?;
+			if n == 0 {
+				break;
 			}
-			data = naive_read_rx.recv() => {
-				let Some(data) = data else { break; };
-				if let Err(e) = stream.write_all(&data).await {
-					tracing::debug!(error = %e, "local stream write error");
-					break;
-				}
-				let _ = stream.flush().await;
-			}
-			else => break,
+			naive_write_tx
+				.send(local_buf[..n].to_vec())
+				.await
+				.map_err(std::io::Error::other)?;
 		}
-	}
+		// Closing this queue lets the worker drain every queued byte before
+		// sending END_STREAM. It does not cancel the independent reader.
+		drop(naive_write_tx);
+		Ok::<_, std::io::Error>(())
+	};
+	let downlink = async {
+		while let Some(data) = naive_read_rx.recv().await {
+			local_write.write_all(&data?).await?;
+			local_write.flush().await?;
+		}
+		local_write.shutdown().await
+	};
+	let writer = async { writer_done.await.map_err(std::io::Error::other)? };
+	// Observe worker errors even while the local reader is idle. A successful
+	// half-close only completes its own future; errors cancel the whole relay.
+	tokio::try_join!(uplink, downlink, writer)?;
+	Ok(())
 }
 
 /// Bridge data between a blocking Cronet connection
@@ -531,19 +539,22 @@ async fn relay_local_and_naive(
 /// Generic over the connection so the relay's shutdown contract — including
 /// that the I/O thread is handed to a [`JoinSession`] instead of being
 /// detached — can be driven by a test double without a Cronet engine.
-async fn naive_async_bridge<R, W>(
+async fn naive_async_bridge<R, W, S>(
 	reader: R,
 	writer: W,
 	mut stream: impl AsyncRead + AsyncWrite + Unpin,
 	client: Option<Arc<tokio::sync::RwLock<NaiveClient>>>,
+	shutdown_write: S,
 ) -> eyre::Result<()>
 where
 	R: Read + Send + 'static,
 	W: Write + Send + 'static,
+	S: FnOnce(&mut W) -> std::io::Result<()> + Send + 'static,
 {
 	const QUEUE: usize = 64;
 	let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(QUEUE);
-	let (read_tx, mut read_rx) = mpsc::channel::<Vec<u8>>(QUEUE);
+	let (read_tx, mut read_rx) = mpsc::channel::<std::io::Result<Vec<u8>>>(QUEUE);
+	let (writer_done_tx, writer_done_rx) = oneshot::channel();
 	let writer_client = client.clone();
 	// Install each guard immediately, including on partial startup and task
 	// cancellation. Keep the engine alive until native I/O has finished.
@@ -551,11 +562,14 @@ where
 		spawn_io_thread("wind-naive-write", move || {
 			let _client = writer_client;
 			let mut writer = writer;
-			while let Some(data) = write_rx.blocking_recv() {
-				if writer.write_all(&data).and_then(|_| writer.flush()).is_err() {
-					break;
+			let result = (|| {
+				while let Some(data) = write_rx.blocking_recv() {
+					writer.write_all(&data)?;
+					writer.flush()?;
 				}
-			}
+				shutdown_write(&mut writer)
+			})();
+			let _ = writer_done_tx.send(result);
 		})
 		.context("spawn wind-naive-write thread")?,
 	);
@@ -566,9 +580,13 @@ where
 			let mut buf = [0u8; NAIVE_BRIDGE_CHUNK];
 			loop {
 				match reader.read(&mut buf) {
-					Ok(0) | Err(_) => break,
+					Ok(0) => break,
+					Err(error) => {
+						let _ = read_tx.blocking_send(Err(error));
+						break;
+					}
 					Ok(n) => {
-						if read_tx.blocking_send(buf[..n].to_vec()).is_err() {
+						if read_tx.blocking_send(Ok(buf[..n].to_vec())).is_err() {
 							break;
 						}
 					}
@@ -577,7 +595,7 @@ where
 		})
 		.context("spawn wind-naive-io thread")?,
 	);
-	relay_local_and_naive(&mut stream, &write_tx, &mut read_rx).await;
+	relay_local_and_naive(&mut stream, write_tx, &mut read_rx, writer_done_rx).await?;
 	Ok(())
 }
 
@@ -748,6 +766,142 @@ mod tests {
 
 	static BRIDGE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+	async fn wait_for_workers(before: usize) {
+		tokio::time::timeout(std::time::Duration::from_secs(2), async {
+			while reaped_io_threads() < before + 2 {
+				tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+			}
+		})
+		.await
+		.unwrap();
+	}
+
+	fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+		let (server, _) = listener.accept().unwrap();
+		for stream in [&client, &server] {
+			stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+			stream.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+		}
+		(client, server)
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn local_half_close_preserves_eof_delimited_response() {
+		let _guard = BRIDGE_TEST_LOCK.lock().await;
+		let before = reaped_io_threads();
+		let (native, mut server) = tcp_pair();
+		let payload = vec![0x5a; 256 * 1024];
+		let expected = payload.clone();
+		let server = std::thread::spawn(move || {
+			let mut request = Vec::new();
+			server.read_to_end(&mut request).unwrap();
+			assert_eq!(request, expected);
+			// No response is possible before the bridge forwards the write EOF.
+			server.write_all(&request).unwrap();
+			server.shutdown(std::net::Shutdown::Write).unwrap();
+		});
+		let (local, mut peer) = tokio::io::duplex(1024);
+		let bridge = naive_async_bridge(native.try_clone().unwrap(), native, local, None, |writer| {
+			writer.shutdown(std::net::Shutdown::Write)
+		});
+		let client = async {
+			peer.write_all(&payload).await.unwrap();
+			peer.shutdown().await.unwrap();
+			peer.shutdown().await.unwrap();
+			let mut response = Vec::new();
+			peer.read_to_end(&mut response).await.unwrap();
+			assert_eq!(response, payload);
+		};
+		tokio::time::timeout(std::time::Duration::from_secs(10), async {
+			let (result, ()) = tokio::join!(bridge, client);
+			result.unwrap();
+		})
+		.await
+		.unwrap();
+		server.join().unwrap();
+		wait_for_workers(before).await;
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn remote_half_close_preserves_request_direction() {
+		let _guard = BRIDGE_TEST_LOCK.lock().await;
+		let before = reaped_io_threads();
+		let (native, mut server) = tcp_pair();
+		let server = std::thread::spawn(move || {
+			server.write_all(b"response").unwrap();
+			server.shutdown(std::net::Shutdown::Write).unwrap();
+			let mut request = Vec::new();
+			server.read_to_end(&mut request).unwrap();
+			assert_eq!(request, b"request after remote EOF");
+		});
+		let (local, mut peer) = tokio::io::duplex(8);
+		let bridge = naive_async_bridge(native.try_clone().unwrap(), native, local, None, |writer| {
+			writer.shutdown(std::net::Shutdown::Write)
+		});
+		let client = async {
+			let mut response = Vec::new();
+			peer.read_to_end(&mut response).await.unwrap();
+			assert_eq!(response, b"response");
+			peer.write_all(b"request after remote EOF").await.unwrap();
+			peer.shutdown().await.unwrap();
+		};
+		tokio::time::timeout(std::time::Duration::from_secs(10), async {
+			let (result, ()) = tokio::join!(bridge, client);
+			result.unwrap();
+		})
+		.await
+		.unwrap();
+		server.join().unwrap();
+		wait_for_workers(before).await;
+	}
+
+	#[tokio::test]
+	async fn bridge_reports_native_shutdown_failure() {
+		let _guard = BRIDGE_TEST_LOCK.lock().await;
+		let before = reaped_io_threads();
+		let (local, mut peer) = tokio::io::duplex(8);
+		peer.shutdown().await.unwrap();
+		let result = tokio::time::timeout(
+			std::time::Duration::from_secs(2),
+			naive_async_bridge(std::io::empty(), std::io::sink(), local, None, |_| {
+				Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "shutdown failed"))
+			}),
+		)
+		.await
+		.unwrap();
+		assert!(result.unwrap_err().to_string().contains("shutdown failed"));
+		wait_for_workers(before).await;
+	}
+
+	#[tokio::test]
+	async fn bridge_reports_native_write_failure_while_local_reader_is_idle() {
+		let _guard = BRIDGE_TEST_LOCK.lock().await;
+		let before = reaped_io_threads();
+		struct FailedWriter;
+		impl Write for FailedWriter {
+			fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+				Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "write failed"))
+			}
+
+			fn flush(&mut self) -> std::io::Result<()> {
+				Ok(())
+			}
+		}
+		let (local, mut peer) = tokio::io::duplex(8);
+		peer.write_all(b"request").await.unwrap();
+		// Keep the local write half open: the error must wake an idle relay.
+		let result = tokio::time::timeout(
+			std::time::Duration::from_secs(2),
+			naive_async_bridge(std::io::empty(), FailedWriter, local, None, |_| Ok(())),
+		)
+		.await
+		.unwrap();
+		assert!(result.unwrap_err().to_string().contains("write failed"));
+		wait_for_workers(before).await;
+	}
+
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn parked_read_does_not_block_uplink() {
 		let _guard = BRIDGE_TEST_LOCK.lock().await;
@@ -777,7 +931,7 @@ mod tests {
 		}
 		let (tx, rx) = std::sync::mpsc::channel();
 		let (local, mut peer) = tokio::io::duplex(64);
-		let bridge = tokio::spawn(naive_async_bridge(Reader(rx), Writer(tx), local, None));
+		let bridge = tokio::spawn(naive_async_bridge(Reader(rx), Writer(tx), local, None, |_| Ok(())));
 		peer.write_all(b"ping").await.unwrap();
 		let mut reply = [0; 4];
 		tokio::time::timeout(std::time::Duration::from_secs(2), peer.read_exact(&mut reply))
@@ -853,6 +1007,7 @@ mod tests {
 			std::io::sink(),
 			local,
 			None,
+			|_| Ok(()),
 		));
 
 		connected_rx
@@ -867,12 +1022,10 @@ mod tests {
 			"a parked io thread must not be reported as reaped"
 		);
 
-		// End the relay, then let the I/O thread unwind.
+		// Cancellation must reap workers even while a native read is parked.
 		drop(peer);
-		bridge
-			.await
-			.expect("bridge task should not panic")
-			.expect("bridge should end cleanly");
+		bridge.abort();
+		assert!(bridge.await.unwrap_err().is_cancelled());
 		let _ = release_tx.send(());
 
 		let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -964,10 +1117,21 @@ mod tests {
 		};
 
 		let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(64);
-		// Held (and silent) so the downlink branch never becomes ready.
-		let (_read_tx, mut read_rx) = mpsc::channel::<Vec<u8>>(64);
+		let (read_tx, mut read_rx) = mpsc::channel(64);
+		let (done_tx, done_rx) = oneshot::channel();
+		let worker = tokio::spawn(async move {
+			let mut received = Vec::new();
+			while let Some(chunk) = write_rx.recv().await {
+				received.push(chunk);
+			}
+			let _ = done_tx.send(Ok(()));
+			drop(read_tx);
+			received
+		});
 
-		relay_local_and_naive(&mut stream, &write_tx, &mut read_rx).await;
+		relay_local_and_naive(&mut stream, write_tx, &mut read_rx, done_rx)
+			.await
+			.unwrap();
 
 		let observed = bases.lock().unwrap().clone();
 		assert_eq!(
@@ -981,7 +1145,7 @@ mod tests {
 		);
 
 		// The chunks must still arrive whole and in order.
-		let received: Vec<Vec<u8>> = std::iter::from_fn(|| write_rx.try_recv().ok()).collect();
+		let received = worker.await.unwrap();
 		assert_eq!(received.len(), CHUNKS);
 		for (i, chunk) in received.iter().enumerate() {
 			assert_eq!(chunk, &vec![i as u8 + 1; 64], "chunk {i} must arrive unchanged");

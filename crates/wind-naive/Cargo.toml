@@ -17,7 +17,7 @@ download = ["cronet-rs/download"]
 
 [dependencies]
 # Cronet-based networking
-cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "2571154372c16911ff8970aa308d5632a92eb2ff", default-features = false }
+cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "a670a4f0e3488d0cff234d204a62de6488f09867", default-features = false }
 
 # Wind core abstractions
 wind-core = { path = "../wind-core" }
@@ -38,4 +38,8 @@ bytes = "1"
 # The bridge regression test needs a multi-thread runtime: it has to block its
 # own thread waiting for the bridge's I/O thread while that task and the thread
 # make progress elsewhere.
-tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "io-util"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "io-util", "time"] }
+rcgen = "0.14"
+serde_json = "1"
+tempfile = "3"
+time = "0.3"
