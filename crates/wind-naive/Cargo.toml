@@ -6,7 +6,7 @@ edition.workspace = true
 [features]
 # Dynamic mode (default): load libcronet at runtime via dlopen / LoadLibrary.
 # Works on Linux, Windows, Android. NOT supported on macOS/iOS.
-default = ["dynamic"]
+default = []
 dynamic = ["cronet-rs/dynamic"]
 # Static link mode: link libcronet.a at compile time (required on macOS/iOS).
 static-link = ["cronet-rs/static-link"]
@@ -14,12 +14,12 @@ static-link = ["cronet-rs/static-link"]
 # SHA-256-verify the matching prebuilt libcronet into OUT_DIR, so no manual
 # `libcronet` install is required.
 download = ["cronet-rs/download"]
-# Inert unless static-link is also enabled.
+# Download only when the selected backend is static.
 download-static = ["cronet-rs/download-static"]
 
 [dependencies]
 # Cronet-based networking
-cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "3c41616eb49120a32ecf5e2c3a18951ab47cb41f", default-features = false }
+cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "d78eca11dab62fd5e152521a3db9f54a3ae91566", default-features = false }
 
 # Wind core abstractions
 wind-core = { path = "../wind-core" }

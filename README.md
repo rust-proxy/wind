@@ -39,7 +39,7 @@ To embed a locally built Cronet archive instead of loading a shared library:
 CRONET_LIB_DIR=/path/to/native/lib cargo build -p wind --features naive-static
 ```
 
-`naive-static` takes precedence over dynamic loading. Use a matching glibc or
+On desktop, `naive-dynamic` selects runtime loading even when `naive-static` is enabled. Use a matching glibc or
 musl archive on Linux, or `cronet.lib` and its generated `link_flags.txt` on
 Windows MSVC. Existing Apple/Android archives also support static linking.
 A supplied `CRONET_LIB_DIR` takes precedence over automatic downloads.
@@ -57,9 +57,8 @@ cargo build -p wind --features naive-static,naive-download
 ```
 
 The download switch does not select a backend. In dynamic mode it keeps
-runtime `libloading` and performs no download. Combined with the static switch it
-fetches the target's static archive and verifies SHA-256 before linking.
-Static linkage takes precedence when Cargo enables both backends. A supplied
+runtime `libloading` and performs no download. With the static backend it fetches
+the target's archive and verifies SHA-256 before linking. A supplied
 `CRONET_LIB_DIR` overrides downloading. The legacy `download` feature retains
 its existing behavior.
 
