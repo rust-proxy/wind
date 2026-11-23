@@ -7,7 +7,7 @@ description.workspace = true
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["server", "client", "quinn", "aws-lc-rs", "masquerade"]
+default = ["server", "client", "quinn", "quiche", "aws-lc-rs", "masquerade"]
 decode = []
 encode = []
 # The server decodes client requests AND encodes UDP response datagrams, so it
@@ -29,6 +29,8 @@ masquerade = [
     "dep:http",
     "dep:reqwest",
 ]
+
+quiche = ["wind-quic/quiche"]
 
 # Quinn Backend
 quinn = [
@@ -55,8 +57,7 @@ ring = [
 [dependencies]
 wind-core = { path = "../wind-core", features = ["quic"] }
 # Backend-agnostic QUIC abstraction. The TUIC protocol core is generic over
-# `wind_quic::QuicConnection`; Quiche is always available, while `quinn` enables
-# the optional Quinn backend.
+# `wind_quic::QuicConnection`; each backend is enabled by its matching feature.
 wind-quic = { path = "../wind-quic", default-features = false }
 
 # Wire codecs (formerly in tuic-core)

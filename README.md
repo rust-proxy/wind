@@ -4,10 +4,11 @@
 
 ## QUIC backends
 
-Quiche is compiled unconditionally by `wind-quic` and `wind-tuic`, including
-32-bit targets and `--no-default-features` builds. There is no `quiche` Cargo
-feature. Quinn remains an optional backend with a separately selected Rustls
-crypto provider. Applications still select their backend at runtime.
+Both `wind-quic` and `wind-tuic` enable the `quiche` feature by default.
+For a Quinn-only build, set `default-features = false` and enable `quinn`
+with a Rustls provider (`ring` or `aws-lc-rs`). For example, a TUIC client
+can select `features = ["client", "quinn", "ring"]`. Enable `quiche`
+explicitly to include it when defaults are disabled.
 
 Building the Quiche backend requires the target's BoringSSL C/C++ toolchain,
 CMake and libclang; Windows builds also require NASM. Cross builds need the

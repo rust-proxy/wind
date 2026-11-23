@@ -3,8 +3,8 @@
 //!
 //! The TUIC protocol logic is written once, generic over
 //! [`wind_quic::QuicConnection`] (see [`server`] and [`client`]); the backend
-//! modules ([`quinn`], [`quiche`]) are thin connection providers selected by
-//! the optional `quinn` feature; Quiche is always available.
+//! modules are thin connection providers selected by the `quinn` and `quiche`
+//! features.
 
 pub mod proto;
 pub mod udp;
@@ -29,6 +29,7 @@ pub mod client;
 #[cfg(feature = "quinn")]
 pub mod quinn;
 
+#[cfg(feature = "quiche")]
 pub mod quiche;
 
 pub type Error = eyre::Report;

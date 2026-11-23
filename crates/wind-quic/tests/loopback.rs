@@ -4,6 +4,7 @@
 //! and echo, send a uni stream, round-trip a datagram, confirm the keying
 //! material matches on both ends, and close.
 
+#![cfg(any(feature = "quinn", feature = "quiche"))]
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -217,6 +218,7 @@ async fn quinn_loopback() {
 	run_case(server_conn, client_conn).await;
 }
 
+#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_loopback() {
 	use wind_quic::quiche;
@@ -258,6 +260,7 @@ async fn quinn_bulk_transfer() {
 	run_bulk(server_conn, client_conn).await;
 }
 
+#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_bulk_transfer() {
 	use wind_quic::quiche;
@@ -299,6 +302,7 @@ async fn quinn_reset_visibility() {
 	run_reset_visibility(server_conn, client_conn).await;
 }
 
+#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_reset_visibility() {
 	use wind_quic::quiche;
@@ -329,6 +333,7 @@ async fn quiche_reset_visibility() {
 /// fault because BoringSSL's HKDF expansion loop never runs for a zero length.
 /// This test drives the whole path — including the FFI call — with an empty
 /// buffer.
+#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_zero_length_export_succeeds() {
 	use wind_quic::quiche;
@@ -440,6 +445,7 @@ async fn quinn_byte_stats_survives_close() {
 	byte_stats_survives_close(server_conn, client_conn).await;
 }
 
+#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_byte_stats_survives_close() {
 	use wind_quic::quiche;
@@ -464,6 +470,7 @@ async fn quiche_byte_stats_survives_close() {
 /// The quiche client must bind its local UDP socket on the peer's address
 /// family. It used to always bind `0.0.0.0:0`, so dialing an IPv6 peer failed
 /// with an address-family mismatch before the handshake could start.
+#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_connects_to_ipv6_peer() {
 	use wind_quic::quiche;
@@ -515,6 +522,7 @@ async fn quiche_connects_to_ipv6_peer() {
 
 /// Echo `payload` over a fresh bidi stream, asserting the byte-for-byte
 /// round trip on both ends. Used by the address-family tests below.
+#[cfg(feature = "quinn")]
 async fn echo_once<C: QuicConnection>(server: &C, client: &C) {
 	const PAYLOAD: &[u8] = b"family-probe";
 
@@ -543,6 +551,7 @@ async fn echo_once<C: QuicConnection>(server: &C, client: &C) {
 ///
 /// A host without one cannot run the address-family tests; that is not their
 /// subject, so they report a skip rather than failing.
+#[cfg(feature = "quinn")]
 async fn has_ipv6_loopback() -> bool {
 	tokio::net::UdpSocket::bind("[::1]:0").await.is_ok()
 }
@@ -656,6 +665,7 @@ async fn quinn_client_binds_the_configured_address_family() {
 /// This avoids depending on architecture-specific scheduling or timer
 /// resolution to make a concurrently draining reader slower than the sender.
 /// Returns received, sent, final drops, and drops observed before reading.
+#[cfg(feature = "quiche")]
 async fn read_datagrams_during_flood(
 	server: &wind_quic::quiche::QuicheConnection,
 	client: &wind_quic::quiche::QuicheConnection,
@@ -707,6 +717,7 @@ async fn read_datagrams_during_flood(
 /// already capped at 2048. The flood below therefore has to start dropping
 /// datagrams while it is still delivering them; if the queue were unbounded
 /// nothing would ever be dropped, no matter how far behind the reader is.
+#[cfg(feature = "quiche")]
 #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
 async fn quiche_inbound_datagram_queue_is_bounded() {
 	use wind_quic::quiche;

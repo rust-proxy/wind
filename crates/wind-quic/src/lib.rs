@@ -24,8 +24,8 @@
 //!
 //! Backends are feature-gated:
 //!
-//! * `quinn`  — enables the [`quinn`](crate::quinn) module.
-//! * `quiche` — enables the [`quiche`](crate::quiche) module.
+//! * `quinn` enables Quinn with a separately selected Rustls provider.
+//! * `quiche` enables the Quiche module and is included by default.
 //!
 //! [quinn]: https://docs.rs/quinn
 //! [quiche]: https://docs.rs/quiche
@@ -53,4 +53,5 @@ pub use wind_core::quic::QuicCongestionControl;
 #[cfg(feature = "quinn")]
 pub mod quinn;
 
+#[cfg(feature = "quiche")]
 pub mod quiche;

@@ -111,6 +111,7 @@ mod quinn_conv {
 	}
 }
 
+#[cfg(feature = "quiche")]
 impl From<tokio_quiche::quiche::Error> for QuicError {
 	fn from(e: tokio_quiche::quiche::Error) -> Self {
 		QuicError::Other(format!("quiche: {e}"))
