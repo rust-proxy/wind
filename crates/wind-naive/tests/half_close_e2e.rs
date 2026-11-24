@@ -339,7 +339,7 @@ async fn half_close_suite(quic: bool) -> Result<()> {
 			let outbound = Arc::new(
 				NaiveOutbound::new(NaiveOutboundOpts {
 					server_address: address.clone(),
-					// The native client currently builds its URL from this full authority.
+					// Cronet builds the URL from this host and port.
 					server_name: Some(address.clone()),
 					username: Some("half-close-test".into()),
 					password: Some("synthetic-password".into()),
