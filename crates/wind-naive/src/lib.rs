@@ -264,6 +264,12 @@ impl Outbound for NaiveOutbound {
 		.await
 	}
 
+	async fn handle_udp(&self, _ctx: FlowContext, udp_stream: UdpStream) -> eyre::Result<()> {
+		self.handle_udp_with_deadline(udp_stream, None).await
+	}
+}
+
+impl NaiveOutbound {
 	/// Relay UDP through a **single** Naive CONNECT tunnel using UoT v2
 	/// framing.
 	///
@@ -276,7 +282,13 @@ impl Outbound for NaiveOutbound {
 	/// This replaces the previous per-datagram fire-and-forget design, which
 	/// paid a full TLS+CONNECT handshake per packet, could fan out unbounded
 	/// tasks, and silently black-holed every reply.
-	async fn handle_udp(&self, _ctx: FlowContext, udp_stream: UdpStream) -> eyre::Result<()> {
+	///
+	/// The optional deadline applies only to establishing CONNECT.
+	pub async fn handle_udp_with_deadline(
+		&self,
+		udp_stream: UdpStream,
+		deadline: Option<tokio::time::Instant>,
+	) -> eyre::Result<()> {
 		let UdpStream { tx, mut rx } = udp_stream;
 
 		// Defer opening the tunnel until the first datagram so idle UDP
@@ -289,7 +301,13 @@ impl Outbound for NaiveOutbound {
 		// UoT signals via the CONNECT authority; the port is informational
 		// (the server matches on the magic host), so any value works.
 		let magic = format!("{}:443", uot::MAGIC_ADDRESS);
-		let (naive_conn, _cancel) = self.dial(magic).await?;
+		let dial = self.dial(magic);
+		let (naive_conn, _cancel) = match deadline {
+			Some(deadline) => tokio::time::timeout_at(deadline, dial)
+				.await
+				.context("Naive UDP CONNECT timed out")??,
+			None => dial.await?,
+		};
 
 		info!(target: "naive_udp", "UoT v{} tunnel established", uot::VERSION);
 
