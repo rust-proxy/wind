@@ -5,6 +5,10 @@ NaiveProxy outbound for the [Wind](https://github.com/rust-proxy/wind) proxy too
 Uses [cronet-rs](https://github.com/rust-proxy/cronet-rs) (Chromium Cronet C API bindings) to
 establish HTTP/2 or QUIC CONNECT tunnels with NaiveProxy padding protocol.
 
+On Linux, callers can pass a `LinuxSocketPolicy` and a TCP connect timeout to
+`NaiveOutbound::new_with_socket_policy`. The policy applies to every TCP and QUIC socket
+in that engine. Keep separate outbounds for different interface or mark values.
+
 ## Usage
 
 ```toml

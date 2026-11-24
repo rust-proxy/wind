@@ -990,7 +990,7 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 [[package]]
 name = "cronet-rs"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?rev=d78eca11dab62fd5e152521a3db9f54a3ae91566#d78eca11dab62fd5e152521a3db9f54a3ae91566"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=0f83bb3b23a0f37369c36f2f3309fae68eb32f1d#0f83bb3b23a0f37369c36f2f3309fae68eb32f1d"
 dependencies = [
  "cronet-sys",
  "log",
@@ -1001,7 +1001,7 @@ dependencies = [
 [[package]]
 name = "cronet-sys"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?rev=d78eca11dab62fd5e152521a3db9f54a3ae91566#d78eca11dab62fd5e152521a3db9f54a3ae91566"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=0f83bb3b23a0f37369c36f2f3309fae68eb32f1d#0f83bb3b23a0f37369c36f2f3309fae68eb32f1d"
 dependencies = [
  "libloading",
  "sha2",
@@ -6035,6 +6035,7 @@ dependencies = [
  "futures-util",
  "rcgen 0.14.10",
  "serde_json",
+ "socket2 0.6.5",
  "tar",
  "time",
  "tokio",

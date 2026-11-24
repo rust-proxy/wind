@@ -19,7 +19,7 @@ download-static = ["cronet-rs/download-static"]
 
 [dependencies]
 # Cronet-based networking
-cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "d78eca11dab62fd5e152521a3db9f54a3ae91566", default-features = false }
+cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "0f83bb3b23a0f37369c36f2f3309fae68eb32f1d", default-features = false }
 
 # Wind core abstractions
 wind-core = { path = "../wind-core" }
@@ -35,6 +35,9 @@ tracing = "0.1"
 
 # Standard lib
 bytes = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+socket2 = { version = "0.6", features = ["all"] }
 
 [dev-dependencies]
 # The bridge regression test needs a multi-thread runtime: it has to block its

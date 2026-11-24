@@ -28,7 +28,11 @@ use wind_core::{
 	udp::{UdpPacket, UdpStream},
 };
 
+#[cfg(target_os = "linux")]
+mod socket_policy;
 mod uot;
+#[cfg(target_os = "linux")]
+pub use socket_policy::LinuxSocketPolicy;
 
 /// Map the transport-agnostic [`QuicCongestionControl`] onto the `cronet-rs`
 /// representation expected by the underlying engine.
@@ -147,6 +151,28 @@ impl NaiveOutbound {
 	/// `cronet_lib_path` controls how `libcronet` is loaded — see
 	/// [`NaiveOutboundOpts::cronet_lib_path`].
 	pub async fn new(opts: NaiveOutboundOpts) -> eyre::Result<Self> {
+		Self::new_inner(opts, NaiveClient::start).await
+	}
+
+	/// Create an engine whose physical TCP and QUIC sockets use this routing
+	/// policy.
+	#[cfg(target_os = "linux")]
+	pub async fn new_with_socket_policy(
+		opts: NaiveOutboundOpts,
+		policy: LinuxSocketPolicy,
+		connect_timeout: std::time::Duration,
+	) -> eyre::Result<Self> {
+		if policy == LinuxSocketPolicy::default() {
+			return Self::new(opts).await;
+		}
+		let dialer = Arc::new(socket_policy::LinuxDialer::new(policy, connect_timeout)?);
+		Self::new_inner(opts, move |client| client.start_with_dialer(dialer)).await
+	}
+
+	async fn new_inner(
+		opts: NaiveOutboundOpts,
+		start: impl FnOnce(&mut NaiveClient) -> Result<(), cronet_rs::error::CronetError> + Send + 'static,
+	) -> eyre::Result<Self> {
 		// Load libcronet before touching any FFI.
 		load_cronet(opts.cronet_lib_path.clone())?;
 
@@ -177,7 +203,7 @@ impl NaiveOutbound {
 		let client_for_start = client.clone();
 		tokio::task::spawn_blocking(move || -> eyre::Result<()> {
 			let mut guard = client_for_start.blocking_write();
-			guard.start().map_err(|e| eyre::eyre!("Failed to start Cronet engine: {e}"))
+			start(&mut guard).map_err(|e| eyre::eyre!("Failed to start Cronet engine: {e}"))
 		})
 		.await
 		.context("Spawn blocking for engine start failed")??;
