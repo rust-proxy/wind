@@ -105,7 +105,7 @@ NaiveOutbound (cronet-rs)
      │
      ├── load_library("libcronet.so")
      ├── NaiveClient::start()        ── Cronet engine init
-     ├── dial_and_handshake(target)  ── HTTP/2 CONNECT + padding
+     ├── dial(target) + handshake()  ── HTTP/2 CONNECT + padding
      │
      ▼
 [NaiveProxy Server :443]
@@ -115,6 +115,10 @@ NaiveOutbound (cronet-rs)
 ```
 
 ### Data relay
+
+Dropping a pending TCP or UDP-over-TCP dial cancels its native CONNECT stream.
+This wakes the worker waiting for response headers and keeps the shared engine
+available for other requests.
 
 ```
 tokio stream.read()  ── bounded queue ──▶ blocking NaiveWriteHalf

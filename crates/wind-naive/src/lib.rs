@@ -15,12 +15,16 @@ use std::{
 };
 
 use async_trait::async_trait;
-use cronet_rs::naive_client::{NaiveClient, NaiveClientConfig, QuicCongestionControl as CronetCongestionControl};
+use cronet_rs::{
+	naive_client::{NaiveClient, NaiveClientConfig, QuicCongestionControl as CronetCongestionControl},
+	naive_conn::NaiveConn,
+};
 use eyre::Context as _;
 use tokio::{
 	io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
 	sync::{mpsc, oneshot},
 };
+use tokio_util::task::AbortOnDropHandle;
 use tracing::info;
 use wind_core::{
 	FlowContext, Outbound, QuicCongestionControl,
@@ -212,45 +216,49 @@ impl NaiveOutbound {
 
 		Ok(Self { client })
 	}
+
+	async fn dial(&self, target: String) -> eyre::Result<(NaiveConn, CancelOnDrop)> {
+		let client = self.client.clone();
+		let (cancel_tx, cancel_rx) = oneshot::channel();
+		let worker = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || -> eyre::Result<_> {
+			let mut conn = client
+				.blocking_read()
+				.dial(&target)
+				.map_err(|e| eyre::eyre!("CONNECT to {target} failed: {e}"))?;
+			// Hand cancellation to the async caller before blocking for
+			// headers. Dropping either an undelivered guard or its
+			// receiver cancels this stream.
+			if cancel_tx.send(CancelOnDrop(conn.cancel_handle())).is_err() {
+				eyre::bail!("CONNECT canceled");
+			}
+			conn.handshake().map_err(|e| eyre::eyre!("CONNECT to {target} failed: {e}"))?;
+			// A detached worker must drop its native stream before the engine.
+			Ok((conn, client))
+		}));
+		let cancel = cancel_rx.await;
+		let (conn, _client) = worker.await.context("join CONNECT worker")??;
+		Ok((conn, cancel?))
+	}
 }
 
 #[async_trait]
 impl Outbound for NaiveOutbound {
 	async fn handle_tcp(&self, ctx: FlowContext, stream: Box<dyn AbstractTcpStream + 'static>) -> eyre::Result<()> {
 		let target_str = ctx.target.to_string();
-		let client = self.client.clone();
 
 		info!(target: "naive_tcp", "connecting to {target_str}");
 
-		// Dial a CONNECT tunnel via the Cronet engine.
-		//
-		// `dial_and_handshake` takes `&self` so we only need a **read** lock;
-		// concurrent calls are NOT serialized.
-		let target_for_dial = target_str.clone();
-		let (naive_conn, client) = tokio::task::spawn_blocking(move || -> eyre::Result<_> {
-			let conn = {
-				let guard = client.blocking_read();
-				guard
-					.dial_and_handshake(&target_for_dial)
-					.map_err(|e| eyre::eyre!("CONNECT to {target_for_dial} failed: {e}"))?
-			};
-			// Keep the engine with the result if the async caller is cancelled.
-			// Tuple fields drop in order: the stream must precede its engine.
-			Ok((conn, client))
-		})
-		.await
-		.context("Spawn blocking for dial failed")??;
+		let (naive_conn, _cancel) = self.dial(target_str.clone()).await?;
 
 		info!(target: "naive_tcp", "CONNECT tunnel established to {target_str}");
 
 		// Bridge the blocking NaiveConn to the async stream.
-		let (reader, writer, cancel) = naive_conn.into_split()?;
-		let _cancel = CancelOnDrop(cancel);
+		let (reader, writer, _) = naive_conn.into_split()?;
 		naive_async_bridge(
 			reader,
 			writer,
 			stream,
-			Some(client),
+			Some(self.client.clone()),
 			cronet_rs::naive_conn::NaiveWriteHalf::shutdown,
 		)
 		.await
@@ -278,25 +286,14 @@ impl Outbound for NaiveOutbound {
 			return Ok(());
 		};
 
-		let client = self.client.clone();
 		// UoT signals via the CONNECT authority; the port is informational
 		// (the server matches on the magic host), so any value works.
 		let magic = format!("{}:443", uot::MAGIC_ADDRESS);
-		let (naive_conn, client) = tokio::task::spawn_blocking(move || -> eyre::Result<_> {
-			let conn = {
-				let guard = client.blocking_read();
-				guard
-					.dial_and_handshake(&magic)
-					.map_err(|e| eyre::eyre!("UoT CONNECT tunnel failed: {e}"))?
-			};
-			Ok((conn, client))
-		})
-		.await
-		.context("Spawn blocking for UoT dial failed")??;
+		let (naive_conn, _cancel) = self.dial(magic).await?;
 
 		info!(target: "naive_udp", "UoT v{} tunnel established", uot::VERSION);
 
-		naive_uot_bridge(naive_conn, first, rx, tx, client).await
+		naive_uot_bridge(naive_conn, first, rx, tx, self.client.clone()).await
 	}
 }
 
@@ -447,8 +444,7 @@ async fn naive_uot_bridge(
 	let (downlink_tx, mut downlink_rx) = mpsc::channel::<UdpPacket>(QUEUE);
 	let mut initial = uot::encode_request(&first.target)?;
 	uot::encode_packet_into(&mut initial, &first.target, &first.payload)?;
-	let (reader, writer, cancel) = naive.into_split()?;
-	let _cancel = CancelOnDrop(cancel);
+	let (reader, writer, _) = naive.into_split()?;
 	let writer_client = client.clone();
 	let _writer = JoinSession::new(
 		spawn_io_thread("wind-naive-uot-write", move || {
