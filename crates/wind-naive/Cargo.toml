@@ -19,7 +19,7 @@ download-static = ["cronet-rs/download-static"]
 
 [dependencies]
 # Cronet-based networking
-cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "a36bb09e6a47e4954f2de5c0a92f0a668e19f34e", default-features = false }
+cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "0f33af8e11cac7ebabcb3e3f755a5a3e983c3203", default-features = false }
 
 # Wind core abstractions
 wind-core = { path = "../wind-core" }
