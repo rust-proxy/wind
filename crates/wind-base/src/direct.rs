@@ -139,11 +139,27 @@ pub async fn connect_direct_tcp(addr: SocketAddr, opts: &DirectOutboundOpts) -> 
 	finish_tcp_stream(stream, opts)
 }
 
+/// Enable client-side TCP Fast Open on a socket that is about to connect.
+///
+/// `TCP_FASTOPEN_CONNECT` defers the TCP handshake until the first write, so
+/// the first payload can ride in the SYN.  Linux ≥ 4.11 and modern Android
+/// support it; older kernels return `ENOPROTOOPT`, which is treated as a
+/// non-fatal "TFO unavailable".
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn enable_tcp_fastopen(sock: &Socket, tfo: bool) {
+	if !tfo {
+		return;
+	}
+	if let Err(e) = nix::sys::socket::setsockopt(sock, nix::sys::socket::sockopt::TcpFastOpenConnect, &true) {
+		tracing::debug!(error = %e, "TCP_FASTOPEN_CONNECT not available on this socket");
+	}
+}
+
 /// Create a TCP connection through `socket2` so advanced socket options
-/// (SO_MARK, TCP_FASTOPEN, MPTCP) can be set before `connect`.
+/// (SO_MARK, TCP_FASTOPEN_CONNECT, MPTCP) can be set before `connect`.
 ///
 /// * `mark`   — SO_MARK value (Linux only, ignored when `None`).
-/// * `tfo`    — enable TCP_FASTOPEN when `true`.
+/// * `tfo`    — enable TCP_FASTOPEN_CONNECT when `true`.
 /// * `mptcp`  — create with IPPROTO_MPTCP when `true` (Linux ≥ 5.6 only).
 #[cfg(any(target_os = "linux", target_os = "android"))]
 async fn connect_direct_tcp_socket2(
@@ -159,10 +175,11 @@ async fn connect_direct_tcp_socket2(
 		SocketAddr::V6(_) => Domain::IPV6,
 	};
 	// Protocol::MPTCP is `#[cfg(target_os = "linux")]` in socket2 0.6,
-	// but this function is compiled for android as well.  Use the raw
-	// libc constant (IPPROTO_MPTCP = 262) which is available on both.
+	// but this function is compiled for android as well.  Use the
+	// IPPROTO_MPTCP constant (262) that nix re-exports from libc; libc
+	// defines it for both Linux and Android.
 	let protocol = if mptcp {
-		Some(Protocol::from(libc::IPPROTO_MPTCP))
+		Some(Protocol::from(nix::libc::IPPROTO_MPTCP))
 	} else {
 		None
 	};
@@ -186,23 +203,8 @@ async fn connect_direct_tcp_socket2(
 		sock.bind_device(Some(dev.as_bytes()))?;
 	}
 
-	// TCP_FASTOPEN
-	if opts.tfo {
-		unsafe {
-			use std::os::unix::io::AsRawFd;
-			let val: libc::c_int = 1;
-			if libc::setsockopt(
-				sock.as_raw_fd(),
-				libc::IPPROTO_TCP,
-				libc::TCP_FASTOPEN,
-				&val as *const _ as *const libc::c_void,
-				std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-			) != 0
-			{
-				tracing::debug!("TCP_FASTOPEN not available on this socket");
-			}
-		}
-	}
+	// TCP_FASTOPEN_CONNECT
+	enable_tcp_fastopen(&sock, opts.tfo);
 
 	sock.set_nonblocking(true)?;
 	// socket2::Socket::connect is blocking; run on the blocking pool.
@@ -223,10 +225,11 @@ async fn connect_direct_tcp_with_mark(addr: SocketAddr, opts: &DirectOutboundOpt
 	connect_direct_tcp_socket2(addr, opts, opts.routing_mark, opts.mptcp).await
 }
 
-/// Create a TCP connection with `TCP_FASTOPEN` enabled.
+/// Create a TCP connection with `TCP_FASTOPEN_CONNECT` enabled.
 ///
 /// TFO is set before `connect` so the kernel may include data in the SYN
-/// packet on the next connection to the same peer (Linux ≥ 3.7, macOS ≥ 10.14).
+/// packet on the next connection to the same peer (Linux ≥ 4.11, modern
+/// Android).
 async fn connect_direct_tcp_with_tfo(addr: SocketAddr, opts: &DirectOutboundOpts) -> eyre::Result<TcpStream> {
 	let domain = match addr {
 		SocketAddr::V4(_) => Domain::IPV4,
@@ -248,28 +251,14 @@ async fn connect_direct_tcp_with_tfo(addr: SocketAddr, opts: &DirectOutboundOpts
 		sock.bind_device(Some(dev.as_bytes()))?;
 	}
 
-	// TCP_FASTOPEN: enable client-side TFO so that the kernel can send data
-	// in the SYN on subsequent connections to this peer.  The value 1
-	// enables client TFO (see tcp(7)).
-	#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
-	unsafe {
-		use std::os::unix::io::AsRawFd;
-		let val: libc::c_int = 1;
-		if libc::setsockopt(
-			sock.as_raw_fd(),
-			libc::IPPROTO_TCP,
-			libc::TCP_FASTOPEN,
-			&val as *const _ as *const libc::c_void,
-			std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-		) != 0
-		{
-			tracing::debug!("TCP_FASTOPEN not available on this socket");
-		}
-	}
+	// TCP_FASTOPEN_CONNECT: enable client-side TFO so that the kernel can
+	// defer the handshake until the first write and include data in the SYN.
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	enable_tcp_fastopen(&sock, opts.tfo);
 
-	#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
 	{
-		// On platforms without libc TCP_FASTOPEN (macOS handles it
+		// Platform without TCP_FASTOPEN_CONNECT (macOS handles TFO
 		// differently via connectx), silently skip TFO.
 		let _ = opts.tfo;
 	}

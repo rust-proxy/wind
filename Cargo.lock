@@ -1212,7 +1212,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 [[package]]
 name = "datagram-socket"
 version = "0.8.1"
-source = "git+https://github.com/rust-proxy/quiche?rev=b25abcc4077ef03de1272832d6427ecfe761c09c#b25abcc4077ef03de1272832d6427ecfe761c09c"
+source = "git+https://github.com/rust-proxy/quiche?rev=be25b02273ad5108d6e8067983e3a4ba4a6aace1#be25b02273ad5108d6e8067983e3a4ba4a6aace1"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2719,9 +2719,9 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libloading"
@@ -3724,7 +3724,7 @@ dependencies = [
 [[package]]
 name = "quiche"
 version = "0.30.1"
-source = "git+https://github.com/rust-proxy/quiche?rev=b25abcc4077ef03de1272832d6427ecfe761c09c#b25abcc4077ef03de1272832d6427ecfe761c09c"
+source = "git+https://github.com/rust-proxy/quiche?rev=be25b02273ad5108d6e8067983e3a4ba4a6aace1#be25b02273ad5108d6e8067983e3a4ba4a6aace1"
 dependencies = [
  "boring",
  "boring-sys",
@@ -5221,7 +5221,7 @@ dependencies = [
 [[package]]
 name = "tokio-quiche"
 version = "0.23.0"
-source = "git+https://github.com/rust-proxy/quiche?rev=b25abcc4077ef03de1272832d6427ecfe761c09c#b25abcc4077ef03de1272832d6427ecfe761c09c"
+source = "git+https://github.com/rust-proxy/quiche?rev=be25b02273ad5108d6e8067983e3a4ba4a6aace1#be25b02273ad5108d6e8067983e3a4ba4a6aace1"
 dependencies = [
  "anyhow",
  "boring",
@@ -6014,7 +6014,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "eyre",
- "libc",
+ "nix",
  "socket2 0.6.5",
  "tokio",
  "tokio-util",

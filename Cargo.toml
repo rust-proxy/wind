@@ -35,9 +35,9 @@ quinn-proto = { branch = "bbrv3", git = "https://github.com/Tipuch/quinn.git", d
 quinn-congestions = { git = "https://github.com/proxy-rs/quinn-congestions.git", default-features = false }
 
 [patch.crates-io]
-quiche = { git = "https://github.com/rust-proxy/quiche", rev = "b25abcc4077ef03de1272832d6427ecfe761c09c" }
-datagram-socket = { git = "https://github.com/rust-proxy/quiche", rev = "b25abcc4077ef03de1272832d6427ecfe761c09c" }
-tokio-quiche = { git = "https://github.com/rust-proxy/quiche", rev = "b25abcc4077ef03de1272832d6427ecfe761c09c" }
+quiche = { git = "https://github.com/rust-proxy/quiche", rev = "be25b02273ad5108d6e8067983e3a4ba4a6aace1" }
+datagram-socket = { git = "https://github.com/rust-proxy/quiche", rev = "be25b02273ad5108d6e8067983e3a4ba4a6aace1" }
+tokio-quiche = { git = "https://github.com/rust-proxy/quiche", rev = "be25b02273ad5108d6e8067983e3a4ba4a6aace1" }
 
 [profile.release]
 opt-level = 3
