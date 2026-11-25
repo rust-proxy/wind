@@ -83,13 +83,14 @@ pub struct NaiveOutboundOpts {
 	/// Extra headers to include in every CONNECT request.
 	pub extra_headers: std::collections::HashMap<String, String>,
 
-	/// Path to `libcronet.so` (or `.dylib`) shared library.
+	/// Path to a `libcronet` shared library (`libcronet.so`, `cronet.dll`, or
+	/// `libcronet.dylib`).
 	///
 	/// If `None`, the loader tries these locations in order:
-	///   1. `LD_LIBRARY_PATH` / system default (`libcronet.so`)
-	///   2. `./libcronet.so`
-	///   3. `/usr/local/lib/libcronet.so`
-	///   4. `/opt/cronet/libcronet.so`
+	///   1. `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` / the system default
+	///   2. `./libcronet.so` or `./libcronet.dylib`
+	///   3. `/usr/local/lib/libcronet.{so,dylib}`
+	///   4. `/opt/cronet/libcronet.{so,dylib}`
 	pub cronet_lib_path: Option<String>,
 
 	/// `HostResolverRules` override for the proxy server, e.g.
@@ -649,6 +650,16 @@ where
 }
 
 /// Default search paths for `libcronet` (dynamic loading only).
+#[cfg(target_vendor = "apple")]
+const CRONET_SEARCH_PATHS: &[&str] = &[
+	"libcronet.dylib",
+	"./libcronet.dylib",
+	"/usr/local/lib/libcronet.dylib",
+	"/opt/cronet/libcronet.dylib",
+];
+
+/// Default search paths for `libcronet` (dynamic loading only).
+#[cfg(not(target_vendor = "apple"))]
 const CRONET_SEARCH_PATHS: &[&str] = &[
 	"libcronet.so",
 	"./libcronet.so",
@@ -697,8 +708,8 @@ fn load_cronet(path: Option<String>) -> eyre::Result<()> {
 	}
 
 	let mut msg = format!(
-		"Cannot load libcronet. Tried: {}. Please install libcronet and set `cronet_lib_path` in config, or place \
-		 libcronet.so in LD_LIBRARY_PATH.",
+		"Cannot load libcronet. Tried: {}. Please install libcronet and set `cronet_lib_path` in config, or place the shared \
+		 library on the loader search path.",
 		paths.join(", "),
 	);
 	#[cfg(feature = "download")]
