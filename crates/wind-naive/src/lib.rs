@@ -91,6 +91,11 @@ pub struct NaiveOutboundOpts {
 	///   3. `/usr/local/lib/libcronet.so`
 	///   4. `/opt/cronet/libcronet.so`
 	pub cronet_lib_path: Option<String>,
+
+	/// `HostResolverRules` override for the proxy server, e.g.
+	/// `MAP proxy.example.com 203.0.113.7`. Pins the dial address while
+	/// `server_name` keeps driving SNI and certificate verification.
+	pub host_resolver_rules: Option<String>,
 }
 
 impl Default for NaiveOutboundOpts {
@@ -107,6 +112,7 @@ impl Default for NaiveOutboundOpts {
 			ech_enabled: false,
 			extra_headers: std::collections::HashMap::new(),
 			cronet_lib_path: None,
+			host_resolver_rules: None,
 		}
 	}
 }
@@ -198,6 +204,7 @@ impl NaiveOutbound {
 			quic_enabled: opts.quic_enabled,
 			quic_congestion_control: to_cronet(opts.quic_congestion_control),
 			ech_enabled: opts.ech_enabled,
+			host_resolver_rules: opts.host_resolver_rules.clone(),
 			..Default::default()
 		};
 
@@ -730,6 +737,7 @@ mod tests {
 		assert!(!opts.ech_enabled);
 		assert!(opts.extra_headers.is_empty());
 		assert!(opts.cronet_lib_path.is_none());
+		assert!(opts.host_resolver_rules.is_none());
 	}
 
 	#[test]
@@ -743,6 +751,7 @@ mod tests {
 			quic_enabled: true,
 			quic_congestion_control: QuicCongestionControl::Bbr,
 			cronet_lib_path: Some("/opt/cronet/libcronet.so.119".into()),
+			host_resolver_rules: Some("MAP proxy.example.com 203.0.113.7".into()),
 			..Default::default()
 		};
 		assert_eq!(opts.server_address, "proxy.example.com:443");
@@ -752,6 +761,7 @@ mod tests {
 		assert_eq!(opts.concurrency, 2);
 		assert!(opts.quic_enabled);
 		assert_eq!(opts.cronet_lib_path.unwrap(), "/opt/cronet/libcronet.so.119");
+		assert_eq!(opts.host_resolver_rules.unwrap(), "MAP proxy.example.com 203.0.113.7");
 	}
 
 	#[test]
