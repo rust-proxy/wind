@@ -5,9 +5,20 @@ NaiveProxy outbound for the [Wind](https://github.com/rust-proxy/wind) proxy too
 Uses [cronet-rs](https://github.com/rust-proxy/cronet-rs) (Chromium Cronet C API bindings) to
 establish HTTP/2 or QUIC CONNECT tunnels with NaiveProxy padding protocol.
 
-On Linux, callers can pass a `LinuxSocketPolicy` and a TCP connect timeout to
-`NaiveOutbound::new_with_socket_policy`. The policy applies to every TCP and QUIC socket
-in that engine. Keep separate outbounds for different interface or mark values.
+Callers can pass a `SocketPolicy` and a TCP connect timeout to
+`NaiveOutbound::new_with_socket_policy`. The policy applies to every TCP and QUIC
+socket in that engine. Keep separate outbounds for different interface or mark
+values.
+
+| Platform | Interface binding | Routing mark |
+|----------|-------------------|--------------|
+| Linux | `SO_BINDTODEVICE` by name | `SO_MARK` |
+| macOS / iOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` by interface index | rejected (Linux-only) |
+| Windows | `IP_UNICAST_IF` / `IPV6_UNICAST_IF` by interface index | rejected (Linux-only) |
+| Android / other | rejected | rejected |
+
+An unsupported policy is an error, never a silent unbound dial. On Apple and
+Windows the interface index must be nonzero.
 
 ## Usage
 

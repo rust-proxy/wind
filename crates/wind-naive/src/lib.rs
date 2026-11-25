@@ -32,11 +32,9 @@ use wind_core::{
 	udp::{UdpPacket, UdpStream},
 };
 
-#[cfg(target_os = "linux")]
 mod socket_policy;
 mod uot;
-#[cfg(target_os = "linux")]
-pub use socket_policy::LinuxSocketPolicy;
+pub use socket_policy::{SocketInterface, SocketPolicy};
 
 /// Map the transport-agnostic [`QuicCongestionControl`] onto the `cronet-rs`
 /// representation expected by the underlying engine.
@@ -160,16 +158,20 @@ impl NaiveOutbound {
 
 	/// Create an engine whose physical TCP and QUIC sockets use this routing
 	/// policy.
-	#[cfg(target_os = "linux")]
+	///
+	/// Linux applies the interface name with `SO_BINDTODEVICE` and the mark
+	/// with `SO_MARK`. macOS/iOS bind by interface index with `IP_BOUND_IF` /
+	/// `IPV6_BOUND_IF`; Windows uses `IP_UNICAST_IF` / `IPV6_UNICAST_IF`.
+	/// Other platforms reject a policy instead of silently dialing unbound.
 	pub async fn new_with_socket_policy(
 		opts: NaiveOutboundOpts,
-		policy: LinuxSocketPolicy,
+		policy: SocketPolicy,
 		connect_timeout: std::time::Duration,
 	) -> eyre::Result<Self> {
-		if policy == LinuxSocketPolicy::default() {
+		if policy == SocketPolicy::default() {
 			return Self::new(opts).await;
 		}
-		let dialer = Arc::new(socket_policy::LinuxDialer::new(policy, connect_timeout)?);
+		let dialer = Arc::new(socket_policy::PolicyDialer::new(policy, connect_timeout)?);
 		Self::new_inner(opts, move |client| client.start_with_dialer(dialer)).await
 	}
 

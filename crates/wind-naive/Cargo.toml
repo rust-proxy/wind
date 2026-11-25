@@ -19,7 +19,7 @@ download-static = ["cronet-rs/download-static"]
 
 [dependencies]
 # Cronet-based networking
-cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "f6b387d2b57e11a926fb4e0a98c7ca26cb7cce40", default-features = false }
+cronet-rs = { git = "https://github.com/rust-proxy/cronet-rs", rev = "31c63ee29566a73c188c36889426f2b469d3c3df", default-features = false }
 
 # Wind core abstractions
 wind-core = { path = "../wind-core" }
@@ -36,8 +36,12 @@ tracing = "0.1"
 # Standard lib
 bytes = "1"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# Socket policy: SO_BINDTODEVICE/SO_MARK on Linux, IP_BOUND_IF on Apple.
 socket2 = { version = "0.6", features = ["all"] }
+
+[target.'cfg(windows)'.dependencies]
+# IP_UNICAST_IF / IPV6_UNICAST_IF are only exposed through WinSock.
+windows-sys = { version = "0.61", default-features = false, features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 # The bridge regression test needs a multi-thread runtime: it has to block its
