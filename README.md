@@ -64,7 +64,7 @@ the target's archive and verifies SHA-256 before linking. A supplied
 its existing behavior.
 
 Static archives for Linux (glibc/musl), Windows MSVC, Apple, and Android
-are pinned to the `chromium-154.0.8037.49-1` release with SHA-256 verification.
+are pinned to the `v154.0.8037.49` release with SHA-256 verification.
 For manual installs, use the matching SagerNet Chromium 154.0.8037.49 library.
 Custom unpinned assets require `CRONET_DOWNLOAD_SHA256`. Windows also downloads
 the matching `.link-flags.txt` and requires its pinned checksum or
