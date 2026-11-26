@@ -86,11 +86,13 @@ pub struct NaiveOutboundOpts {
 	/// Path to a `libcronet` shared library (`libcronet.so`, `cronet.dll`, or
 	/// `libcronet.dylib`).
 	///
-	/// If `None`, the loader tries these locations in order:
-	///   1. `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` / the system default
-	///   2. `./libcronet.so` or `./libcronet.dylib`
-	///   3. `/usr/local/lib/libcronet.{so,dylib}`
-	///   4. `/opt/cronet/libcronet.{so,dylib}`
+	/// If `None`, the loader tries:
+	///   - Unix: `libcronet.{so,dylib}` from `LD_LIBRARY_PATH` /
+	///     `DYLD_LIBRARY_PATH` or the system default, `./libcronet.{so,dylib}`,
+	///     then `/usr/local/lib` and `/opt/cronet`;
+	///   - Windows: `libcronet.dll` and `cronet.dll` in the directory
+	///     containing the running executable. The current directory and `PATH`
+	///     are not searched implicitly.
 	pub cronet_lib_path: Option<String>,
 
 	/// `HostResolverRules` override for the proxy server, e.g.
@@ -659,13 +661,49 @@ const CRONET_SEARCH_PATHS: &[&str] = &[
 ];
 
 /// Default search paths for `libcronet` (dynamic loading only).
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(all(not(target_vendor = "apple"), not(windows)))]
 const CRONET_SEARCH_PATHS: &[&str] = &[
 	"libcronet.so",
 	"./libcronet.so",
 	"/usr/local/lib/libcronet.so",
 	"/opt/cronet/libcronet.so",
 ];
+
+/// Default DLL names for `libcronet` on Windows (dynamic loading only).
+///
+/// [`default_cronet_paths`] resolves these against the directory containing
+/// the running executable, so they do not depend on the process working
+/// directory or `PATH`.
+#[cfg(windows)]
+const CRONET_SEARCH_PATHS: &[&str] = &["libcronet.dll", "cronet.dll"];
+
+/// Expand the platform default library candidates.
+fn default_cronet_paths() -> Vec<String> {
+	#[cfg(windows)]
+	{
+		let exe_dir = std::env::current_exe()
+			.ok()
+			.and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+		windows_cronet_paths(exe_dir.as_deref())
+	}
+	#[cfg(not(windows))]
+	{
+		CRONET_SEARCH_PATHS.iter().map(|name| (*name).to_string()).collect()
+	}
+}
+
+/// Windows candidates resolved against the executable's directory when it is
+/// known, falling back to bare names otherwise.
+#[cfg(windows)]
+fn windows_cronet_paths(exe_dir: Option<&std::path::Path>) -> Vec<String> {
+	match exe_dir {
+		Some(dir) => CRONET_SEARCH_PATHS
+			.iter()
+			.map(|name| dir.join(name).to_string_lossy().into_owned())
+			.collect(),
+		None => CRONET_SEARCH_PATHS.iter().map(|name| (*name).to_string()).collect(),
+	}
+}
 
 /// Load the `libcronet` shared library.
 ///
@@ -688,7 +726,7 @@ fn load_cronet(path: Option<String>) -> eyre::Result<()> {
 	if let Some(p) = cronet_rs::sys::downloaded_library_path() {
 		paths.push(p.to_string());
 	}
-	paths.extend(CRONET_SEARCH_PATHS.iter().map(|s| (*s).to_string()));
+	paths.extend(default_cronet_paths());
 
 	for lib_path in &paths {
 		match unsafe { load_library(lib_path) } {
@@ -1264,5 +1302,22 @@ mod tests {
 			Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "thread limit reached"))
 		});
 		assert!(attempted.get(), "the reaper must have attempted its plain spawn");
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn windows_default_paths_live_next_to_the_executable() {
+		let exe_dir = std::path::Path::new(r"C:\Program Files\clash-rs");
+		let expected: Vec<String> = ["libcronet.dll", "cronet.dll"]
+			.iter()
+			.map(|name| exe_dir.join(name).to_string_lossy().into_owned())
+			.collect();
+		assert_eq!(windows_cronet_paths(Some(exe_dir)), expected);
+
+		let bare: Vec<String> = ["libcronet.dll", "cronet.dll"]
+			.iter()
+			.map(|name| (*name).to_string())
+			.collect();
+		assert_eq!(windows_cronet_paths(None), bare);
 	}
 }

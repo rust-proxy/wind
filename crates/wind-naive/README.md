@@ -106,6 +106,10 @@ downloaded library, when the `download` feature is enabled, comes first):
 4. /opt/cronet/libcronet.so
 ```
 
+On Windows the default candidates are `<exe directory>\libcronet.dll` and
+`<exe directory>\cronet.dll`; the current directory and `PATH` are not searched.
+Set `cronet_lib_path` to a DLL path or a directory to override them.
+
 ## Architecture
 
 ```
