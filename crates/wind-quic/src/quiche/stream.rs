@@ -36,7 +36,7 @@ const WRITE_CHUNK: usize = 16 * 1024;
 /// Send half of a quiche stream.
 ///
 /// Completion is tracked where it is authoritative: the worker's per-stream
-/// `StreamIo` (`out_done`/`fin_sent`) emits the FIN only after the queued
+/// `StreamIo` send phase emits the FIN only after the queued
 /// outbound bytes drain. The handle therefore keeps no "finished" flag of its
 /// own — [`finish`](QuicSendStream::finish) and
 /// [`poll_shutdown`](AsyncWrite::poll_shutdown) just close `tx` (closing is

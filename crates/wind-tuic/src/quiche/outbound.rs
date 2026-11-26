@@ -12,18 +12,14 @@
 
 use std::{
 	net::SocketAddr,
-	sync::{
-		Arc,
-		atomic::{AtomicU16, Ordering},
-	},
+	sync::{Arc, atomic::AtomicU16},
 	time::Duration,
 };
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use bytes::Buf;
 use moka::future::Cache;
-use tokio::{io::AsyncReadExt as _, sync::Mutex};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, info, warn};
 use uuid::Uuid;
@@ -38,14 +34,13 @@ use wind_quic::{
 
 use crate::{
 	Error,
-	client::ClientTaskExt,
+	client::{
+		association::{self, AssociationOptions},
+		session::{SessionTransition, run_session},
+	},
 	proto::{ClientProtoExt, UdpRelayMode, UdpStream as TuicUdpStream, open_connect_stream},
 	quiche::utils::{ConnectionOpts, UdpRelayMode as TransportUdpRelayMode},
 };
-
-/// Upper bound on a single TUIC UDP command frame read from a uni stream:
-/// header (2) + command (8) + longest address (259) + max payload (`u16`).
-const MAX_PACKET_FRAME: usize = 10 + 259 + u16::MAX as usize;
 
 /// How many 100 ms polls to wait for the server's `NewSessionTicket` before
 /// giving up on caching a 0-RTT resumption ticket for this connection.
@@ -174,7 +169,7 @@ impl TuicheOutbound {
 			connection: Arc::new(ArcSwap::from_pointee(connection)),
 			session,
 			udp_assoc_counter: AtomicU16::new(0),
-			udp_session: Cache::new(u64::from(u16::MAX)),
+			udp_session: Cache::new(u64::from(u16::MAX) + 1),
 		};
 
 		if outbound.opts.connection.enable_0rtt {
@@ -212,44 +207,22 @@ impl TuicheOutbound {
 
 		let supervisor = async move {
 			loop {
-				let session_cancel = shutdown.child_token();
 				let conn = connection.load_full().as_ref().clone();
 
-				let end = run_session(
+				match run_session(
 					&ctx,
 					&conn,
 					&udp_session,
 					opts.heartbeat,
-					session_cancel.clone(),
-					shutdown.clone(),
+					&shutdown,
+					opts.reconnect.enabled,
+					opts.peer_addr,
 				)
-				.await;
-				session_cancel.cancel();
-
-				match end {
-					Ok(SessionEnd::Shutdown) => {
-						conn.close(0, b"client shutdown");
-						return eyre::Ok(());
-					}
-					Ok(SessionEnd::Lost) => {
-						warn!(target: "tuic_out", peer = %opts.peer_addr, "Connection lost; attempting to reconnect");
-					}
-					Err(e) => {
-						warn!(target: "tuic_out", "Session ended with error: {e:?}; attempting to reconnect");
-					}
+				.await
+				{
+					SessionTransition::Shutdown | SessionTransition::StopAfterLoss => return eyre::Ok(()),
+					SessionTransition::Reconnect => {}
 				}
-
-				if shutdown.is_cancelled() {
-					conn.close(0, b"client shutdown");
-					return eyre::Ok(());
-				}
-				if !opts.reconnect.enabled {
-					warn!(target: "tuic_out", peer = %opts.peer_addr, "Reconnect disabled; connection will not be re-established");
-					conn.close(0, b"client connection lost");
-					return eyre::Ok(());
-				}
-
-				conn.close(0, b"reconnecting");
 
 				match reconnect_loop(&opts, &session, &shutdown, socket_factory.as_ref()).await {
 					Some(new_conn) => {
@@ -299,14 +272,6 @@ impl Drop for TuicheOutbound {
 	}
 }
 
-/// Outcome of a single connection session.
-enum SessionEnd {
-	/// The shutdown token fired — the supervisor should stop, not reconnect.
-	Shutdown,
-	/// The connection dropped (peer/transport close or heartbeat failures) —
-	/// the supervisor should reconnect.
-	Lost,
-}
 
 /// Open a fresh QUIC connection and complete the TUIC auth handshake.
 ///
@@ -425,167 +390,6 @@ async fn reconnect_loop(
 	}
 }
 
-/// Drive one connection's heartbeat and incoming-stream handling until the
-/// connection drops, heartbeats fail repeatedly, or shutdown fires.
-async fn run_session(
-	ctx: &Arc<AppContext>,
-	conn: &QuicheConnection,
-	udp_session: &Cache<u16, Arc<TuicUdpStream<QuicheConnection>>>,
-	heartbeat: Duration,
-	session_cancel: CancellationToken,
-	shutdown: CancellationToken,
-) -> eyre::Result<SessionEnd> {
-	let (mut datagram_rx, mut bi_rx, mut uni_rx) = conn.handle_incoming(ctx.clone(), session_cancel.clone()).await?;
-
-	let mut hb_interval = tokio::time::interval(heartbeat);
-	const HEARTBEAT_MAX_FAILURES: usize = 3;
-	let mut hb_failures = 0;
-	hb_interval.tick().await;
-
-	loop {
-		tokio::select! {
-			_ = shutdown.cancelled() => {
-				info!(target: "tuic_out", "Heartbeat poll cancelled");
-				return Ok(SessionEnd::Shutdown);
-			}
-			_ = conn.closed() => {
-				info!(target: "tuic_out", "Connection closed");
-				return Ok(SessionEnd::Lost);
-			}
-			_ = hb_interval.tick() => {
-				if let Err(e) = conn.send_heartbeat().await {
-					hb_failures += 1;
-					info!(target: "tuic_out", "Heartbeat failed ({hb_failures}/{HEARTBEAT_MAX_FAILURES}): {e}");
-					if hb_failures >= HEARTBEAT_MAX_FAILURES {
-						return Ok(SessionEnd::Lost);
-					}
-				} else if hb_failures > 0 {
-					info!(target: "tuic_out", "Heartbeat succeeded after {hb_failures} failures");
-					hb_failures = 0;
-				}
-			}
-			Some(_) = bi_rx.recv() => {
-				warn!(target: "tuic_out", "Received bi-directional stream on Outbound");
-			}
-			Some(buf) = datagram_rx.recv() => {
-				info!(target: "tuic_out", "Received datagram: {} bytes", buf.len());
-				dispatch_incoming_udp(udp_session, buf).await;
-			}
-			Some(mut recv) = uni_rx.recv() => {
-				// QUIC relay mode delivers UDP responses on uni streams; read
-				// (bounded) and feed the matching association, mirroring the
-				// datagram path above.
-				let udp_session = udp_session.clone();
-				let read_cancel = session_cancel.clone();
-				ctx.tasks.spawn(
-					async move {
-						let mut data = Vec::new();
-						let mut limited = (&mut recv).take(MAX_PACKET_FRAME as u64);
-						tokio::select! {
-							_ = read_cancel.cancelled() => {}
-							result = limited.read_to_end(&mut data) => match result {
-								Ok(_) => dispatch_incoming_udp(&udp_session, bytes::Bytes::from(data)).await,
-								Err(e) => warn!(target: "tuic_out", "Failed to read UDP stream: {e}"),
-							}
-						}
-					}
-					.in_current_span(),
-				);
-			}
-		}
-	}
-}
-
-/// Decode one incoming `Packet` command (from a datagram or a uni stream) and
-/// deliver the reassembled packet to the matching UDP association.
-async fn dispatch_incoming_udp(udp_session: &Cache<u16, Arc<TuicUdpStream<QuicheConnection>>>, mut buf: bytes::Bytes) {
-	let header = match crate::proto::decode_header(&mut buf, "datagram") {
-		Ok(h) => h,
-		Err(e) => {
-			warn!(target: "tuic_out", "Failed to decode header: {e}");
-			return;
-		}
-	};
-
-	let cmd = match crate::proto::decode_command(header.command, &mut buf, "datagram") {
-		Ok(c) => c,
-		Err(e) => {
-			warn!(target: "tuic_out", "Failed to decode command: {e}");
-			return;
-		}
-	};
-
-	let crate::proto::Command::Packet {
-		assoc_id,
-		pkt_id,
-		frag_total,
-		frag_id,
-		size,
-	} = cmd
-	else {
-		warn!(target: "tuic_out", "Received non-Packet command in datagram: {cmd:?}");
-		return;
-	};
-
-	let addr = match crate::proto::decode_address(&mut buf, "UDP packet") {
-		Ok(a) => a,
-		Err(e) => {
-			warn!(target: "tuic_out", "Failed to decode address: {e}");
-			return;
-		}
-	};
-
-	// `size` is attacker-controlled; `copy_to_bytes` panics when
-	// `size > buf.remaining()`, so validate before slicing.
-	let size = size as usize;
-	if buf.remaining() < size {
-		warn!(
-			target: "tuic_out",
-			"Packet command claims {size} bytes of payload but only {} remain — dropping",
-			buf.remaining()
-		);
-		return;
-	}
-	let payload = buf.copy_to_bytes(size);
-
-	let (target, has_address) = match crate::proto::address_to_target(addr) {
-		Ok(t) => (t, true),
-		Err(_) => (TargetAddr::IPv4(std::net::Ipv4Addr::UNSPECIFIED, 0), false),
-	};
-
-	// `frag_id` is a raw wire byte, so widen it before the 1-based display:
-	// `frag_id + 1` overflows `u8` for a peer-sent `0xFF` (panic under
-	// `overflow-checks`, silent wrap to `0` in release).
-	if has_address {
-		info!(target: "tuic_out", "Received UDP packet: assoc={assoc_id:#06x}, pkt={pkt_id}, frag={}/{frag_total}, size={size}, target={target}",
-			u16::from(frag_id) + 1);
-	} else {
-		info!(target: "tuic_out", "Received UDP fragment: assoc={assoc_id:#06x}, pkt={pkt_id}, frag={}/{frag_total}, size={size} (no address - non-first fragment)",
-			u16::from(frag_id) + 1);
-	}
-
-	if let Some(tuic_udp_stream) = udp_session.get(&assoc_id).await {
-		let complete_packet = if frag_total > 1 {
-			tuic_udp_stream
-				.process_fragment(assoc_id, pkt_id, frag_total, frag_id, payload, None, target)
-				.await
-		} else {
-			Some(wind_core::udp::UdpPacket {
-				source: None,
-				target,
-				payload,
-			})
-		};
-
-		if let Some(packet) = complete_packet
-			&& let Err(e) = tuic_udp_stream.receive_packet(packet).await
-		{
-			warn!(target: "tuic_out", "Failed to send packet to UDP session {assoc_id:#06x}: {e}");
-		}
-	} else {
-		warn!(target: "tuic_out", "Received UDP packet for unknown association {assoc_id:#06x}");
-	}
-}
 
 #[async_trait]
 impl Outbound for TuicheOutbound {
@@ -599,121 +403,20 @@ impl Outbound for TuicheOutbound {
 	}
 
 	async fn handle_udp(&self, _ctx: FlowContext, client_stream: CoreUdpStream) -> eyre::Result<()> {
-		let cancel = self.token.child_token();
-
-		// Allocate a u16 association id, skipping ids that already have a live
-		// session so a wrap cannot steal an active slot.
-		let assoc_id = {
-			let mut id = self.udp_assoc_counter.fetch_add(1, Ordering::SeqCst);
-			let mut probes = 0u32;
-			while self.udp_session.get(&id).await.is_some() {
-				probes += 1;
-				if probes >= u32::from(u16::MAX) {
-					return Err(eyre::eyre!(
-						"UDP association id exhausted ({} concurrent sessions on this outbound)",
-						self.udp_session.entry_count()
-					));
-				}
-				id = self.udp_assoc_counter.fetch_add(1, Ordering::SeqCst);
-			}
-			id
-		};
-		info!(target: "tuic_out", "Creating new UDP association: {assoc_id:#06x}");
-
-		// Snapshot the live connection for this association. If a reconnect
-		// swaps the connection later, this session's streams die and the
-		// caller retries.
-		let connection = self.connection.load_full().as_ref().clone();
-		let assoc_connection = connection.clone();
-		let (receive_tx, mut receive_rx) = tokio::sync::mpsc::channel(256);
-		let tuic_stream = Arc::new(
-			TuicUdpStream::new(connection.clone(), assoc_id, receive_tx)
-				.with_relay_mode(self.relay_mode())
-				.with_gc_lifetime(self.opts.gc_lifetime),
-		);
-		self.udp_session.insert(assoc_id, tuic_stream.clone()).await;
-		let cancel_stream = cancel.clone();
-
-		let mut gc_interval = tokio::time::interval(self.opts.gc_interval);
-		gc_interval.tick().await;
-
-		let mut client_rx = client_stream.rx;
-		let client_tx = client_stream.tx;
-
-		let udp_task = async move {
-			loop {
-				tokio::select! {
-					_ = cancel_stream.cancelled() => {
-						info!(target: "tuic_out", "UDP stream sender for association {assoc_id:#06x} cancelled");
-						break;
-					}
-
-					// The connection this association was created on is gone
-					// (reconnect, peer close, or idle timeout): its streams can
-					// no longer carry traffic, so end the session and let the
-					// caller recreate the association on the new connection.
-					_ = assoc_connection.closed() => {
-						info!(target: "tuic_out", "Connection lost; ending UDP association {assoc_id:#06x}");
-						break;
-					}
-
-					result = receive_rx.recv() => {
-						let packet = match result {
-							None => {
-								warn!(target: "tuic_out", "Packet channel closed for association {assoc_id:#06x}");
-								break;
-							}
-							Some(packet) => packet,
-						};
-
-						if let Err(e) = client_tx.send(packet).await {
-							warn!(target: "tuic_out", "Failed to send UDP packet to local socket (assoc {assoc_id:#06x}): {e:?}");
-							break;
-						}
-						info!(target: "tuic_out", "Received UDP packet forward to local (assoc {assoc_id:#06x})");
-					}
-					packet = client_rx.recv() => {
-						let packet = match packet {
-							None => {
-								warn!(target: "tuic_out", "Channel closed for association {assoc_id:#06x}");
-								break;
-							}
-							Some(packet) => packet,
-						};
-
-						// Send packet to remote via UDP stream. A failure here
-						// means this association's snapshot connection can no
-						// longer reach the peer (replaced by a reconnect, peer
-						// close, or a reset stream), so end the session instead
-						// of warning once per packet and blackholing the rest.
-						if crate::proto::forward_remote_packet(&tuic_stream, packet, assoc_id)
-							.await
-							.is_break()
-						{
-							break;
-						}
-					}
-					_ = gc_interval.tick() => {
-						tuic_stream.collect_garbage().await;
-					}
-				}
-			}
-			eyre::Ok(())
-		};
-		let handle = self.ctx.tasks.spawn(udp_task.in_current_span());
-
-		tokio::select! {
-			_ = handle => {}
-			_ = self.ctx.token.cancelled() => {}
-		}
-
-		cancel.cancel();
-		self.udp_session.remove(&assoc_id).await;
-		if let Err(err) = connection.drop_udp(assoc_id).await {
-			info!(target: "tuic_out", "Error dropping UDP association {assoc_id:#06x}: {err}");
-		}
-
-		Ok(())
+		association::run(
+			&self.ctx,
+			&self.token,
+			&self.udp_session,
+			&self.udp_assoc_counter,
+			self.connection.load_full().as_ref().clone(),
+			AssociationOptions {
+				mode: self.relay_mode(),
+				gc_interval: self.opts.gc_interval,
+				gc_lifetime: self.opts.gc_lifetime,
+			},
+			client_stream,
+		)
+		.await
 	}
 }
 
@@ -870,6 +573,7 @@ impl Default for TuicheOutboundBuilder {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::client::session::dispatch_incoming_udp;
 
 	#[test]
 	fn next_backoff_doubles_until_capped() {
@@ -1103,16 +807,14 @@ mod tests {
 			password: &str,
 			server_opts: ConnectionOpts,
 		) -> eyre::Result<(std::net::SocketAddr, tempfile::TempDir)> {
-			start_echo_server_with_auth_timeout(uuid, password, server_opts, None).await
+			start_echo_server_with(uuid, password, server_opts, |builder| builder).await
 		}
 
-		/// Same as [`start_echo_server`], but able to override the inbound's
-		/// authentication window; `None` keeps the builder's default.
-		async fn start_echo_server_with_auth_timeout(
+		async fn start_echo_server_with(
 			uuid: Uuid,
 			password: &str,
 			server_opts: ConnectionOpts,
-			auth_timeout: Option<Duration>,
+			configure: impl FnOnce(TuicheInboundBuilder) -> TuicheInboundBuilder,
 		) -> eyre::Result<(std::net::SocketAddr, tempfile::TempDir)> {
 			let dir = tempfile::tempdir()?;
 			let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
@@ -1122,17 +824,14 @@ mod tests {
 			std::fs::write(&key_path, generated.signing_key.serialize_pem())?;
 
 			let (addr_tx, mut addr_rx) = tokio::sync::watch::channel(None::<std::net::SocketAddr>);
-			let mut builder = TuicheInboundBuilder::new()
+			let builder = TuicheInboundBuilder::new()
 				.listen_addr("127.0.0.1:0".parse()?)
 				.bound_addr(addr_tx)
 				.certificate_path(cert_path.to_string_lossy().into_owned())
 				.private_key_path(key_path.to_string_lossy().into_owned())
 				.user(uuid, password.to_string())
 				.connection_opts(server_opts);
-			if let Some(auth_timeout) = auth_timeout {
-				builder = builder.auth_timeout(auth_timeout);
-			}
-			let inbound = builder.build().await?;
+			let inbound = configure(builder).build().await?;
 
 			let mut dispatcher = Dispatcher::new(ForwardRouter);
 			dispatcher.add_handler("default", Arc::new(EchoOutbound) as Arc<dyn Outbound>);
@@ -1200,9 +899,7 @@ mod tests {
 				rx: to_outbound_rx,
 			};
 			let client = outbound.clone();
-			tokio::spawn(async move {
-				let _ = client.handle_udp(udp_ctx, client_stream).await;
-			});
+			let owner = tokio::spawn(async move { client.handle_udp(udp_ctx, client_stream).await });
 
 			to_outbound_tx
 				.send(UdpPacket {
@@ -1216,6 +913,19 @@ mod tests {
 				.await
 				.map_err(|_| eyre::eyre!("UDP echo timed out — the reply never reached the client"))?
 				.ok_or_else(|| eyre::eyre!("reply channel closed before the echo arrived"))?;
+			// Abort the caller while the input is still open. The tracked
+			// association must stop forwarding and release its ID
+			// independently.
+			assert!(outbound.udp_session.contains_key(&0));
+			owner.abort();
+			assert!(owner.await.unwrap_err().is_cancelled());
+			tokio::time::timeout(Duration::from_secs(3), async {
+				to_outbound_tx.closed().await;
+				while outbound.udp_session.contains_key(&0) {
+					tokio::task::yield_now().await;
+				}
+			})
+			.await?;
 			Ok(echoed.payload)
 		}
 
@@ -1317,12 +1027,9 @@ mod tests {
 		#[tokio::test]
 		async fn quiche_server_closes_an_unauthenticated_connection_at_the_configured_auth_timeout() -> eyre::Result<()> {
 			let configured = Duration::from_millis(250);
-			let (addr, _dir) = start_echo_server_with_auth_timeout(
-				Uuid::new_v4(),
-				"test-password",
-				ConnectionOpts::default(),
-				Some(configured),
-			)
+			let (addr, _dir) = start_echo_server_with(Uuid::new_v4(), "test-password", ConnectionOpts::default(), |builder| {
+				builder.auth_timeout(configured)
+			})
 			.await?;
 
 			let tls = wind_quic::ClientTlsConfig {
@@ -1344,6 +1051,74 @@ mod tests {
 				"the server kept an unauthenticated connection for {elapsed:?}, past the configured {configured:?} window"
 			);
 			Ok(())
+		}
+
+		#[tokio::test]
+		async fn quiche_auth_retries_on_the_same_connection() -> eyre::Result<()> {
+			use tokio::sync::Notify;
+			use wind_core::{InboundHooks, TuicAuthenticator, UserId};
+
+			use crate::proto::{ClientProtoExt as _, open_connect_stream};
+
+			struct ObservedUser {
+				uuid: Uuid,
+				lookup: Notify,
+			}
+			#[async_trait]
+			impl TuicAuthenticator for ObservedUser {
+				async fn lookup(&self, uuid: &Uuid) -> Option<(UserId, Arc<[u8]>)> {
+					self.lookup.notify_one();
+					(*uuid == self.uuid).then(|| (UserId::from(*uuid), Arc::from(b"test-password".as_slice())))
+				}
+			}
+
+			let uuid = Uuid::new_v4();
+			let user = Arc::new(ObservedUser {
+				uuid,
+				lookup: Notify::new(),
+			});
+			let (addr, _dir) = start_echo_server_with(uuid, "test-password", ConnectionOpts::default(), |builder| {
+				builder.auth_timeout(Duration::from_secs(30)).hooks(InboundHooks {
+					tuic_auth: Some(user.clone()),
+					..Default::default()
+				})
+			})
+			.await?;
+			let tls = wind_quic::ClientTlsConfig {
+				ech_config_list: None,
+				server_name: "localhost".to_string(),
+				verify_certificate: false,
+				alpn: vec![b"h3".to_vec()],
+				enable_early_data: false,
+			};
+			tokio::time::timeout(Duration::from_secs(10), async {
+				for valid_third in [false, true] {
+					let conn = wind_quic::quiche::connect(addr, &tls, &ConnectionOpts::default().to_transport()).await?;
+					for _ in 0..2 {
+						conn.send_auth(&uuid, b"wrong-password").await?;
+						// A lookup confirms the server received this command
+						// before we open the next stream.
+						user.lookup.notified().await;
+					}
+					if valid_third {
+						conn.send_auth(&uuid, b"test-password").await?;
+						user.lookup.notified().await;
+						let target = TargetAddr::IPv4(Ipv4Addr::LOCALHOST, 9);
+						let (mut send, mut recv) = open_connect_stream(&conn, &target).await?;
+						send.write_all(b"echo").await?;
+						let mut reply = [0; 4];
+						recv.read_exact(&mut reply).await?;
+						assert_eq!(&reply, b"echo");
+						conn.close(0, b"done");
+					} else {
+						conn.send_auth(&uuid, b"wrong-password").await?;
+						user.lookup.notified().await;
+						conn.closed().await;
+					}
+				}
+				Ok(())
+			})
+			.await?
 		}
 
 		/// Control: the default (datagram) relay mode still round-trips when

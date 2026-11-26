@@ -366,6 +366,7 @@ fn resolve_outbound(oc: OutboundConfig) -> eyre::Result<ResolvedOutbound> {
 					ech_enabled: n.ech_enabled,
 					extra_headers: n.extra_headers,
 					cronet_lib_path: n.cronet_lib_path,
+					host_resolver_rules: None,
 				},
 			})
 		}

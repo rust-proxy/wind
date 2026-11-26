@@ -9,12 +9,11 @@
 //! [`FragmentReassemblyBuffer::add_fragment`]).
 
 use std::{
-	collections::HashMap,
-	sync::{Arc, Mutex},
+	collections::{HashMap, hash_map::Entry},
+	sync::Mutex,
 	time::{Duration, Instant},
 };
 
-use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::{BufMut, Bytes, BytesMut};
 use wind_core::{types::TargetAddr, udp::UdpPacket};
 
@@ -41,18 +40,28 @@ pub struct FragmentInfo {
 	pub target: TargetAddr,
 }
 
-/// Structure to track fragments of a packet for reassembly.
-struct FragmentMetadata {
-	frag_total: u8,
-	/// One entry per distinct `frag_id` received. A `Vec` (rather than an
-	/// ordered set) keeps reassembly allocation-free during the packet's
-	/// lifetime and bounds the walk by `frag_total <= MAX_FRAGMENTS`.
+/// A map entry owns one incomplete packet until completion or eviction.
+struct FragmentGroup {
 	fragments: Vec<Option<Bytes>>,
-	received: usize,
-	/// Arrival of the most recent fragment; the group's deadline.
+	missing: usize,
 	last_updated: Instant,
-	source: ArcSwapOption<TargetAddr>,
-	target: ArcSwap<TargetAddr>,
+	source: Option<TargetAddr>,
+	target: TargetAddr,
+}
+
+impl FragmentGroup {
+	fn into_packet(self) -> UdpPacket {
+		let size = self.fragments.iter().flatten().map(Bytes::len).sum();
+		let mut buffer = BytesMut::with_capacity(size);
+		for part in self.fragments.into_iter().flatten() {
+			buffer.put_slice(&part);
+		}
+		UdpPacket {
+			source: self.source,
+			target: self.target,
+			payload: buffer.freeze(),
+		}
+	}
 }
 
 /// Buffer for reassembling fragmented packets.
@@ -71,7 +80,7 @@ pub struct FragmentReassemblyBuffer {
 
 /// State behind [`FragmentReassemblyBuffer::inner`].
 struct FragmentState {
-	groups: HashMap<(u16, u16), FragmentMetadata>,
+	groups: HashMap<(u16, u16), FragmentGroup>,
 	/// Lifetime after the last fragment of a group; set at construction (see
 	/// [`FragmentReassemblyBuffer::new`]).
 	lifetime: Duration,
@@ -107,8 +116,7 @@ impl FragmentReassemblyBuffer {
 	/// * `frag_total == 0` — meaningless ("packet split into zero pieces"). The
 	///   old code would insert a zero-capacity sub-cache and trip the
 	///   "entry_count == frag_total" check immediately with an empty payload
-	///   set, which `reassemble_packet` then turned into a zero-byte packet.
-	///   Reject up front.
+	///   set, which then yielded a zero-byte packet. Reject up front.
 	/// * `frag_id >= frag_total` — out of range; would poison the
 	///   per-(assoc_id, pkt_id) group by storing under a slot the reassembly
 	///   walk never reads, permanently blocking the genuine packet from
@@ -141,14 +149,6 @@ impl FragmentReassemblyBuffer {
 
 		let key = (assoc_id, pkt_id);
 
-		// Placeholder address used for non-first fragments.
-		let is_placeholder_addr = matches!(target, TargetAddr::IPv4(ip, 0) if ip.is_unspecified());
-		// Wrap in Arc once so the initializer and the post-lookup `store` path
-		// can share a reference without cloning the underlying `TargetAddr`
-		// (which for `Domain` includes a `String`).
-		let target_arc = Arc::new(target);
-		let source_arc = source.map(Arc::new);
-
 		// Take the completed group out of the map in the same critical section
 		// that observes completion, so no other fragment can race the
 		// reassembly. The lock is never held across an await point.
@@ -163,68 +163,43 @@ impl FragmentReassemblyBuffer {
 				}
 			}
 
-			let meta = state.groups.entry(key).or_insert_with(|| FragmentMetadata {
-				frag_total,
-				fragments: (0..frag_total).map(|_| None).collect(),
-				received: 0,
-				last_updated: Instant::now(),
-				source: ArcSwapOption::new(source_arc),
-				// Cloned so the `frag_id == 0` store below keeps an owned
-				// handle to the same allocation.
-				target: ArcSwap::new(target_arc.clone()),
-			});
-
-			// Reject fragments whose `frag_total` disagrees with the packet
-			// that's already being assembled. Without this check, a forged
-			// packet with a different frag_total wedges (or grows) the
-			// per-(assoc_id, pkt_id) group.
-			if meta.frag_total != frag_total {
-				tracing::warn!(
-					target: "udp",
-					assoc_id,
-					pkt_id,
-					expected_frag_total = meta.frag_total,
-					got_frag_total = frag_total,
-					frag_id,
-					"Dropping fragment with mismatched frag_total for an existing reassembly",
-				);
+			let mut entry = match state.groups.entry(key) {
+				Entry::Vacant(slot) => slot.insert_entry(FragmentGroup {
+					fragments: vec![None; usize::from(frag_total)],
+					missing: usize::from(frag_total),
+					last_updated: Instant::now(),
+					source,
+					target,
+				}),
+				Entry::Occupied(mut slot) => {
+					let group = slot.get_mut();
+					if group.fragments.len() != usize::from(frag_total) {
+						tracing::warn!(
+							target: "udp", assoc_id, pkt_id, frag_id,
+							expected_frag_total = group.fragments.len(), got_frag_total = frag_total,
+							"Dropping fragment with mismatched frag_total for an existing reassembly",
+						);
+						return None;
+					}
+					// A real address on fragment zero supersedes the address of
+					// the first arrival.
+					if frag_id == 0 && !matches!(target, TargetAddr::IPv4(ip, 0) if ip.is_unspecified()) {
+						group.target = target;
+					}
+					slot
+				}
+			};
+			let group = entry.get_mut();
+			if group.fragments[usize::from(frag_id)].replace(payload).is_none() {
+				group.missing -= 1;
+			}
+			group.last_updated = Instant::now();
+			if group.missing != 0 {
 				return None;
 			}
-
-			// If this is the first fragment (frag_id == 0) and it has a real
-			// address, update the target address in case we received other
-			// fragments first with placeholder addresses.
-			if frag_id == 0 && !is_placeholder_addr {
-				meta.target.store(target_arc);
-			}
-
-			// A repeated `frag_id` overwrites in place rather than counting
-			// twice, so completion still requires every fragment id.
-			let slot = usize::from(frag_id);
-			if meta.fragments[slot].is_none() {
-				meta.received += 1;
-			}
-			meta.fragments[slot] = Some(payload);
-			// The deadline restarts on every arriving fragment: a group being
-			// actively reassembled must not expire mid-assembly.
-			meta.last_updated = Instant::now();
-
-			let is_complete = meta.received == usize::from(meta.frag_total);
-
-			if is_complete {
-				// Completed: take the group out so no later fragment can join
-				// an assembly that is already being consumed.
-				state.groups.remove(&key)
-			} else {
-				None
-			}
+			entry.remove()
 		};
-
-		if let Some(meta) = completed {
-			return Some(Self::reassemble_packet(meta));
-		}
-
-		None
+		Some(completed.into_packet())
 	}
 
 	/// Evict fragment groups that outlived their lifetime.
@@ -240,7 +215,7 @@ impl FragmentReassemblyBuffer {
 	}
 
 	/// Drop the group whose last fragment is the oldest.
-	fn evict_oldest(groups: &mut HashMap<(u16, u16), FragmentMetadata>) {
+	fn evict_oldest(groups: &mut HashMap<(u16, u16), FragmentGroup>) {
 		let Some(oldest) = groups.iter().min_by_key(|(_, meta)| meta.last_updated).map(|(key, _)| *key) else {
 			return;
 		};
@@ -263,29 +238,6 @@ impl FragmentReassemblyBuffer {
 	pub(crate) fn incomplete_group_count_without_cleanup(&self) -> usize {
 		self.inner.lock().expect("fragment buffer mutex poisoned").groups.len()
 	}
-
-	/// Reassemble a complete packet from an already-removed group.
-	fn reassemble_packet(meta: FragmentMetadata) -> UdpPacket {
-		let mut total_size = 0;
-		for fragment in meta.fragments.iter().flatten() {
-			total_size += fragment.len();
-		}
-		let mut buffer = BytesMut::with_capacity(total_size);
-
-		// Combine fragments in order.
-		for fragment in meta.fragments.iter().flatten() {
-			buffer.put_slice(fragment);
-		}
-
-		let payload = buffer.freeze();
-		let source = meta
-			.source
-			.into_inner()
-			.map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone()));
-		let target = Arc::try_unwrap(meta.target.into_inner()).unwrap_or_else(|a| (*a).clone());
-
-		UdpPacket { source, target, payload }
-	}
 }
 
 #[cfg(test)]
@@ -293,6 +245,36 @@ mod tests {
 	use std::{net::Ipv4Addr, time::Duration};
 
 	use super::*;
+
+	#[tokio::test]
+	async fn fragment_zero_updates_the_target_but_keeps_the_first_arrivals_source() {
+		let buffer = FragmentReassemblyBuffer::default();
+		let placeholder = TargetAddr::IPv4(Ipv4Addr::UNSPECIFIED, 0);
+		let target = TargetAddr::Domain("example.test".into(), 53);
+		let source = TargetAddr::IPv4(Ipv4Addr::LOCALHOST, 1111);
+		let fragment = |frag_id, source, target| FragmentInfo {
+			assoc_id: 1,
+			pkt_id: 2,
+			frag_total: 2,
+			frag_id,
+			source,
+			target,
+		};
+		assert!(
+			buffer
+				.add_fragment(fragment(1, Some(source.clone()), placeholder), Bytes::from_static(b"b"))
+				.await
+				.is_none()
+		);
+		let packet = buffer
+			.add_fragment(fragment(0, None, target.clone()), Bytes::from_static(b"a"))
+			.await
+			.unwrap();
+		assert_eq!(packet.source, Some(source));
+		assert_eq!(packet.target, target);
+		assert_eq!(packet.payload.as_ref(), b"ab");
+		assert_eq!(buffer.incomplete_group_count_without_cleanup(), 0);
+	}
 
 	#[test_log::test(tokio::test)]
 	async fn test_fragment_reassembly_single_fragment() {

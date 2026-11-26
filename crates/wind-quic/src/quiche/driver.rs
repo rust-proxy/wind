@@ -32,20 +32,21 @@ use std::{
 	pin::Pin,
 	sync::{
 		Arc,
-		atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+		atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
 };
 
 use bytes::{Buf, Bytes};
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use tokio::sync::{Notify, mpsc, mpsc::error::TrySendError, oneshot};
+use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 use tokio_quiche::{
 	ApplicationOverQuic, QuicResult,
 	metrics::Metrics,
 	quic::{HandshakeInfo, QuicheConnection},
 	quiche::{self, Shutdown},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{Span, debug, trace, warn};
 
 use crate::quiche::{
@@ -117,7 +118,7 @@ pub(crate) enum DriverCommand {
 	/// Close the connection.
 	Close { code: u32, reason: Vec<u8> },
 	/// Wake the worker so it re-flushes a stream's buffered inbound bytes after
-	/// the handle drained its recv channel. Without this, buffered `pending_in`
+	/// the handle drained its recv channel. Without this, buffered inbound
 	/// data (and the FIN that follows it) could stall until some unrelated
 	/// event happened to wake the worker — e.g. on a pure-upload stream with
 	/// no reverse traffic.
@@ -128,10 +129,8 @@ pub(crate) enum DriverCommand {
 pub(crate) struct Shared {
 	/// Max writable datagram length (0 == datagrams unavailable).
 	pub max_dgram: AtomicUsize,
-	/// Set once the connection has closed.
-	pub closed: AtomicBool,
-	/// Notified when `closed` transitions to true.
-	pub closed_notify: Notify,
+	/// Latched only after both final traffic counters have been published.
+	pub closed: CancellationToken,
 	/// Cumulative wire bytes the local endpoint has sent (server→client =
 	/// download). Refreshed each worker pass and finalized in `on_conn_close`,
 	/// so handles can read it without a driver round-trip and the final count
@@ -150,54 +149,105 @@ pub(crate) struct Shared {
 	pub dropped_in_datagrams: AtomicU64,
 }
 
+/// A pending terminal event follows all queued bytes. A reset takes precedence
+/// over EOF until its code has been delivered to the reader.
+#[derive(Clone, Copy)]
+enum ReceivePhase {
+	Open,
+	FinPending,
+	ResetPending(u64),
+}
+
+struct ReceiveHalf {
+	tx: mpsc::Sender<InboundItem>,
+	phase: ReceivePhase,
+	pending: VecDeque<Bytes>,
+	pending_len: usize,
+}
+
+impl ReceiveHalf {
+	fn observe_fin(&mut self) {
+		if matches!(self.phase, ReceivePhase::Open) {
+			self.phase = ReceivePhase::FinPending;
+		}
+	}
+
+	fn deliver_end(&self) -> bool {
+		match self.phase {
+			ReceivePhase::Open => false,
+			ReceivePhase::FinPending => true,
+			ReceivePhase::ResetPending(code) => !matches!(self.tx.try_send(Err(code)), Err(TrySendError::Full(_))),
+		}
+	}
+}
+
+#[derive(Debug)]
+enum SendPhase {
+	Absent,
+	/// At the queue limit the driver parks the back-channel here until space is
+	/// available.
+	Open {
+		parked: Option<mpsc::Receiver<Bytes>>,
+	},
+	Draining,
+	Finished,
+	/// A data write failed. The driver still attempts a best-effort FIN
+	/// while the receive half lives, but the writer is already terminal.
+	FailedPendingFin,
+	Failed,
+}
+
+impl SendPhase {
+	fn open() -> Self {
+		Self::Open { parked: None }
+	}
+
+	fn writer_closed(&mut self) {
+		if matches!(self, Self::Open { .. }) {
+			*self = Self::Draining;
+		}
+	}
+
+	fn needs_fin(&self) -> bool {
+		matches!(self, Self::Draining | Self::FailedPendingFin)
+	}
+
+	fn finish_attempted(&mut self) {
+		match self {
+			Self::Draining => *self = Self::Finished,
+			Self::FailedPendingFin => *self = Self::Failed,
+			_ => {}
+		}
+	}
+
+	fn is_terminal(&self) -> bool {
+		matches!(self, Self::Absent | Self::Failed | Self::FailedPendingFin | Self::Finished)
+	}
+}
+
 /// Per-stream bridge state held by the driver.
 struct StreamIo {
 	/// Driver → handle (peer's data). `None` once EOF/reset has been delivered.
-	inbound_tx: Option<mpsc::Sender<InboundItem>>,
-	/// Bytes read from the stream but not yet accepted by `inbound_tx`.
-	pending_in: VecDeque<Bytes>,
-	pending_in_len: usize,
-	/// Peer FIN observed.
-	in_fin: bool,
-	/// Peer RESET_STREAM code observed on the recv side. When set, an
-	/// `Err(code)` is delivered after `pending_in` drains, so the handle sees
-	/// an error rather than a clean EOF for a truncated stream.
-	in_reset: Option<u64>,
+	recv: Option<ReceiveHalf>,
 	/// Handle → driver data awaiting `stream_send`.
 	out_queue: VecDeque<Bytes>,
 	/// Total bytes currently buffered in `out_queue` (for the outbound cap).
 	out_queue_len: usize,
-	/// The handle's send back-channel receiver, parked here when `out_queue`
-	/// hit [`MAX_PENDING_OUT`]. Re-armed by `write_stream` once the queue
-	/// drains below the cap, so the local writer sees back-pressure meanwhile.
-	parked_out_rx: Option<mpsc::Receiver<Bytes>>,
-	/// Handle closed its send half; emit a FIN once `out_queue` drains.
-	out_done: bool,
-	fin_sent: bool,
-	/// The peer refused our send half (STOP_SENDING) or the stream errored on
-	/// `stream_send`. Once set, the back-channel is closed instead of re-armed
-	/// so the local writer's next `poll_write` fails rather than silently
-	/// dropping data.
-	send_failed: bool,
-	/// Whether this stream has a local send half (bidi, or locally-opened uni).
-	has_send: bool,
+	send: SendPhase,
 }
 
 impl StreamIo {
-	fn new(inbound_tx: Option<mpsc::Sender<InboundItem>>, has_send: bool) -> Self {
+	fn new(inbound_tx: Option<mpsc::Sender<InboundItem>>, send: SendPhase) -> Self {
 		Self {
-			inbound_tx,
-			pending_in: VecDeque::new(),
-			pending_in_len: 0,
-			in_fin: false,
-			in_reset: None,
+			recv: inbound_tx.map(|tx| ReceiveHalf {
+				tx,
+				phase: ReceivePhase::Open,
+				pending: VecDeque::new(),
+				pending_len: 0,
+			}),
 			out_queue: VecDeque::new(),
 			out_queue_len: 0,
-			parked_out_rx: None,
-			out_done: false,
-			fin_sent: false,
-			send_failed: false,
-			has_send,
+			send,
 		}
 	}
 }
@@ -238,12 +288,17 @@ impl Future for WaitOut {
 	}
 }
 
+enum HandshakeState {
+	Negotiating { ready: oneshot::Sender<Handle>, handle: Handle },
+	Established,
+}
+
 /// The protocol-agnostic quiche driver.
 pub(crate) struct BridgeDriver {
 	pub(crate) require_ech: bool,
 	is_server: bool,
 	span: Span,
-	established: bool,
+	handshake: HandshakeState,
 	buffer: Vec<u8>,
 
 	streams: HashMap<u64, StreamIo>,
@@ -270,8 +325,6 @@ pub(crate) struct BridgeDriver {
 	pending_close: Option<(u32, Vec<u8>)>,
 
 	shared: Arc<Shared>,
-	established_tx: Option<oneshot::Sender<Handle>>,
-	handle: Option<Handle>,
 }
 
 impl BridgeDriver {
@@ -284,8 +337,7 @@ impl BridgeDriver {
 		let (dgram_in_tx, dgram_in_rx) = mpsc::channel(MAX_IN_DATAGRAMS);
 		let shared = Arc::new(Shared {
 			max_dgram: AtomicUsize::new(0),
-			closed: AtomicBool::new(false),
-			closed_notify: Notify::new(),
+			closed: CancellationToken::new(),
 			sent_bytes: AtomicU64::new(0),
 			recv_bytes: AtomicU64::new(0),
 			early_data_reason: AtomicU32::new(0),
@@ -304,7 +356,7 @@ impl BridgeDriver {
 			require_ech: false,
 			is_server,
 			span,
-			established: false,
+			handshake: HandshakeState::Negotiating { ready: est_tx, handle },
 			buffer: vec![0u8; READ_BUF_SIZE],
 			streams: HashMap::new(),
 			waiters: FuturesUnordered::new(),
@@ -324,8 +376,6 @@ impl BridgeDriver {
 			pending_shutdowns: VecDeque::new(),
 			pending_close: None,
 			shared,
-			established_tx: Some(est_tx),
-			handle: Some(handle),
 		};
 		(driver, est_rx)
 	}
@@ -391,7 +441,7 @@ impl BridgeDriver {
 		let sid = self.alloc_id(false);
 		let (in_tx, in_rx) = mpsc::channel(STREAM_CHAN_CAP);
 		let (out_tx, out_rx) = mpsc::channel(STREAM_CHAN_CAP);
-		self.streams.insert(sid, StreamIo::new(Some(in_tx), true));
+		self.streams.insert(sid, StreamIo::new(Some(in_tx), SendPhase::open()));
 		self.waiters.push(WaitOut::new(sid, out_rx));
 		(
 			QuicheSend::new(sid, self.cmd_tx_handles.clone(), out_tx),
@@ -403,7 +453,7 @@ impl BridgeDriver {
 		let sid = self.alloc_id(true);
 		let (out_tx, out_rx) = mpsc::channel(STREAM_CHAN_CAP);
 		// Send-only: no inbound channel.
-		self.streams.insert(sid, StreamIo::new(None, true));
+		self.streams.insert(sid, StreamIo::new(None, SendPhase::open()));
 		self.waiters.push(WaitOut::new(sid, out_rx));
 		QuicheSend::new(sid, self.cmd_tx_handles.clone(), out_tx)
 	}
@@ -417,12 +467,12 @@ impl BridgeDriver {
 		let uni = sid & 2 != 0;
 		let (in_tx, in_rx) = mpsc::channel(STREAM_CHAN_CAP);
 		if uni {
-			self.streams.insert(sid, StreamIo::new(Some(in_tx), false));
+			self.streams.insert(sid, StreamIo::new(Some(in_tx), SendPhase::Absent));
 			let recv = QuicheRecv::new(sid, self.cmd_tx_handles.clone(), in_rx);
 			let _ = self.accept_uni_tx.send(recv);
 		} else {
 			let (out_tx, out_rx) = mpsc::channel(STREAM_CHAN_CAP);
-			self.streams.insert(sid, StreamIo::new(Some(in_tx), true));
+			self.streams.insert(sid, StreamIo::new(Some(in_tx), SendPhase::open()));
 			self.waiters.push(WaitOut::new(sid, out_rx));
 			let send = QuicheSend::new(sid, self.cmd_tx_handles.clone(), out_tx);
 			let recv = QuicheRecv::new(sid, self.cmd_tx_handles.clone(), in_rx);
@@ -435,20 +485,20 @@ impl BridgeDriver {
 			let over_cap = self
 				.streams
 				.get(&sid)
-				.map(|st| st.pending_in_len >= MAX_PENDING_IN)
+				.map(|st| st.recv.as_ref().is_some_and(|recv| recv.pending_len >= MAX_PENDING_IN))
 				.unwrap_or(true);
 			if over_cap {
 				break;
 			}
 			match qconn.stream_recv(sid, &mut self.buffer) {
 				Ok((n, fin)) => {
-					if let Some(st) = self.streams.get_mut(&sid) {
-						if n > 0 && st.inbound_tx.is_some() {
-							st.pending_in.push_back(Bytes::copy_from_slice(&self.buffer[..n]));
-							st.pending_in_len += n;
+					if let Some(recv) = self.streams.get_mut(&sid).and_then(|st| st.recv.as_mut()) {
+						if n > 0 {
+							recv.pending.push_back(Bytes::copy_from_slice(&self.buffer[..n]));
+							recv.pending_len += n;
 						}
 						if fin {
-							st.in_fin = true;
+							recv.observe_fin();
 						}
 					}
 					if fin {
@@ -462,16 +512,15 @@ impl BridgeDriver {
 					// bytes drain, rather than a clean EOF that would make
 					// a truncated stream look complete.
 					trace!(stream = sid, code, "stream reset by peer");
-					if let Some(st) = self.streams.get_mut(&sid) {
-						st.in_reset = Some(code);
-						st.in_fin = true;
+					if let Some(recv) = self.streams.get_mut(&sid).and_then(|st| st.recv.as_mut()) {
+						recv.phase = ReceivePhase::ResetPending(code);
 					}
 					break;
 				}
 				Err(e) => {
 					trace!(stream = sid, "stream_recv error: {e}");
-					if let Some(st) = self.streams.get_mut(&sid) {
-						st.in_fin = true;
+					if let Some(recv) = self.streams.get_mut(&sid).and_then(|st| st.recv.as_mut()) {
+						recv.observe_fin();
 					}
 					break;
 				}
@@ -483,50 +532,28 @@ impl BridgeDriver {
 	/// Move buffered inbound bytes into the handle's recv channel; drop the
 	/// sender on EOF.
 	fn flush_inbound(&mut self, sid: u64) {
-		if let Some(st) = self.streams.get_mut(&sid) {
-			if let Some(tx) = st.inbound_tx.clone() {
-				while let Some(front) = st.pending_in.front().cloned() {
-					match tx.try_send(Ok(front)) {
-						Ok(()) => {
-							let b = st.pending_in.pop_front().unwrap();
-							st.pending_in_len -= b.len();
-						}
-						Err(TrySendError::Full(_)) => break,
-						Err(TrySendError::Closed(_)) => {
-							st.pending_in.clear();
-							st.pending_in_len = 0;
-							break;
-						}
+		if let Some(st) = self.streams.get_mut(&sid)
+			&& let Some(recv) = &mut st.recv
+		{
+			while let Some(chunk) = recv.pending.pop_front() {
+				match recv.tx.try_reserve() {
+					Ok(slot) => {
+						recv.pending_len -= chunk.len();
+						slot.send(Ok(chunk));
+					}
+					Err(TrySendError::Full(())) => {
+						recv.pending.push_front(chunk);
+						break;
+					}
+					Err(TrySendError::Closed(())) => {
+						recv.pending.clear();
+						recv.pending_len = 0;
+						break;
 					}
 				}
 			}
-			if st.in_fin && st.pending_in.is_empty() {
-				// All buffered data delivered. If the stream was reset, deliver
-				// the reset code as a final `Err` before closing the
-				// channel; otherwise a dropped sender = clean EOF. If the
-				// channel is momentarily full, keep the sender and retry on
-				// the next flush (the handle nudges us via `FlushInbound`
-				// when it drains).
-				match st.in_reset {
-					Some(code) => {
-						if let Some(tx) = st.inbound_tx.clone() {
-							match tx.try_send(Err(code)) {
-								Ok(()) => {
-									st.inbound_tx = None;
-									st.in_reset = None;
-								}
-								Err(TrySendError::Full(_)) => {}
-								Err(TrySendError::Closed(_)) => {
-									st.inbound_tx = None;
-									st.in_reset = None;
-								}
-							}
-						} else {
-							st.in_reset = None;
-						}
-					}
-					None => st.inbound_tx = None,
-				}
+			if recv.pending.is_empty() && recv.deliver_end() {
+				st.recv = None;
 			}
 		}
 		self.maybe_cleanup(sid);
@@ -535,7 +562,7 @@ impl BridgeDriver {
 	fn write_stream(&mut self, qconn: &mut QuicheConnection, sid: u64) {
 		let mut rearm: Option<mpsc::Receiver<Bytes>> = None;
 		if let Some(st) = self.streams.get_mut(&sid)
-			&& st.has_send
+			&& !matches!(st.send, SendPhase::Absent)
 		{
 			while let Some(front) = st.out_queue.front_mut() {
 				if front.is_empty() {
@@ -562,32 +589,27 @@ impl BridgeDriver {
 						debug!(stream = sid, "stream_send error: {e}");
 						st.out_queue.clear();
 						st.out_queue_len = 0;
-						st.out_done = true;
-						st.send_failed = true;
-						// If the back-channel was parked, close it now;
-						// otherwise the `Ev::Out` handler drops it when
-						// the next write arrives.
-						st.parked_out_rx = None;
+						st.send = SendPhase::FailedPendingFin;
 						break;
 					}
 				}
 			}
-			if st.out_done && st.out_queue.is_empty() && !st.fin_sent {
+			if st.send.needs_fin() && st.out_queue.is_empty() {
 				match qconn.stream_send(sid, b"", true) {
-					Ok(_) => st.fin_sent = true,
+					Ok(_) => st.send.finish_attempted(),
 					Err(quiche::Error::Done) => {}
 					Err(e) => {
 						debug!(stream = sid, "stream_send fin error: {e}");
-						st.fin_sent = true;
+						st.send.finish_attempted();
 					}
 				}
 			}
 			// Resume draining the handle's back-channel now that we're back
 			// under the outbound cap (see `MAX_PENDING_OUT`).
 			if st.out_queue_len < MAX_PENDING_OUT
-				&& let Some(rx) = st.parked_out_rx.take()
+				&& let SendPhase::Open { parked } = &mut st.send
 			{
-				rearm = Some(rx);
+				rearm = parked.take();
 			}
 		}
 		if let Some(rx) = rearm {
@@ -598,8 +620,8 @@ impl BridgeDriver {
 
 	fn maybe_cleanup(&mut self, sid: u64) {
 		let done = if let Some(st) = self.streams.get(&sid) {
-			let recv_done = st.inbound_tx.is_none() && st.pending_in.is_empty();
-			let send_done = !st.has_send || st.send_failed || (st.out_done && st.out_queue.is_empty() && st.fin_sent);
+			let recv_done = st.recv.is_none();
+			let send_done = st.send.is_terminal();
 			recv_done && send_done
 		} else {
 			false
@@ -623,7 +645,7 @@ impl BridgeDriver {
 				}
 			}
 			// The wake itself is the work: `process_writes` re-flushes every
-			// stream's `pending_in` right after `wait_for_data` returns.
+			// stream's pending bytes right after `wait_for_data` returns.
 			DriverCommand::FlushInbound(_sid) => {}
 			DriverCommand::Session(reply) => self.pending_sessions.push_back(reply),
 			DriverCommand::Export {
@@ -694,7 +716,6 @@ impl ApplicationOverQuic for BridgeDriver {
 		}
 		let span = self.span.clone();
 		let _enter = span.enter();
-		self.established = true;
 		self.shared
 			.max_dgram
 			.store(qconn.dgram_max_writable_len().unwrap_or(0), Ordering::Relaxed);
@@ -705,14 +726,16 @@ impl ApplicationOverQuic for BridgeDriver {
 			.early_data_reason
 			.store(qconn.early_data_reason(), Ordering::Relaxed);
 		debug!(trace = qconn.trace_id(), "wind-quic quiche connection established");
-		if let (Some(tx), Some(handle)) = (self.established_tx.take(), self.handle.take()) {
-			let _ = tx.send(handle);
+		if let HandshakeState::Negotiating { ready, handle } =
+			std::mem::replace(&mut self.handshake, HandshakeState::Established)
+		{
+			let _ = ready.send(handle);
 		}
 		Ok(())
 	}
 
 	fn should_act(&self) -> bool {
-		self.established
+		matches!(self.handshake, HandshakeState::Established)
 	}
 
 	async fn wait_for_data(&mut self, _qconn: &mut QuicheConnection) -> QuicResult<()> {
@@ -750,26 +773,21 @@ impl ApplicationOverQuic for BridgeDriver {
 					// stream is gone or its send side has failed, drop
 					// both `b` and `rx` — dropping `rx` closes the channel
 					// so the writer's next `poll_write` fails.
-					let rearm = match self.streams.get_mut(&sid) {
-						Some(st) if !st.send_failed => {
-							st.out_queue_len += b.len();
-							st.out_queue.push_back(b);
-							if st.out_queue_len >= MAX_PENDING_OUT {
-								st.parked_out_rx = Some(rx);
-								None
-							} else {
-								Some(rx)
-							}
+					if let Some(st) = self.streams.get_mut(&sid)
+						&& let SendPhase::Open { parked } = &mut st.send
+					{
+						st.out_queue_len += b.len();
+						st.out_queue.push_back(b);
+						if st.out_queue_len >= MAX_PENDING_OUT {
+							*parked = Some(rx);
+						} else {
+							self.waiters.push(WaitOut::new(sid, rx));
 						}
-						_ => None,
-					};
-					if let Some(rx) = rearm {
-						self.waiters.push(WaitOut::new(sid, rx));
 					}
 				}
 				None => {
 					if let Some(st) = self.streams.get_mut(&sid) {
-						st.out_done = true;
+						st.send.writer_closed();
 					}
 				}
 			},
@@ -865,9 +883,7 @@ impl ApplicationOverQuic for BridgeDriver {
 			if write && let Some(st) = self.streams.get_mut(&sid) {
 				st.out_queue.clear();
 				st.out_queue_len = 0;
-				st.out_done = true;
-				st.fin_sent = true;
-				st.send_failed = true;
+				st.send = SendPhase::Failed;
 			}
 		}
 
@@ -915,14 +931,54 @@ impl ApplicationOverQuic for BridgeDriver {
 		let stats = qconn.stats();
 		self.shared.sent_bytes.store(stats.sent_bytes, Ordering::Relaxed);
 		self.shared.recv_bytes.store(stats.recv_bytes, Ordering::Relaxed);
-		self.shared.closed.store(true, Ordering::SeqCst);
-		self.shared.closed_notify.notify_waiters();
+		self.shared.closed.cancel();
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use super::export_out_ptr;
+	use super::*;
+
+	#[test]
+	fn reset_waits_for_buffered_bytes_and_channel_capacity() {
+		let (mut driver, _ready) = BridgeDriver::new(false, ([127, 0, 0, 1], 9).into(), Span::none());
+		let (tx, mut rx) = mpsc::channel(1);
+		let mut stream = StreamIo::new(Some(tx), SendPhase::Absent);
+		let recv = stream.recv.as_mut().unwrap();
+		recv.phase = ReceivePhase::ResetPending(17);
+		recv.observe_fin(); // A later EOF cannot erase the reset.
+		recv.pending.push_back(Bytes::from_static(b"abc"));
+		recv.pending_len = 3;
+		driver.streams.insert(2, stream);
+
+		driver.flush_inbound(2);
+		assert!(driver.streams.contains_key(&2));
+		assert_eq!(rx.try_recv().unwrap(), Ok(Bytes::from_static(b"abc")));
+		driver.flush_inbound(2);
+		assert_eq!(rx.try_recv().unwrap(), Err(17));
+		assert!(!driver.streams.contains_key(&2));
+		assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected)));
+	}
+
+	#[test]
+	fn closing_the_writer_preserves_abort_and_failed_write_semantics() {
+		let mut phase = SendPhase::open();
+		phase.writer_closed();
+		assert!(phase.needs_fin());
+		assert!(!phase.is_terminal());
+		phase.finish_attempted();
+		assert!(matches!(phase, SendPhase::Finished));
+
+		let mut phase = SendPhase::FailedPendingFin;
+		phase.writer_closed();
+		assert!(phase.needs_fin());
+		assert!(phase.is_terminal());
+		phase.finish_attempted();
+		phase.writer_closed();
+		assert!(matches!(phase, SendPhase::Failed));
+		assert!(!phase.needs_fin());
+	}
+
 
 	#[test]
 	fn a_zero_length_export_does_not_pass_a_dangling_pointer() {

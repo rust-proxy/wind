@@ -2,7 +2,7 @@ use std::{
 	collections::{HashMap, hash_map::DefaultHasher},
 	hash::{Hash, Hasher},
 	sync::{
-		Arc,
+		Arc, OnceLock,
 		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	time::{Duration, Instant},
@@ -13,6 +13,7 @@ use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	sync::Mutex,
 };
+use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 use wind_core::{
 	FlowContext, Outbound, hooks::Protocol, rule::NetworkType, tcp::AbstractTcpStream, types::TargetAddr, udp::UdpStream,
@@ -102,6 +103,16 @@ fn build_hash_ring(proxy_count: usize) -> Vec<(u64, usize)> {
 	ring
 }
 
+/// An enabled schedule starts on the first call and owns its worker until drop.
+enum HealthChecks {
+	Disabled,
+	Enabled {
+		url: String,
+		interval: Duration,
+		worker: OnceLock<AbortOnDropHandle<()>>,
+	},
+}
+
 /// Outbound that distributes connections across multiple child outbounds
 /// according to the configured [`LoadBalanceStrategy`], with optional
 /// periodic health checks.
@@ -117,11 +128,9 @@ fn build_hash_ring(proxy_count: usize) -> Vec<(u64, usize)> {
 /// When `lazy`, no health checking happens at all: [`Self::start_health_check`]
 /// is a no-op and every child counts as alive.
 pub struct LoadBalanceOutbound {
-	proxies: Vec<ProxyState>,
+	proxies: Arc<[ProxyState]>,
 	strategy: LoadBalanceStrategy,
-	url: String,
-	interval: Duration,
-	lazy: bool,
+	health_checks: HealthChecks,
 	/// Sorted `(ring position, proxy index)` pairs used by
 	/// [`LoadBalanceStrategy::ConsistentHashing`].
 	ring: Vec<(u64, usize)>,
@@ -149,9 +158,15 @@ impl LoadBalanceOutbound {
 				})
 				.collect(),
 			strategy: opts.strategy,
-			url: opts.url,
-			interval: opts.interval,
-			lazy: opts.lazy,
+			health_checks: if opts.lazy {
+				HealthChecks::Disabled
+			} else {
+				HealthChecks::Enabled {
+					url: opts.url,
+					interval: opts.interval,
+					worker: OnceLock::new(),
+				}
+			},
 			ring,
 			round_robin_counter: AtomicUsize::new(0),
 			sticky_cache: Mutex::new(HashMap::new()),
@@ -162,17 +177,17 @@ impl LoadBalanceOutbound {
 	///
 	/// Call this **after** wrapping the outbound in an `Arc`.  No-op when
 	/// [`LoadBalanceOpts::lazy`] is `true`; otherwise the loop runs at the
-	/// configured [`LoadBalanceOpts::interval`].
+	/// configured [`LoadBalanceOpts::interval`]. Repeated calls share the
+	/// worker. Dropping the outbound stops both the schedule and its
+	/// in-flight probe.
 	pub fn start_health_check(self: &Arc<Self>) {
-		if self.lazy {
+		let HealthChecks::Enabled { url, interval, worker } = &self.health_checks else {
 			tracing::debug!("lazy load-balance outbound: health checks stay disabled");
 			return;
-		}
+		};
 
-		let this = self.clone();
-		let interval = self.interval;
-		tokio::spawn(async move {
-			health_check_loop(this, interval).await;
+		worker.get_or_init(|| {
+			AbortOnDropHandle::new(tokio::spawn(health_check_loop(self.proxies.clone(), url.clone(), *interval)))
 		});
 	}
 
@@ -307,13 +322,13 @@ impl Outbound for LoadBalanceOutbound {
 // ---------------------------------------------------------------------------
 
 /// Background loop that probes every child proxy at `interval`.
-async fn health_check_loop(lb: Arc<LoadBalanceOutbound>, interval: Duration) {
+async fn health_check_loop(proxies: Arc<[ProxyState]>, url: String, interval: Duration) {
 	// Stagger the first probe so we don't hammer all proxies simultaneously.
-	let stagger = interval.max(Duration::from_secs(10)) / lb.proxies.len().max(1) as u32;
+	let stagger = interval.max(Duration::from_secs(10)) / proxies.len().max(1) as u32;
 
 	loop {
-		for (i, proxy) in lb.proxies.iter().enumerate() {
-			let alive = check_proxy_health(proxy.outbound.clone(), &lb.url).await;
+		for (i, proxy) in proxies.iter().enumerate() {
+			let alive = check_proxy_health(proxy.outbound.clone(), &url).await;
 			let prev = proxy.is_alive();
 			proxy.set_alive(alive);
 
@@ -359,10 +374,11 @@ async fn check_proxy_health(proxy: Arc<dyn Outbound>, url: &str) -> bool {
 	// host and the host's response flows back to us.
 	let (mut client, server) = tokio::io::duplex(8192);
 
-	// Spawn the outbound handler — it will consume `server`.
-	tokio::spawn(async move {
+	// The running probe owns the handler, including while the worker is being
+	// stopped.
+	let _handler = AbortOnDropHandle::new(tokio::spawn(async move {
 		let _ = proxy.handle_tcp(health_ctx, Box::new(server)).await;
-	});
+	}));
 
 	// Send a minimal HTTP/1.1 GET.
 	let request = format!("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", path, host);
@@ -510,6 +526,49 @@ mod tests {
 		assert!(!lb.proxies[0].is_alive(), "a non-lazy load-balancer must probe its children");
 	}
 
+	#[tokio::test]
+	async fn repeated_start_shares_one_worker_and_drop_cancels_its_probe() {
+		struct HangingProbe {
+			entered: tokio::sync::mpsc::UnboundedSender<()>,
+			stopped: tokio_util::sync::CancellationToken,
+		}
+
+		#[async_trait]
+		impl Outbound for HangingProbe {
+			async fn handle_tcp(&self, _: FlowContext, _stream: Box<dyn AbstractTcpStream>) -> eyre::Result<()> {
+				let _exit = self.stopped.clone().drop_guard();
+				self.entered.send(())?;
+				std::future::pending().await
+			}
+
+			async fn handle_udp(&self, _: FlowContext, _: UdpStream) -> eyre::Result<()> {
+				unreachable!("health checks use TCP")
+			}
+		}
+
+		let (entered, mut calls) = tokio::sync::mpsc::unbounded_channel();
+		let stopped = tokio_util::sync::CancellationToken::new();
+		let lb = Arc::new(LoadBalanceOutbound::new(
+			LoadBalanceOpts {
+				lazy: false,
+				..make_opts(LoadBalanceStrategy::RoundRobin)
+			},
+			vec![Arc::new(HangingProbe {
+				entered,
+				stopped: stopped.clone(),
+			})],
+		));
+		lb.start_health_check();
+		lb.start_health_check();
+		let timeout = Duration::from_secs(2);
+		assert_eq!(tokio::time::timeout(timeout, calls.recv()).await.unwrap(), Some(()));
+		drop(lb);
+		tokio::time::timeout(timeout, stopped.cancelled()).await.unwrap();
+		// Every sender is gone with the worker. Any duplicate probe would leave
+		// another entry.
+		assert_eq!(tokio::time::timeout(timeout, calls.recv()).await.unwrap(), None);
+	}
+
 	// ---- round-robin -----------------------------------------------------
 
 	#[tokio::test]
@@ -638,7 +697,7 @@ mod tests {
 	#[tokio::test]
 	async fn consistent_hashing_survives_all_proxies_going_dead() {
 		let lb = make_lb(LoadBalanceStrategy::ConsistentHashing, 3);
-		for proxy in &lb.proxies {
+		for proxy in lb.proxies.iter() {
 			proxy.set_alive(false);
 		}
 
@@ -675,7 +734,7 @@ mod tests {
 	#[tokio::test]
 	async fn all_dead_falls_back_to_full_set() {
 		let lb = make_lb(LoadBalanceStrategy::RoundRobin, 3);
-		for p in &lb.proxies {
+		for p in lb.proxies.iter() {
 			p.set_alive(false);
 		}
 

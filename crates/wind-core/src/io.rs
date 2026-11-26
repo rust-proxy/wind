@@ -15,25 +15,31 @@ use tokio::{
 /// high bandwidth-delay-product links (a QUIC tunnel to a distant peer).
 const BUFFER_SIZE: usize = 64 * 1024;
 
+#[derive(Debug, PartialEq, Eq)]
+enum CopyPhase {
+	Reading,
+	Writing { position: usize, length: usize },
+	ShuttingDown,
+	Done,
+}
+
 struct CopyDirection {
 	buffer: Box<[u8]>,
-	position: usize,
-	length: usize,
+	phase: CopyPhase,
 	transferred: usize,
-	eof: bool,
-	shutdown: bool,
 }
 
 impl CopyDirection {
 	fn new() -> Self {
 		Self {
 			buffer: vec![0; BUFFER_SIZE].into_boxed_slice(),
-			position: 0,
-			length: 0,
+			phase: CopyPhase::Reading,
 			transferred: 0,
-			eof: false,
-			shutdown: false,
 		}
+	}
+
+	fn read_ended(&self) -> bool {
+		matches!(self.phase, CopyPhase::ShuttingDown | CopyPhase::Done)
 	}
 
 	// Each poll does at most one read and one write, keeping the other
@@ -49,40 +55,45 @@ impl CopyDirection {
 		R: AsyncRead + Unpin + ?Sized,
 		W: AsyncWrite + Unpin + ?Sized,
 	{
-		if self.shutdown {
-			return Ok(false);
-		}
-
 		let mut progress = false;
-		if self.position == self.length && !self.eof {
+		if self.phase == CopyPhase::Reading {
 			let mut buffer = ReadBuf::new(&mut self.buffer);
-			if let Poll::Ready(result) = Pin::new(reader).poll_read(cx, &mut buffer) {
-				result?;
-				self.position = 0;
-				self.length = buffer.filled().len();
-				self.eof = self.length == 0;
-				progress = true;
-			}
+			let Poll::Ready(result) = Pin::new(reader).poll_read(cx, &mut buffer) else {
+				return Ok(false);
+			};
+			result?;
+			self.phase = match buffer.filled().len() {
+				0 => CopyPhase::ShuttingDown,
+				length => CopyPhase::Writing { position: 0, length },
+			};
+			progress = true;
 		}
 
-		if self.position < self.length {
-			if let Poll::Ready(result) = Pin::new(writer).poll_write(cx, &self.buffer[self.position..self.length]) {
-				let written = result?;
-				if written == 0 {
-					return Err(io::ErrorKind::WriteZero.into());
+		match &mut self.phase {
+			CopyPhase::Writing { position, length } => {
+				if let Poll::Ready(result) = Pin::new(writer).poll_write(cx, &self.buffer[*position..*length]) {
+					let written = result?;
+					if written == 0 {
+						return Err(io::ErrorKind::WriteZero.into());
+					}
+					*position += written;
+					self.transferred += written;
+					if *position == *length {
+						self.phase = CopyPhase::Reading;
+					}
+					progress = true;
 				}
-				self.position += written;
-				self.transferred += written;
-				progress = true;
 			}
-		} else if self.eof
-			&& let Poll::Ready(result) = Pin::new(writer).poll_shutdown(cx)
-		{
-			if let Err(error) = result {
-				*last_error = Some(error);
+			CopyPhase::ShuttingDown => {
+				if let Poll::Ready(result) = Pin::new(writer).poll_shutdown(cx) {
+					if let Err(error) = result {
+						*last_error = Some(error);
+					}
+					self.phase = CopyPhase::Done;
+					progress = true;
+				}
 			}
-			self.shutdown = true;
-			progress = true;
+			CopyPhase::Done | CopyPhase::Reading => {}
 		}
 
 		Ok(progress)
@@ -127,13 +138,13 @@ where
 					return Poll::Ready(());
 				}
 			};
-		if a2b.shutdown && b2a.shutdown {
+		if a2b.phase == CopyPhase::Done && b2a.phase == CopyPhase::Done {
 			return Poll::Ready(());
 		}
 
 		// Keep the reaper active while a FIN is pending too: shutdown can
 		// encounter backpressure just like a write.
-		if !half_close_timeout.is_zero() && (a2b.eof || b2a.eof) {
+		if !half_close_timeout.is_zero() && (a2b.read_ended() || b2a.read_ended()) {
 			let timer = reaper.get_or_insert_with(|| Box::pin(tokio::time::sleep(half_close_timeout)));
 			if progress {
 				timer.as_mut().reset(Instant::now() + half_close_timeout);

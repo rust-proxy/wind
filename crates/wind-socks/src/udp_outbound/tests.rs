@@ -134,17 +134,67 @@ async fn domains_ipv6_and_extreme_buffer_hints_preserve_whole_datagrams() -> eyr
 async fn proxy_session(port_zero: bool) -> eyre::Result<(SocksOutboundOpts, JoinHandle<eyre::Result<(TcpStream, UdpSocket)>>)> {
 	let listener = TcpListener::bind("127.0.0.1:0").await?;
 	let addr = listener.local_addr()?;
-	let task = tokio::spawn(async move {
-		let (stream, _) = listener.accept().await?;
-		let proto = Socks5ServerProtocol::accept_no_auth(stream).await?;
-		let (proto, command, _) = proto.read_command().await?;
-		assert_eq!(command, Socks5Command::UDPAssociate);
-		let udp = UdpSocket::bind("127.0.0.1:0").await?;
-		let reply = SocketAddr::from(([0, 0, 0, 0], if port_zero { 0 } else { udp.local_addr()?.port() }));
-		let stream = proto.reply_success(reply).await?;
-		Ok((stream, udp))
-	});
+	let task = tokio::spawn(async move { accept_association(&listener, port_zero).await });
 	Ok((opts(addr), task))
+}
+
+async fn accept_association(listener: &TcpListener, port_zero: bool) -> eyre::Result<(TcpStream, UdpSocket)> {
+	let (stream, _) = listener.accept().await?;
+	let proto = Socks5ServerProtocol::accept_no_auth(stream).await?;
+	let (proto, command, _) = proto.read_command().await?;
+	assert_eq!(command, Socks5Command::UDPAssociate);
+	let udp = UdpSocket::bind("127.0.0.1:0").await?;
+	let reply = SocketAddr::from(([0, 0, 0, 0], if port_zero { 0 } else { udp.local_addr()?.port() }));
+	Ok((proto.reply_success(reply).await?, udp))
+}
+
+#[tokio::test]
+async fn relays_udp_replies_after_control_connection_is_replaced() -> eyre::Result<()> {
+	let listener = TcpListener::bind("127.0.0.1:0").await?;
+	let options = opts(listener.local_addr()?);
+	let udp = SocksUdpOptions {
+		reconnect: true,
+		initial_backoff: Duration::from_millis(1),
+		..Default::default()
+	};
+	let (tx, mut replies) = mpsc::channel(1);
+	let (requests, rx) = mpsc::channel(1);
+	let token = CancellationToken::new();
+	let client = run(&options, &udp, &token, UdpStream { tx, rx });
+	let server = async {
+		let target = SocketAddr::from(([127, 0, 0, 1], 9));
+		for payload in [b"first".as_slice(), b"second"] {
+			let (_control, relay) = accept_association(&listener, false).await?;
+			let mut buffer = [0; 64];
+			// The server may have replied before the client finished
+			// negotiating. UDP sent in that window can legitimately
+			// be discarded on reconnect.
+			let mut tick = tokio::time::interval(Duration::from_millis(10));
+			let mut sent = false;
+			let (size, peer) = loop {
+				tokio::select! {
+					result = relay.recv_from(&mut buffer) => break result?,
+					_ = tick.tick(), if !sent || payload == b"second" => {
+						requests.send(UdpPacket {
+							source: None,
+							target: target.into(),
+							payload: Bytes::copy_from_slice(payload),
+						}).await?;
+						sent = true;
+					}
+				}
+			};
+			let (frag, dest, data) = fast_socks5::parse_udp_request(&buffer[..size]).await?;
+			assert_eq!((frag, convert_addr(&dest), data), (0, target.into(), payload));
+			relay.send_to(&buffer[..size], peer).await?;
+			let reply = replies.recv().await.ok_or_else(|| eyre::eyre!("missing reply"))?;
+			assert_eq!(reply.payload.as_ref(), payload);
+		}
+		token.cancel();
+		eyre::Ok(())
+	};
+	tokio::time::timeout(LIMIT, async { tokio::try_join!(client, server) }).await??;
+	Ok(())
 }
 
 #[tokio::test]
@@ -183,6 +233,49 @@ async fn setup_is_bounded_and_cancellable() -> eyre::Result<()> {
 	let udp = SocksUdpOptions::default();
 	let (result, ()) = tokio::join!(run(&options, &udp, &token, UdpStream { tx, rx }), cancellation);
 	result?;
+	Ok(())
+}
+
+#[tokio::test]
+async fn closing_input_ends_reconnect_while_negotiation_is_pending() -> eyre::Result<()> {
+	let listener = TcpListener::bind("127.0.0.1:0").await?;
+	let options = opts(listener.local_addr()?);
+	let udp = SocksUdpOptions {
+		reconnect: true,
+		initial_backoff: Duration::from_millis(1),
+		..Default::default()
+	};
+	let (tx, _replies) = mpsc::channel(1);
+	let (requests, rx) = mpsc::channel(1);
+	let token = CancellationToken::new();
+	let (stopped, stopped_rx) = tokio::sync::oneshot::channel();
+	let client = async {
+		run(&options, &udp, &token, UdpStream { tx, rx }).await?;
+		let _ = stopped.send(());
+		eyre::Ok(())
+	};
+	let server = async {
+		let (control, relay) = accept_association(&listener, false).await?;
+		drop(control);
+		let (stream, _) = listener.accept().await?;
+		// Hold the second negotiation open while a disconnected packet is
+		// drained.
+		let proto = Socks5ServerProtocol::accept_no_auth(stream).await?;
+		let (proto_after_command, ..) = proto.read_command().await?;
+		requests
+			.send(UdpPacket {
+				source: None,
+				target: relay.local_addr()?.into(),
+				payload: Bytes::from_static(b"while reconnecting"),
+			})
+			.await?;
+		drop(requests.reserve().await?);
+		drop(requests);
+		stopped_rx.await?;
+		drop(proto_after_command);
+		eyre::Ok(())
+	};
+	tokio::time::timeout(LIMIT, async { tokio::try_join!(client, server) }).await??;
 	Ok(())
 }
 

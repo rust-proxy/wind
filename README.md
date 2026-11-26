@@ -2,6 +2,8 @@
 
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/rust-proxy/wind?utm_source=badge)
 
+The [runtime state machine index](STATE-MACHINES.md) lists the transitions each component owns and links to its implementation.
+
 ## QUIC backends
 
 Both `wind-quic` and `wind-tuic` enable the `quiche` feature by default.

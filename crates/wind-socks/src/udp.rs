@@ -3,7 +3,7 @@ use std::{
 	sync::Arc,
 };
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use fast_socks5::{new_udp_header, util::target_addr::TargetAddr as SocksTargetAddr};
 use tokio::net::UdpSocket;
 use tokio_util::bytes::Bytes;
@@ -123,22 +123,19 @@ pub async fn serve_udp_with_client_limit(
 			"invalid SOCKS UDP packet limit",
 		));
 	}
-	let socket = Arc::new(UdpSocket::from_std(socket)?);
+	let socket = UdpSocket::from_std(socket)?;
 	let UdpStream { tx, mut rx } = stream;
 
-	// Expected client (IP+port). Sentinel port==0 means "not yet observed".
-	let source_addr = Arc::new(ArcSwap::new(Arc::new(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))));
-	let expected_ip = Arc::new(ArcSwap::new(Arc::new(expected_client_ip)));
-
-	let socket_rx = socket.clone();
-	let source_addr_rx = source_addr.clone();
-	let expected_ip_rx = expected_ip.clone();
+	// The receive task pins the IP on first observation. The reply task only
+	// gets an endpoint after a valid, unfragmented packet from that IP.
+	let reply_peer = ArcSwapOption::<SocketAddr>::empty();
+	let mut expected_ip = expected_client_ip;
 
 	let mut rx_buf = vec![0u8; 65536];
 
-	let rx_task = async move {
+	let rx_task = async {
 		loop {
-			match socket_rx.recv_from(&mut rx_buf).await {
+			match socket.recv_from(&mut rx_buf).await {
 				Ok((len, addr)) => {
 					// Enforce RFC 1928 §6: drop datagrams whose source does not
 					// match the expected client. The expected client is either
@@ -150,37 +147,19 @@ pub async fn serve_udp_with_client_limit(
 					// IPv4 client's source IP arrives as `::ffff:V4`. Normalise
 					// both sides to IPv4 before comparing so the check does not
 					// fail spuriously on V4-mapped V6 addresses.
-					let current = **source_addr_rx.load();
 					let observed_ip = unmap_v4_mapped(addr.ip());
-					match **expected_ip_rx.load() {
-						Some(ip) => {
-							let expected = unmap_v4_mapped(ip);
-							if observed_ip != expected {
-								warn!(
-									target: "udp",
-									"Dropping UDP datagram from unexpected source {} (expected client IP {})",
-									addr, ip
-								);
-								continue;
-							}
-						}
-						None => {
-							if current.port() == 0 {
-								// First packet — latch in this client.
-								expected_ip_rx.store(Arc::new(Some(observed_ip)));
-							} else if observed_ip != unmap_v4_mapped(current.ip()) {
-								warn!(
-									target: "udp",
-									"Dropping UDP datagram from unexpected source {} (latched client IP {})",
-									addr, current.ip()
-								);
-								continue;
-							}
-						}
+					let ip = *expected_ip.get_or_insert(observed_ip);
+					if observed_ip != unmap_v4_mapped(ip) {
+						warn!(
+							target: "udp",
+							"Dropping UDP datagram from unexpected source {} (expected client IP {})",
+							addr, ip
+						);
+						continue;
 					}
 					let packet_data = &rx_buf[..len];
 
-					// Only commit the observed peer to `source_addr` AFTER the
+					// Only commit the observed peer to the reply path AFTER the
 					// frame parses cleanly. Storing first meant a malformed
 					// datagram from an authorized client (or an attacker that
 					// somehow got past the IP check) could displace the
@@ -205,7 +184,7 @@ pub async fn serve_udp_with_client_limit(
 								);
 								continue;
 							}
-							source_addr_rx.store(Arc::new(addr));
+							reply_peer.store((addr.port() != 0).then(|| Arc::new(addr)));
 							let packet = UdpPacket {
 								source: None,
 								target: convert_target_addr(&target_addr),
@@ -228,12 +207,11 @@ pub async fn serve_udp_with_client_limit(
 		}
 	};
 
-	let tx_task = async move {
+	let tx_task = async {
 		while let Some(packet) = rx.recv().await {
-			let current_client = **source_addr.load();
-			if current_client.port() == 0 {
-				continue; // No client yet
-			}
+			let Some(current_client) = reply_peer.load().as_deref().copied() else {
+				continue;
+			};
 
 			// RFC 1928 §7: the reply's ATYP/DST.ADDR/DST.PORT MUST identify the
 			// REMOTE host that sent the data, not the client. Prefer the

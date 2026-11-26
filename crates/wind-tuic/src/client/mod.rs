@@ -2,8 +2,7 @@
 //!
 //! [`ClientTaskExt::handle_incoming`] spawns the accept loops (datagram / bi /
 //! uni) for an established [`QuicConnection`] and returns receive channels the
-//! outbound poll loop drains. Written once against the trait; the concrete
-//! `TuicOutbound` (currently quinn-only) drives it.
+//! outbound poll loop drains on either backend.
 
 use std::{sync::Arc, time::Duration};
 
@@ -15,6 +14,11 @@ use wind_core::AppContext;
 use wind_quic::QuicConnection;
 
 use crate::Error;
+
+#[cfg(any(feature = "quinn", feature = "quiche"))]
+pub(crate) mod association;
+#[cfg(any(feature = "quinn", feature = "quiche"))]
+pub(crate) mod session;
 
 /// Size of the single-producer single-consumer buffer for QUIC streams. Larger
 /// buffers reduce backpressure stalls on bursty workloads at the cost of a

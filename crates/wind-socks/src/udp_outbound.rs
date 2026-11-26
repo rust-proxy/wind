@@ -128,40 +128,49 @@ pub(crate) async fn run(
 	// all reconnect state. No association tasks outlive the owning stream.
 	let replies = stream.tx.clone();
 	let transfer = async {
-		let mut association = associate(opts, udp).await?;
+		enum AssociationState {
+			Relaying(Association),
+			Reconnecting { backoff: Duration },
+		}
+		let mut state = AssociationState::Relaying(associate(opts, udp).await?);
 		loop {
-			match relay(&mut association, &mut stream, udp.buffer_size).await {
-				Ok(()) => return Ok(()),
-				Err(error) if !udp.reconnect => return Err(error),
-				Err(error) => tracing::warn!(%error, "SOCKS5 UDP association lost"),
-			}
-			drop(association);
-			let mut backoff = udp.initial_backoff.min(udp.max_backoff);
-			loop {
-				let attempt = async move {
-					tokio::time::sleep(backoff).await;
-					associate(opts, udp).await
-				};
-				tokio::pin!(attempt);
-				let result = loop {
-					tokio::select! {
-						result = &mut attempt => break result,
-						packet = stream.rx.recv() => {
-							// UDP packets during a broken association are discarded;
-							// closing the input also ends an otherwise endless retry.
-							if packet.is_none() { return Ok(()); }
-						},
+			state = match state {
+				AssociationState::Relaying(mut association) => {
+					match relay(&mut association, &mut stream, udp.buffer_size).await {
+						Ok(()) => return Ok(()),
+						Err(error) if !udp.reconnect => return Err(error),
+						Err(error) => tracing::warn!(%error, "SOCKS5 UDP association lost"),
 					}
-				};
-				match result {
-					Ok(next) => {
-						association = next;
-						break;
+					AssociationState::Reconnecting {
+						backoff: udp.initial_backoff.min(udp.max_backoff),
 					}
-					Err(error) => tracing::warn!(%error, "SOCKS5 UDP reconnect failed"),
 				}
-				backoff = backoff.saturating_mul(2).min(udp.max_backoff);
-			}
+				AssociationState::Reconnecting { backoff } => {
+					let attempt = async {
+						tokio::time::sleep(backoff).await;
+						associate(opts, udp).await
+					};
+					tokio::pin!(attempt);
+					let result = loop {
+						tokio::select! {
+							result = &mut attempt => break result,
+							packet = stream.rx.recv() => {
+								// Discard traffic while disconnected. Closing the input ends retries.
+								if packet.is_none() { return Ok(()); }
+							},
+						}
+					};
+					match result {
+						Ok(next) => AssociationState::Relaying(next),
+						Err(error) => {
+							tracing::warn!(%error, "SOCKS5 UDP reconnect failed");
+							AssociationState::Reconnecting {
+								backoff: backoff.saturating_mul(2).min(udp.max_backoff),
+							}
+						}
+					}
+				}
+			};
 		}
 	};
 	tokio::select! {

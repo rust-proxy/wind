@@ -17,7 +17,7 @@ use std::{
 use bytes::{Buf as _, Bytes};
 use http::header::HeaderName;
 use reqwest::{Client, Url};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{mpsc, watch};
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -26,7 +26,7 @@ use wind_quic::{
 	h3_adapter::{self, H3Conn},
 };
 
-use super::MasqueradeConfig;
+use super::{H3Phase, MasqueradeConfig};
 
 /// Cap on a single proxied request body (bounds per-request memory).
 const MAX_REQUEST_BODY_SIZE: usize = 16 * 1024 * 1024;
@@ -93,29 +93,31 @@ fn test_rejects_user_agent() -> bool {
 }
 
 /// Run the HTTP/3 masquerade server over `conn`. The per-stream router in
-/// [`super`] feeds h3 streams to `recv_rx` / `bidi_rx` and fires `go` on the
-/// first one. We wait for `go` before building the h3 server (whose setup opens
-/// our control stream + SETTINGS), so a pure-TUIC connection — which never
-/// fires `go` — never has h3 streams opened on it. Returns when the peer
-/// disconnects or `cancel` fires.
-pub async fn run_masquerade<C: QuicConnection>(
+/// [`super`] feeds h3 streams to `recv_rx` / `bidi_rx` and activates the router
+/// on the first one. We wait for activation before building the h3 server
+/// (whose setup opens our control stream + SETTINGS), so a pure-TUIC connection
+/// — which never activates the router — never has h3 streams opened on it.
+/// Returns when the peer disconnects or `cancel` fires.
+pub(super) async fn run_masquerade<C: QuicConnection>(
 	conn: C,
 	recv_rx: mpsc::UnboundedReceiver<PrefixedRecv<C::RecvStream>>,
 	bidi_rx: mpsc::UnboundedReceiver<(C::SendStream, PrefixedRecv<C::RecvStream>)>,
-	go: Arc<Notify>,
+	mut activation: watch::Receiver<H3Phase>,
 	cfg: MasqueradeConfig,
 	cancel: CancellationToken,
 ) -> eyre::Result<()> {
 	tokio::select! {
 		_ = cancel.cancelled() => return Ok(()),
 		// Bind the parked task to the connection's lifetime. A pure-TUIC peer
-		// never fires `go`, and the per-connection teardown only cancels the
+		// never activates the router, and the per-connection teardown only cancels the
 		// acceptor/UDP child tokens — not this `cancel` — so on a normal peer
 		// disconnect this task (holding a clone of the connection handle) would
 		// otherwise stay parked until global shutdown, leaking one task and one
 		// connection handle per closed connection when masquerade is enabled.
 		_ = conn.closed() => return Ok(()),
-		_ = go.notified() => {}
+		result = activation.wait_for(|phase| *phase == H3Phase::Active) => {
+			if result.is_err() { return Ok(()); }
+		}
 	}
 
 	let backend = Url::parse(&cfg.upstream).map_err(|e| eyre::eyre!("invalid masquerade upstream {:?}: {e}", cfg.upstream))?;
@@ -347,8 +349,7 @@ mod tests {
 	async fn a_client_build_failure_fails_the_task_rather_than_stranding_the_connection() {
 		let (_uni_tx, uni_rx) = mpsc::unbounded_channel();
 		let (_bidi_tx, bidi_rx) = mpsc::unbounded_channel();
-		let go = Arc::new(Notify::new());
-		go.notify_one();
+		let (_phase, activation) = watch::channel(H3Phase::Active);
 		let cancel = CancellationToken::new();
 
 		let result = tokio::time::timeout(
@@ -357,7 +358,7 @@ mod tests {
 				DummyConn::default(),
 				uni_rx,
 				bidi_rx,
-				go,
+				activation,
 				MasqueradeConfig {
 					upstream: "https://example.com".to_owned(),
 				},

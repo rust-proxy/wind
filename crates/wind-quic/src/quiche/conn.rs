@@ -178,19 +178,7 @@ impl QuicConnection for QuicheConnection {
 	}
 
 	async fn closed(&self) {
-		// Standard `Notify` pattern: register interest, re-check the flag, then
-		// await — so a close racing between the check and the await is not
-		// lost.
-		loop {
-			if self.0.shared.closed.load(Ordering::SeqCst) {
-				return;
-			}
-			let notified = self.0.shared.closed_notify.notified();
-			if self.0.shared.closed.load(Ordering::SeqCst) {
-				return;
-			}
-			notified.await;
-		}
+		self.0.shared.closed.cancelled().await;
 	}
 
 	fn peer_addr(&self) -> Option<SocketAddr> {
