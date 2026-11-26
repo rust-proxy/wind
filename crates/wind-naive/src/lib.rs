@@ -713,14 +713,19 @@ fn load_cronet(path: Option<String>) -> eyre::Result<()> {
 	if cronet_rs::sys::STATIC_LINKED {
 		return Ok(());
 	}
-	use cronet_rs::sys::load_library;
+	use cronet_rs::sys::{load_library, loaded_library_path};
+
+	if loaded_library_path().is_some() {
+		warn_on_cronet_conflict(path.as_deref());
+		return Ok(());
+	}
 
 	// Candidate order: an explicit `cronet_lib_path` wins, then the prebuilt
 	// fetched by `cronet-sys`'s build script under `--features download`, then
 	// the implicit system search paths.
 	let mut paths: Vec<String> = Vec::new();
-	if let Some(p) = path {
-		paths.push(p);
+	if let Some(p) = &path {
+		paths.push(p.clone());
 	}
 	#[cfg(feature = "download")]
 	if let Some(p) = cronet_rs::sys::downloaded_library_path() {
@@ -731,17 +736,18 @@ fn load_cronet(path: Option<String>) -> eyre::Result<()> {
 	for lib_path in &paths {
 		match unsafe { load_library(lib_path) } {
 			Ok(()) => {
-				info!(target: "naive", "Loaded libcronet from {lib_path}");
+				if let Some(active) = loaded_library_path() {
+					info!(target: "naive", "Loaded libcronet from {}", active.display());
+				}
 				return Ok(());
 			}
-			Err(e) => {
-				let msg = format!("{e}");
-				// "already loaded" means success.
-				if msg.contains("already loaded") {
-					return Ok(());
-				}
-				tracing::debug!(target: "naive", "libcronet not found at {lib_path}: {msg}");
+			Err(_) if loaded_library_path().is_some() => {
+				// Another caller won initialization while we were trying this
+				// candidate.
+				warn_on_cronet_conflict(path.as_deref());
+				return Ok(());
 			}
+			Err(error) => tracing::debug!(target: "naive", "libcronet not found at {lib_path}: {error}"),
 		}
 	}
 
@@ -759,6 +765,25 @@ fn load_cronet(path: Option<String>) -> eyre::Result<()> {
 	msg.push_str(" Rebuild with `--features download` to fetch and SHA-256-verify a prebuilt libcronet.");
 	Err(eyre::eyre!("{msg}"))
 }
+
+fn warn_on_cronet_conflict(requested: Option<&str>) {
+	static WARNED: std::sync::Once = std::sync::Once::new();
+	if let Some(requested) = requested
+		&& !WARNED.is_completed()
+		&& let Some(active) = cronet_rs::sys::conflicting_library(requested.as_ref())
+	{
+		WARNED.call_once(|| {
+			tracing::warn!(
+				target: "naive",
+				"Requested Cronet library {requested:?}, but {} is already active. Restart the process to use a different Cronet library.",
+				active.display()
+			);
+		});
+	}
+}
+
+#[cfg(test)]
+mod library_tests;
 
 #[cfg(test)]
 mod tests {

@@ -19,6 +19,10 @@ fixes. The `forks/quiche` submodule is the reference and editing checkout.
 
 ## Naive / cronet
 
+The first successful dynamic load selects the Cronet library for the process. An explicit
+request for another library logs the active path once, including after a configuration
+reload. Restart the process to switch libraries.
+
 The `naive` outbound (`crates/wind-naive`) uses Chromium Cronet through the
 [`cronet-rs`](https://github.com/rust-proxy/cronet-rs) bindings, which need a
 `libcronet` shared library at runtime. To avoid a manual install, build with the

@@ -999,7 +999,7 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 [[package]]
 name = "cronet-rs"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?rev=b0d830890ca50adb98c67cb64eca4e2161f8cbb3#b0d830890ca50adb98c67cb64eca4e2161f8cbb3"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=50b65b5a89a383f774a017799ea7292b95cf8da3#50b65b5a89a383f774a017799ea7292b95cf8da3"
 dependencies = [
  "cronet-sys",
  "log",
@@ -1010,11 +1010,14 @@ dependencies = [
 [[package]]
 name = "cronet-sys"
 version = "0.1.0"
-source = "git+https://github.com/rust-proxy/cronet-rs?rev=b0d830890ca50adb98c67cb64eca4e2161f8cbb3#b0d830890ca50adb98c67cb64eca4e2161f8cbb3"
+source = "git+https://github.com/rust-proxy/cronet-rs?rev=50b65b5a89a383f774a017799ea7292b95cf8da3#50b65b5a89a383f774a017799ea7292b95cf8da3"
 dependencies = [
+ "libc",
  "libloading",
+ "same-file",
  "sha2",
  "ureq 2.12.1",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6090,10 +6093,12 @@ dependencies = [
  "serde_json",
  "socket2 0.6.5",
  "tar",
+ "tempfile",
  "time",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "url",
  "wind-core",
  "windows-sys 0.61.2",
