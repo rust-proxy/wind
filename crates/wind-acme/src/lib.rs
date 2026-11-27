@@ -5,13 +5,13 @@
 //! - `resolver` (default): a [`rustls_acme`]-backed background renewal state
 //!   machine returning a `rustls` cert resolver — see [`resolver`]. Used by the
 //!   rustls-based (quinn) backend.
-//! - `http01`: one-shot HTTP-01 provisioning that writes the PEM chain/key to
-//!   disk ([`http01`]) plus self-signed generation ([`selfsigned`]). Used by
-//!   backends that load TLS material from files (quiche/tokio-quiche).
+//! - `http01`: file-backed HTTP-01 provisioning and automatic renewal
+//!   ([`http01`]), plus self-signed generation ([`selfsigned`]). Consumers can
+//!   subscribe to matching PEM certificate chains and private keys.
 //!
 //! [`is_valid_domain`] is always available.
 
-/// One-shot HTTP-01 provisioning that writes PEM cert/key files to disk.
+/// File-backed HTTP-01 certificate provisioning and automatic renewal.
 #[cfg(feature = "http01")]
 pub mod http01;
 /// `rustls-acme`-backed resolver flow with background renewal.

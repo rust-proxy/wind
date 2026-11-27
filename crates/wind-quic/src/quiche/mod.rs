@@ -32,7 +32,7 @@ use tracing::warn;
 use crate::{
 	config::{CertSource, ClientTlsConfig, ServerTlsConfig, TransportConfig},
 	error::QuicError,
-	quiche::{driver::BridgeDriver, tls::CertReloadHook},
+	quiche::driver::BridgeDriver,
 };
 
 /// Map the shared congestion-control selector onto a quiche cc-algorithm name.
@@ -220,9 +220,7 @@ pub async fn bind_server_with_socket(
 		.local_addr()
 		.map_err(|e| QuicError::Endpoint(format!("local_addr: {e}")))?;
 
-	let hooks = Hooks {
-		connection_hook: cert_store.map(|s| Arc::new(CertReloadHook::new(s.clone())) as _),
-	};
+	let hooks = cert_store.map(CertStore::server_hooks).unwrap_or_default();
 
 	let params = ConnectionParams::new_server(
 		quic_settings(transport),

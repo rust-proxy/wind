@@ -29,7 +29,11 @@ use boring::{
 	x509::X509,
 };
 use eyre::{WrapErr as _, eyre};
-use tokio_quiche::{quic::ConnectionHook, settings::TlsCertificatePaths};
+use foreign_types_shared::ForeignTypeRef as _;
+use tokio_quiche::{
+	quic::ConnectionHook,
+	settings::{Hooks, TlsCertificatePaths},
+};
 
 /// A parsed leaf certificate, its intermediate chain, and the private key.
 struct CurrentCert {
@@ -45,6 +49,10 @@ fn parse(cert_pem: &[u8], key_pem: &[u8]) -> eyre::Result<CurrentCert> {
 	}
 	let leaf = stack.remove(0);
 	let key = PKey::private_key_from_pem(key_pem).wrap_err("parsing private key PEM")?;
+	eyre::ensure!(
+		leaf.public_key()?.public_eq(&key),
+		"certificate does not match its private key"
+	);
 	Ok(CurrentCert { leaf, chain: stack, key })
 }
 
@@ -86,9 +94,27 @@ impl CertStore {
 		Ok(())
 	}
 
+	/// Select the current identity for each new BoringSSL handshake.
+	pub fn configure_certificate_selection(&self, builder: &mut SslContextBuilder) {
+		let store = self.clone();
+		builder.set_select_certificate_callback(move |mut hello| {
+			store.install(hello.ssl_mut()).map_err(|_| SelectCertError::ERROR)
+		});
+	}
+
+	/// Use this store for new connections accepted by a tokio-quiche listener.
+	pub fn server_hooks(&self) -> Hooks {
+		Hooks {
+			connection_hook: Some(Arc::new(self.clone())),
+		}
+	}
+
 	/// Install the current certificate onto a per-connection `SslRef`.
 	fn install(&self, ssl: &mut SslRef) -> Result<(), ErrorStack> {
 		let cur = self.inner.load();
+		// SAFETY: ssl is exclusively borrowed for this handshake. Remove the
+		// chain inherited from the context before installing the renewed chain.
+		unsafe { boring_sys::SSL_clear_chain_certs(ssl.as_ptr()) };
 		ssl.set_certificate(&cur.leaf)?;
 		ssl.set_private_key(&cur.key)?;
 		for cert in &cur.chain {
@@ -98,26 +124,13 @@ impl CertStore {
 	}
 }
 
-/// A [`ConnectionHook`] that serves the current certificate from a
-/// [`CertStore`] via a per-handshake `select_certificate` callback, enabling
-/// live cert rotation on the quiche backend.
-pub(crate) struct CertReloadHook {
-	store: CertStore,
-}
-
-impl CertReloadHook {
-	pub(crate) fn new(store: CertStore) -> Self {
-		Self { store }
-	}
-}
-
-impl ConnectionHook for CertReloadHook {
+impl ConnectionHook for CertStore {
 	fn requires_custom_ssl_context(&self) -> bool {
-		self.store.ech_keys.is_some()
+		true
 	}
 
 	fn configure_ssl_context(&self, builder: &mut SslContextBuilder) -> tokio_quiche::QuicResult<()> {
-		if let Some(keys) = &self.store.ech_keys {
+		if let Some(keys) = &self.ech_keys {
 			builder.set_ech_keys(keys)?;
 		}
 		Ok(())
@@ -132,7 +145,7 @@ impl ConnectionHook for CertReloadHook {
 		// Seed the context with an initial certificate so it is valid even
 		// before the per-handshake callback runs.
 		{
-			let cur = self.store.inner.load();
+			let cur = self.inner.load();
 			builder.set_certificate(&cur.leaf).ok()?;
 			builder.set_private_key(&cur.key).ok()?;
 			for cert in &cur.chain {
@@ -142,10 +155,7 @@ impl ConnectionHook for CertReloadHook {
 
 		// Per-handshake: install the *current* certificate so renewals are
 		// picked up without rebuilding the context.
-		let store = self.store.clone();
-		builder.set_select_certificate_callback(move |mut hello| {
-			store.install(hello.ssl_mut()).map_err(|_| SelectCertError::ERROR)
-		});
+		self.configure_certificate_selection(&mut builder);
 
 		Some(builder)
 	}

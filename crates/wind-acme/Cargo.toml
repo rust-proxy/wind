@@ -13,11 +13,9 @@ aws-lc-rs = ["rustls/aws-lc-rs", "rustls-acme?/aws-lc-rs"]
 # `rustls-acme`-backed resolver flow with background renewal (returns a rustls
 # cert resolver). Used by the quinn backend.
 resolver = ["dep:rustls-acme", "dep:tokio-stream"]
-# One-shot HTTP-01 certificate provisioning + self-signed generation that writes
-# the PEM chain/key to disk (for backends that load TLS material from files, e.g.
-# quiche/tokio-quiche). Uses `instant-acme` rather than the `rustls-acme` state
-# machine that backs the resolver-based flow.
-http01 = ["dep:instant-acme", "dep:x509-parser", "dep:rcgen", "dep:time", "dep:serde", "dep:serde_json"]
+# File-backed HTTP-01 provisioning and renewal with instant-acme, plus
+# self-signed generation for file-based TLS backends.
+http01 = ["dep:instant-acme", "dep:x509-parser", "dep:rcgen", "dep:time", "dep:serde", "dep:serde_json", "dep:tempfile"]
 
 [dependencies]
 # TLS / ACME
@@ -36,7 +34,7 @@ async-trait = "0.1"
 eyre = "0.6"
 tracing = "0.1"
 
-# One-shot HTTP-01 provisioning + self-signed generation (feature = "http01")
+# File-backed HTTP-01 and self-signed generation (feature = "http01")
 instant-acme = { version = "0.8", features = ["rcgen"], optional = true }
 x509-parser = { version = "0.18.1", optional = true }
 rcgen = { version = "0.14", features = ["aws_lc_rs", "pem"], optional = true }
@@ -44,3 +42,7 @@ time = { version = "0.3", optional = true }
 # Persist/reuse the ACME account credentials next to the certificate key
 serde = { version = "1", default-features = false, features = ["derive", "std"], optional = true }
 serde_json = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
